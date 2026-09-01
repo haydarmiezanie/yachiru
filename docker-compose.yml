@@ -1,0 +1,25 @@
+services:
+  # ---------------------------------------------------
+  # Yachiru ClickHouse Optimization & Health Advisor
+  # ---------------------------------------------------
+  yachiru:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: yachiru-advisor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - GEMINI_API_KEY=MASK
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - yachiru-data:/app/data
+
+volumes:
+  yachiru-data:
+    driver: local
+

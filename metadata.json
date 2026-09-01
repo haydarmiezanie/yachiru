@@ -1,0 +1,6 @@
+{
+  "name": "Yachiru - ClickHouse Optimization Scanner",
+  "description": "Comprehensive ClickHouse database health auditor and optimizer analyzing table engines, merge pressure, query logs, skip indexes, and data types.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
