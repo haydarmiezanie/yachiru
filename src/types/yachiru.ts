@@ -72,6 +72,7 @@ export interface ExecutiveSummary {
   strategicFixes: string[];
   aiGenerated: boolean;
   modelUsed?: string;
+  provider?: 'gemini' | 'openai';
   aiNote?: string;
 }
 
@@ -117,6 +118,7 @@ export interface ScanReport {
   migrationScript: string;
   scanDurationMs: number;
   aiStatus: 'success' | 'fallback' | 'disabled';
+  aiProvider?: 'gemini' | 'openai';
   aiErrorMessage?: string;
 }
 

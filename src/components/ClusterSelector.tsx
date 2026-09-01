@@ -7,8 +7,12 @@ interface ClusterSelectorProps {
   setTarget: React.Dispatch<React.SetStateAction<ScanTarget>>;
   aiEnabled: boolean;
   setAiEnabled: (val: boolean) => void;
+  aiProvider: 'gemini' | 'openai';
+  setAiProvider: (provider: 'gemini' | 'openai') => void;
   aiModel: string;
   setAiModel: (model: string) => void;
+  aiApiKey?: string;
+  setAiApiKey?: (key: string) => void;
   onScan: () => void;
   scanning: boolean;
 }
@@ -18,13 +22,27 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
   setTarget,
   aiEnabled,
   setAiEnabled,
+  aiProvider,
+  setAiProvider,
   aiModel,
   setAiModel,
+  aiApiKey = '',
+  setAiApiKey,
   onScan,
   scanning,
 }) => {
   const [testingConn, setTestingConn] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [showKeyInput, setShowKeyInput] = useState(false);
+
+  const handleProviderChange = (newProvider: 'gemini' | 'openai') => {
+    setAiProvider(newProvider);
+    if (newProvider === 'openai') {
+      setAiModel('gpt-4o');
+    } else {
+      setAiModel('gemini-3.1-pro-preview');
+    }
+  };
 
   const handleTestConnection = async () => {
     setTestingConn(true);
@@ -185,22 +203,66 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
                 onChange={(e) => setAiEnabled(e.target.checked)}
                 className="rounded border-slate-700 text-amber-500 focus:ring-amber-500/20"
               />
-              <span className="text-slate-300 font-medium">Gemini AI Synthesis Layer</span>
+              <span className="text-slate-300 font-medium">AI Synthesis Layer</span>
             </label>
           </div>
 
-          {/* AI Model Selection */}
+          {/* AI Provider & Model Selection */}
           {aiEnabled && (
-            <div className="flex items-center gap-1.5">
-              <Cpu className="h-3.5 w-3.5 text-slate-400" />
-              <select
-                value={aiModel}
-                onChange={(e) => setAiModel(e.target.value)}
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-slate-200 focus:border-amber-500 focus:outline-none font-mono text-[11px]"
-              >
-                <option value="gemini-3.7-flash">gemini-3.7-flash (Deep Synthesis)</option>
-                <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Fast / Low-Latency)</option>
-              </select>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Provider Selection */}
+              <div className="flex items-center gap-1">
+                <span className="text-slate-400">Provider:</span>
+                <select
+                  value={aiProvider}
+                  onChange={(e) => handleProviderChange(e.target.value as 'gemini' | 'openai')}
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-slate-200 focus:border-amber-500 focus:outline-none font-medium text-[11px]"
+                >
+                  <option value="gemini">Google Gemini</option>
+                  <option value="openai">OpenAI (ChatGPT)</option>
+                </select>
+              </div>
+
+              {/* Model Selection */}
+              <div className="flex items-center gap-1.5">
+                <Cpu className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={aiModel}
+                  onChange={(e) => setAiModel(e.target.value)}
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-slate-200 focus:border-amber-500 focus:outline-none font-mono text-[11px]"
+                >
+                  {aiProvider === 'gemini' ? (
+                    <>
+                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Deep Architecture & Reasoning)</option>
+                      <option value="gemini-3.7-flash">gemini-3.7-flash (Balanced Synthesis)</option>
+                      <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Fast / Low-Latency)</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="gpt-4o">gpt-4o (Flagship Omni / SQL & Architecture)</option>
+                      <option value="gpt-4o-mini">gpt-4o-mini (Fast & Cost-Efficient)</option>
+                      <option value="o3-mini">o3-mini (Advanced Reasoning)</option>
+                      <option value="gpt-4-turbo">gpt-4-turbo (High Context)</option>
+                    </>
+                  )}
+                </select>
+              </div>
+
+              {/* Optional Custom API Key Toggle */}
+              {setAiApiKey && (
+                <button
+                  type="button"
+                  onClick={() => setShowKeyInput(!showKeyInput)}
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors ${
+                    aiApiKey
+                      ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-300'
+                      : 'border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700'
+                  }`}
+                  title="Override environment variable with a custom API key for this scan"
+                >
+                  {aiApiKey ? 'Custom Key Set ✓' : '+ Custom Key'}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -208,12 +270,37 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
         <button
           onClick={onScan}
           disabled={scanning}
-          className="flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 active:scale-95 transition-all shadow-md shadow-amber-500/20 cursor-pointer"
+          className="flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 active:scale-95 transition-all shadow-md shadow-amber-500/20 cursor-pointer shrink-0"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${scanning ? 'animate-spin' : ''}`} />
           <span>{scanning ? 'Auditing 9 Dimensions...' : 'Execute Database Scan'}</span>
         </button>
       </div>
+
+      {/* Expandable Custom API Key Input */}
+      {aiEnabled && showKeyInput && setAiApiKey && (
+        <div className="mt-3 pt-3 border-t border-slate-800/60 flex items-center gap-2 text-xs">
+          <span className="text-slate-400 whitespace-nowrap">
+            {aiProvider === 'openai' ? 'OpenAI API Key:' : 'Gemini API Key:'}
+          </span>
+          <input
+            type="password"
+            value={aiApiKey}
+            onChange={(e) => setAiApiKey(e.target.value.trim())}
+            placeholder={aiProvider === 'openai' ? 'sk-proj-...' : 'AIzaSy... (leave blank to use server environment)'}
+            className="flex-1 max-w-md rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200 focus:border-amber-500 focus:outline-none font-mono"
+          />
+          {aiApiKey && (
+            <button
+              type="button"
+              onClick={() => setAiApiKey('')}
+              className="text-[11px] text-slate-500 hover:text-rose-400"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 };

@@ -24,7 +24,9 @@ export function App() {
     lookbackDays: 7,
   });
   const [aiEnabled, setAiEnabled] = useState(true);
-  const [aiModel, setAiModel] = useState('gemini-3.7-flash');
+  const [aiProvider, setAiProvider] = useState<'gemini' | 'openai'>('gemini');
+  const [aiModel, setAiModel] = useState('gemini-3.1-pro-preview');
+  const [aiApiKey, setAiApiKey] = useState('');
   const [activeTab, setActiveTab] = useState('overview');
   const [selectedDimension, setSelectedDimension] = useState<DimensionId | 'all'>('all');
   const [scanning, setScanning] = useState(false);
@@ -41,7 +43,9 @@ export function App() {
         body: JSON.stringify({
           target: currentTarget,
           aiEnabled,
+          aiProvider,
           aiModel,
+          aiApiKey: aiApiKey ? aiApiKey.trim() : undefined,
         }),
       });
 
@@ -101,8 +105,12 @@ export function App() {
           setTarget={setTarget}
           aiEnabled={aiEnabled}
           setAiEnabled={setAiEnabled}
+          aiProvider={aiProvider}
+          setAiProvider={setAiProvider}
           aiModel={aiModel}
           setAiModel={setAiModel}
+          aiApiKey={aiApiKey}
+          setAiApiKey={setAiApiKey}
           onScan={() => executeScan(target)}
           scanning={scanning}
         />

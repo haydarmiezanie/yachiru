@@ -5,7 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import { DEMO_CLUSTERS } from './server/scanner/demoDatasets.js';
 import { ClickHouseScannerClient } from './server/scanner/clickhouseClient.js';
 import { runDeterministicScan } from './server/scanner/deterministicRules.js';
-import { synthesizeWithGemini } from './server/scanner/geminiSynthesis.js';
+import { synthesizeWithAI, AIProvider } from './server/scanner/aiSynthesis.js';
 import { ScanHistoryStore } from './server/storage/scanHistory.js';
 import { ScanReport, ScanTarget } from './src/types/yachiru.js';
 
@@ -68,18 +68,22 @@ async function startServer() {
       const {
         target,
         aiEnabled = true,
+        aiProvider = 'gemini',
         aiModel = 'gemini-3.7-flash',
+        aiApiKey,
       }: {
         target: ScanTarget;
         aiEnabled?: boolean;
+        aiProvider?: AIProvider;
         aiModel?: string;
+        aiApiKey?: string;
       } = req.body;
 
       if (!target) {
         return res.status(400).json({ error: 'Missing target connection parameters' });
       }
 
-      console.log(`[Yachiru] Starting scan on target: ${target.isDemoCluster ? `Demo (${target.demoClusterId})` : `${target.host}:${target.port}/${target.database}`}`);
+      console.log(`[Yachiru] Starting scan on target: ${target.isDemoCluster ? `Demo (${target.demoClusterId})` : `${target.host}:${target.port}/${target.database}`} [AI: ${aiEnabled ? `${aiProvider} (${aiModel})` : 'Disabled'}]`);
 
       // 1. Fetch Cluster System Tables (Read-Only)
       const client = new ClickHouseScannerClient(target);
@@ -88,12 +92,14 @@ async function startServer() {
       // 2. Run 9-Dimension Deterministic Scanner (Source of Truth)
       const deterministicResult = runDeterministicScan(clusterData);
 
-      // 3. Optional AI Synthesis Layer (Gemini)
-      const synthesis = await synthesizeWithGemini(deterministicResult, {
+      // 3. Optional AI Synthesis Layer (Gemini or OpenAI ChatGPT)
+      const synthesis = await synthesizeWithAI(deterministicResult, {
         aiEnabled,
+        provider: aiProvider,
         modelName: aiModel,
         databaseName: target.database || clusterData.tables[0]?.database || 'default',
         clusterName: clusterData.clusterName,
+        apiKey: aiApiKey,
       });
 
       // 4. Assemble Final Scan Report
@@ -140,6 +146,7 @@ async function startServer() {
         migrationScript: deterministicResult.migrationScript,
         scanDurationMs: durationMs,
         aiStatus: synthesis.aiStatus,
+        aiProvider: synthesis.provider,
         aiErrorMessage: synthesis.error,
       };
 

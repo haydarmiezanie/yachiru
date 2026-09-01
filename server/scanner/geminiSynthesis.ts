@@ -7,6 +7,7 @@ export interface GeminiSynthesisResult {
   enhancedFindings: Finding[];
   aiStatus: 'success' | 'fallback' | 'disabled';
   modelUsed?: string;
+  provider: 'gemini';
   error?: string;
 }
 
@@ -17,9 +18,16 @@ export async function synthesizeWithGemini(
     modelName?: string;
     databaseName?: string;
     clusterName?: string;
+    apiKey?: string;
   }
 ): Promise<GeminiSynthesisResult> {
-  const { aiEnabled = true, modelName = 'gemini-3.7-flash', databaseName = 'analytics_db', clusterName = 'ClickHouse Production' } = options;
+  const {
+    aiEnabled = true,
+    modelName = 'gemini-3.7-flash',
+    databaseName = 'analytics_db',
+    clusterName = 'ClickHouse Production',
+    apiKey: customApiKey,
+  } = options;
 
   // If AI is turned off by user flag
   if (!aiEnabled) {
@@ -27,16 +35,19 @@ export async function synthesizeWithGemini(
       executiveSummary: generateDeterministicExecutiveSummary(scanResult),
       enhancedFindings: scanResult.findings,
       aiStatus: 'disabled',
+      provider: 'gemini',
     };
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey.trim() === '' || apiKey === 'MY_GEMINI_API_KEY') {
+  const apiKey = (customApiKey || process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     console.warn('[Yachiru AI] GEMINI_API_KEY not configured. Using deterministic synthesis fallback.');
     return {
       executiveSummary: generateDeterministicExecutiveSummary(scanResult, 'GEMINI_API_KEY not configured. Running in offline deterministic mode.'),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',
+      provider: 'gemini',
+      error: 'GEMINI_API_KEY environment variable is not configured.',
     };
   }
 
@@ -93,12 +104,14 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
 
     // Model candidates: chosen model first, then fallback models on transient 503/429 errors
     let requestedModel = modelName || 'gemini-3.7-flash';
-    if (requestedModel.includes('2.5-flash-lite')) {
+    if (requestedModel === 'gemini-3.1-pro' || requestedModel === 'gemini-pro' || requestedModel.includes('3.1-pro')) {
+      requestedModel = 'gemini-3.1-pro-preview';
+    } else if (requestedModel.includes('2.5-flash-lite') || requestedModel === 'gemini-flash-lite') {
       requestedModel = 'gemini-3.1-flash-lite';
     }
 
     const candidateModels = Array.from(
-      new Set([requestedModel, 'gemini-3.1-flash-lite', 'gemini-3.7-flash', 'gemini-2.5-flash'])
+      new Set([requestedModel, 'gemini-3.7-flash', 'gemini-3.1-flash-lite'])
     );
 
     let response: any = null;
@@ -235,6 +248,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       strategicFixes: parsed.strategicFixes?.length ? parsed.strategicFixes : generateDeterministicExecutiveSummary(scanResult).strategicFixes,
       aiGenerated: true,
       modelUsed: successfulModel,
+      provider: 'gemini',
     };
 
     return {
@@ -242,6 +256,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       enhancedFindings,
       aiStatus: 'success',
       modelUsed: successfulModel,
+      provider: 'gemini',
     };
   } catch (err: any) {
     const rawMsg = err?.message || String(err);
@@ -261,10 +276,11 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
     return {
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
-        `AI synthesis fallback active (${friendlyError.slice(0, 120)}). Running in deterministic rule-based mode.`
+        `Gemini AI synthesis fallback active (${friendlyError.slice(0, 120)}). Running in deterministic rule-based mode.`
       ),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',
+      provider: 'gemini',
       error: friendlyError,
     };
   }
@@ -312,5 +328,6 @@ function generateDeterministicExecutiveSummary(scanResult: DeterministicScanResu
     strategicFixes,
     aiGenerated: false,
     aiNote,
+    provider: 'gemini',
   };
 }

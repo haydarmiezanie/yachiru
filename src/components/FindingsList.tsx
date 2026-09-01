@@ -231,13 +231,13 @@ export const FindingsList: React.FC<FindingsListProps> = ({
                   <p className="text-slate-300 leading-relaxed">{finding.whyTechnical}</p>
                 </div>
 
-                {/* Gemini AI Deep Reasoning (Shown only when AI successfully synthesized insight) */}
+                {/* AI Deep Reasoning (Shown when AI successfully synthesized insight) */}
                 {finding.aiInsight ? (
                   <div className="rounded-lg border border-purple-500/30 bg-purple-950/20 p-3.5 shadow-sm">
                     <div className="flex items-center justify-between gap-2 mb-1.5">
                       <span className="flex items-center gap-1.5 font-bold text-purple-300">
                         <Sparkles className="h-3.5 w-3.5 text-purple-400" />
-                        Gemini AI Architectural Insight & Context:
+                        AI Architectural Insight & Context:
                       </span>
                       {finding.aiRiskLevel && (
                         <span className="rounded bg-purple-500/20 px-2 py-0.5 text-[10px] font-bold text-purple-200 uppercase">
@@ -269,11 +269,11 @@ export const FindingsList: React.FC<FindingsListProps> = ({
                   <div className="flex items-center justify-between border-b border-purple-500/20 px-3.5 py-1.5 bg-purple-950/30 text-xs">
                     <span className="flex items-center gap-1.5 font-mono text-purple-300 font-semibold">
                       <Sparkles className="h-3 w-3 text-purple-400" />
-                      Gemini AI Recommended SQL Remediation
+                      AI Recommended Custom SQL Remediation
                     </span>
                     <button
                       onClick={() => handleCopySql(`${finding.id}-ai`, finding.aiSqlFix!)}
-                      className="flex items-center gap-1 rounded bg-purple-900/60 px-2 py-0.5 text-[11px] font-medium text-purple-200 hover:bg-purple-800 transition-colors"
+                      className="flex items-center gap-1 rounded bg-purple-900/60 px-2 py-0.5 text-[11px] font-medium text-purple-200 hover:bg-purple-800 transition-colors cursor-pointer"
                     >
                       {copiedId === `${finding.id}-ai` ? (
                         <>

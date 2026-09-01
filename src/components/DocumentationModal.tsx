@@ -35,12 +35,13 @@ GRANT SELECT ON target_db.* TO yachiru_readonly;
 # 1. Build the lightweight production container
 docker build -t yachiru-clickhouse-advisor:latest .
 
-# 2. Run Yachiru container with persistent history volume
+# 2. Run Yachiru container with persistent history volume & AI keys
 docker run -d \\
   --name yachiru \\
   -p 3000:3000 \\
   -e NODE_ENV=production \\
   -e GEMINI_API_KEY=your_gemini_api_key_here \\
+  -e OPENAI_API_KEY=your_openai_api_key_here \\
   -v yachiru_data:/app/data \\
   --restart unless-stopped \\
   yachiru-clickhouse-advisor:latest

@@ -175,7 +175,9 @@ export const HealthOverview: React.FC<HealthOverviewProps> = ({ report, onSelect
       {/* Executive Summary Card (AI Synthesized / Deterministic) */}
       <div className={`rounded-xl border p-5 shadow-xl transition-all ${
         aiStatus === 'success'
-          ? 'border-purple-500/30 bg-gradient-to-br from-slate-900 via-slate-900 to-purple-950/20'
+          ? executiveSummary.provider === 'openai'
+            ? 'border-emerald-500/30 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20'
+            : 'border-purple-500/30 bg-gradient-to-br from-slate-900 via-slate-900 to-purple-950/20'
           : aiStatus === 'fallback'
           ? 'border-amber-500/30 bg-slate-900/80'
           : 'border-slate-800 bg-slate-900/70'
@@ -183,19 +185,27 @@ export const HealthOverview: React.FC<HealthOverviewProps> = ({ report, onSelect
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3.5 mb-4">
           <div className="flex items-center gap-2">
             {aiStatus === 'success' ? (
-              <Sparkles className="h-5 w-5 text-purple-400" />
+              <Sparkles className={`h-5 w-5 ${executiveSummary.provider === 'openai' ? 'text-emerald-400' : 'text-purple-400'}`} />
             ) : (
               <Lightbulb className="h-5 w-5 text-amber-400" />
             )}
             <h3 className="font-semibold text-white">
-              {aiStatus === 'success' ? 'Gemini AI Architectural Synthesis' : 'Rule-Based Diagnostic Summary'}
+              {aiStatus === 'success'
+                ? executiveSummary.provider === 'openai'
+                  ? 'OpenAI (ChatGPT) Architectural Synthesis'
+                  : 'Google Gemini Architectural Synthesis'
+                : 'Rule-Based Diagnostic Summary'}
             </h3>
           </div>
           <div className="flex items-center gap-2">
             {aiStatus === 'success' ? (
-              <span className="flex items-center gap-1.5 rounded-full bg-purple-500/10 border border-purple-500/30 px-3 py-1 text-xs font-semibold text-purple-300 shadow-sm shadow-purple-500/10">
-                <Sparkles className="h-3.5 w-3.5 text-purple-400 animate-pulse" />
-                AI Copilot Active ({executiveSummary.modelUsed || 'Gemini 3.7'})
+              <span className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold shadow-sm ${
+                executiveSummary.provider === 'openai'
+                  ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 shadow-emerald-500/10'
+                  : 'bg-purple-500/10 border border-purple-500/30 text-purple-300 shadow-purple-500/10'
+              }`}>
+                <Sparkles className={`h-3.5 w-3.5 ${executiveSummary.provider === 'openai' ? 'text-emerald-400' : 'text-purple-400'} animate-pulse`} />
+                {executiveSummary.provider === 'openai' ? 'OpenAI ChatGPT Active' : 'Gemini AI Active'} ({executiveSummary.modelUsed || 'AI Synthesis'})
               </span>
             ) : aiStatus === 'fallback' ? (
               <span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 px-3 py-1 text-xs font-semibold text-amber-300">
@@ -215,9 +225,11 @@ export const HealthOverview: React.FC<HealthOverviewProps> = ({ report, onSelect
           <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 flex items-start gap-2.5">
             <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
             <div>
-              <span className="font-bold block text-amber-300">Gemini AI Copilot is running in Fallback Mode:</span>
+              <span className="font-bold block text-amber-300">
+                {report.aiProvider === 'openai' ? 'OpenAI (ChatGPT)' : 'Google Gemini'} AI Synthesis is in Fallback Mode:
+              </span>
               <span className="text-amber-200/90 leading-relaxed block mt-0.5">
-                {report.aiErrorMessage || 'GEMINI_API_KEY environment variable is not configured or reached quota limit.'} The report below was generated using static threshold metrics.
+                {report.aiErrorMessage || `${report.aiProvider === 'openai' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY'} environment variable is not configured or reached quota limit.`} The report below was generated using static threshold metrics.
               </span>
             </div>
           </div>
