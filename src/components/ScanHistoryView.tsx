@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { History, Trash2, ArrowUpRight, TrendingUp, Calendar, Database, ShieldAlert, CheckCircle2 } from 'lucide-react';
-import { ScanReport } from '../types/yachiru.js';
+import { ScanReport } from '../types/yachiru';
 
 interface ScanHistoryViewProps {
   currentReportId: string | null;

@@ -1,17 +1,22 @@
 import React, { useState } from 'react';
-import { Navbar } from './components/Navbar.js';
-import { ClusterSelector } from './components/ClusterSelector.js';
-import { HealthOverview } from './components/HealthOverview.js';
-import { FindingsList } from './components/FindingsList.js';
-import { MigrationGenerator } from './components/MigrationGenerator.js';
-import { DeepDiveInspector } from './components/DeepDiveInspector.js';
-import { ScanHistoryView } from './components/ScanHistoryView.js';
-import { CliSimulator } from './components/CliSimulator.js';
-import { DocumentationModal } from './components/DocumentationModal.js';
-import { DimensionId, ScanReport, ScanTarget } from './types/yachiru.js';
-import { RotateCw, AlertCircle, Database, Play, Zap, ArrowRight } from 'lucide-react';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { AuthModal } from './components/AuthModal';
+import { AccessDeniedScreen } from './components/AccessDeniedScreen';
+import { UserManagementModal } from './components/UserManagementModal';
+import { Navbar } from './components/Navbar';
+import { ClusterSelector } from './components/ClusterSelector';
+import { HealthOverview } from './components/HealthOverview';
+import { FindingsList } from './components/FindingsList';
+import { MigrationGenerator } from './components/MigrationGenerator';
+import { DeepDiveInspector } from './components/DeepDiveInspector';
+import { ScanHistoryView } from './components/ScanHistoryView';
+import { CliSimulator } from './components/CliSimulator';
+import { DocumentationModal } from './components/DocumentationModal';
+import { DimensionId, ScanReport, ScanTarget } from './types/yachiru';
+import { RotateCw, AlertCircle, Database, Play, Zap, ArrowRight, Shield } from 'lucide-react';
 
-export function App() {
+function AuditorApp() {
+  const { user, profile, loading: authLoading, isAuthorized, isAdmin } = useAuth();
   const [report, setReport] = useState<ScanReport | null>(null);
   const [target, setTarget] = useState<ScanTarget>({
     protocol: 'http',
@@ -33,6 +38,34 @@ export function App() {
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [docsOpen, setDocsOpen] = useState(false);
+  const [userManagementOpen, setUserManagementOpen] = useState(false);
+
+  // If Auth is loading initial state
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-100">
+        <div className="flex flex-col items-center gap-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 shadow-lg shadow-amber-500/20 animate-pulse">
+            <span className="font-mono text-2xl font-black text-slate-950">Y</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
+            <RotateCw className="h-3.5 w-3.5 animate-spin text-amber-500" />
+            <span>Verifying security credentials & whitelist...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // If not authenticated, prompt Login
+  if (!user) {
+    return <AuthModal />;
+  }
+
+  // If authenticated but pending admin approval or revoked
+  if (!isAuthorized) {
+    return <AccessDeniedScreen />;
+  }
 
   const executeScan = async (currentTarget: ScanTarget = target) => {
     setScanning(true);
@@ -111,6 +144,7 @@ export function App() {
         scanning={scanning}
         onScan={() => executeScan(target)}
         onOpenDocs={() => setDocsOpen(true)}
+        onOpenUserManagement={() => setUserManagementOpen(true)}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
       />
@@ -285,7 +319,23 @@ export function App() {
 
       {/* Docs & Setup Grants Modal */}
       <DocumentationModal isOpen={docsOpen} onClose={() => setDocsOpen(false)} />
+
+      {/* Admin User Management Modal */}
+      {isAdmin && (
+        <UserManagementModal
+          isOpen={userManagementOpen}
+          onClose={() => setUserManagementOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+export function App() {
+  return (
+    <AuthProvider>
+      <AuditorApp />
+    </AuthProvider>
   );
 }
 

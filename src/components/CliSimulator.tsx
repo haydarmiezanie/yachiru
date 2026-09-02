@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Terminal, Play, Copy, Check, Sparkles } from 'lucide-react';
-import { ScanReport } from '../types/yachiru.js';
+import { ScanReport } from '../types/yachiru';
 
 interface CliSimulatorProps {
   report: ScanReport;

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Download, Copy, Check, AlertCircle, FileCode, Play, Terminal } from 'lucide-react';
-import { ScanReport } from '../types/yachiru.js';
+import { ScanReport } from '../types/yachiru';
 
 interface MigrationGeneratorProps {
   report: ScanReport;

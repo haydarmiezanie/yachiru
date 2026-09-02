@@ -1,0 +1,47 @@
+{
+  "entities": {
+    "users": {
+      "title": "User Profiles & Access Control",
+      "description": "Stores user authentication profiles, assigned roles, and access approval status.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User full name" },
+        "photoURL": { "type": "string", "description": "Avatar URL" },
+        "role": { "type": "string", "enum": ["admin", "auditor", "viewer"], "description": "Access level role" },
+        "status": { "type": "string", "enum": ["approved", "pending", "revoked"], "description": "Access authorization status" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "status"]
+    },
+    "access_requests": {
+      "title": "Access Requests",
+      "description": "Stores requests from users seeking access to the ClickHouse auditor platform.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Request unique ID" },
+        "uid": { "type": "string", "description": "Requester UID" },
+        "email": { "type": "string", "description": "Requester email" },
+        "displayName": { "type": "string", "description": "Requester name" },
+        "reason": { "type": "string", "description": "Reason for access" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "status"]
+    }
+  },
+  "securityRules": {
+    "users": {
+      "read": "isAuthenticated()",
+      "write": "isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.uid)"
+    },
+    "access_requests": {
+      "read": "isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.uid)",
+      "create": "isAuthenticated() && request.auth.uid == request.resource.data.uid",
+      "update": "isAdmin()",
+      "delete": "isAdmin()"
+    }
+  }
+}

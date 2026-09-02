@@ -30,7 +30,7 @@ export async function synthesizeWithAI(
   if (provider === 'openai') {
     return synthesizeWithOpenAi(scanResult, {
       aiEnabled: options.aiEnabled,
-      modelName: options.modelName || 'gpt-4o',
+      modelName: options.modelName || 'gpt-5.6-sol',
       databaseName: options.databaseName,
       clusterName: options.clusterName,
       apiKey: options.apiKey,

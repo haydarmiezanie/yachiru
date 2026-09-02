@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Activity, Layers, Table, Settings, HardDrive, Clock, Search, Database } from 'lucide-react';
-import { ScanReport } from '../types/yachiru.js';
-import { formatBytes, formatRows } from '../lib/utils.js';
+import { ScanReport } from '../types/yachiru';
+import { formatBytes, formatRows } from '../lib/utils';
 
 interface DeepDiveInspectorProps {
   report: ScanReport;

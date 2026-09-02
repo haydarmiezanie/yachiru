@@ -12,7 +12,7 @@ import {
   Zap,
   HardDrive,
 } from 'lucide-react';
-import { ScanTarget } from '../types/yachiru.js';
+import { ScanTarget } from '../types/yachiru';
 
 interface ClusterSelectorProps {
   target: ScanTarget;

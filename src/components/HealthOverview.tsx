@@ -13,7 +13,7 @@ import {
   Lightbulb,
   Compass,
 } from 'lucide-react';
-import { DimensionId, DimensionScore, ScanReport } from '../types/yachiru.js';
+import { DimensionId, DimensionScore, ScanReport } from '../types/yachiru';
 
 interface HealthOverviewProps {
   report: ScanReport;

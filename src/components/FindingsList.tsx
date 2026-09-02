@@ -14,7 +14,7 @@ import {
   Database,
   Flame,
 } from 'lucide-react';
-import { DimensionId, Finding, FindingSeverity } from '../types/yachiru.js';
+import { DimensionId, Finding, FindingSeverity } from '../types/yachiru';
 
 interface FindingsListProps {
   findings: Finding[];
