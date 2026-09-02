@@ -16,6 +16,22 @@ export interface RawClusterData {
   uptimeSeconds: number;
 }
 
+/**
+ * Validates ClickHouse database/table identifiers against alphanumeric + underscore conventions.
+ */
+export function isValidClickHouseIdentifier(name: string): boolean {
+  if (!name || typeof name !== 'string') return false;
+  return /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(name.trim()) && name.trim().length <= 256;
+}
+
+/**
+ * Escapes single quotes and backslashes for ClickHouse string literals.
+ */
+export function escapeClickHouseString(val: string): string {
+  if (!val || typeof val !== 'string') return '';
+  return val.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
 export class ClickHouseScannerClient {
   private target: ScanTarget;
 
@@ -23,7 +39,7 @@ export class ClickHouseScannerClient {
     this.target = target;
   }
 
-  private getCleanEndpoint() {
+  public getCleanEndpoint() {
     let rawHost = (this.target.host || 'localhost').trim();
     let port = Number(this.target.port) || 8123;
     let protocol = (this.target.protocol || 'http').toLowerCase();
@@ -59,7 +75,7 @@ export class ClickHouseScannerClient {
     return { host: rawHost, port, protocol, baseUrl };
   }
 
-  private getHeaders(): Record<string, string> {
+  public getHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'text/plain; charset=utf-8',
       'Accept': 'application/json, text/plain, */*',
@@ -80,7 +96,7 @@ export class ClickHouseScannerClient {
     return headers;
   }
 
-  private parseClickHouseOutput(text: string): any[] {
+  public parseClickHouseOutput(text: string): any[] {
     const trimmed = text.trim();
     if (!trimmed) return [];
 
@@ -111,6 +127,42 @@ export class ClickHouseScannerClient {
     return rows;
   }
 
+  private formatNetworkError(err: unknown, baseUrl: string, host: string, port: number): string {
+    const error = err instanceof Error ? err : new Error(String(err));
+    const cause = (err as any)?.cause;
+    const causeMsg = cause?.message || '';
+    const causeCode = cause?.code || (err as any)?.code || '';
+    const fullText = `${error.name} ${error.message} ${causeMsg} ${causeCode}`;
+
+    const isTimeout =
+      error.name === 'AbortError' ||
+      fullText.includes('aborted') ||
+      fullText.includes('timeout') ||
+      causeCode === 'ETIMEDOUT';
+
+    const isRefused =
+      causeCode === 'ECONNREFUSED' ||
+      fullText.includes('ECONNREFUSED') ||
+      fullText.includes('Connection refused');
+
+    const isNotFound =
+      causeCode === 'ENOTFOUND' ||
+      causeCode === 'EAI_AGAIN' ||
+      fullText.includes('ENOTFOUND') ||
+      fullText.includes('EAI_AGAIN');
+
+    if (isTimeout) {
+      return `Connection to ClickHouse at ${baseUrl} timed out. Target is unreachable. If ClickHouse is behind a firewall/VPN, check network routing or use a Demo Cluster.`;
+    }
+    if (isRefused) {
+      return `Connection refused at ${baseUrl}. No ClickHouse server is responding at ${host}:${port}. If you don't have a live ClickHouse instance running locally, select one of the built-in Demo Clusters (e.g. Apex E-commerce or Nexus IoT) to explore.`;
+    }
+    if (isNotFound) {
+      return `Host '${host}' could not be resolved. Please check DNS configuration or IP address.`;
+    }
+    return error.message || 'Failed to connect to ClickHouse instance';
+  }
+
   public async testConnection(): Promise<{ success: boolean; version?: string; message: string; databases?: string[] }> {
     if (this.target.isDemoCluster) {
       const demo = DEMO_CLUSTERS[this.target.demoClusterId || 'apex_ecommerce'] || DEMO_CLUSTERS.apex_ecommerce;
@@ -122,8 +174,9 @@ export class ClickHouseScannerClient {
       };
     }
 
+    const { baseUrl, host, port } = this.getCleanEndpoint();
+
     try {
-      const { baseUrl } = this.getCleanEndpoint();
       const url = `${baseUrl}/?default_format=JSONEachRow`;
       const headers = this.getHeaders();
 
@@ -181,21 +234,10 @@ export class ClickHouseScannerClient {
         message: `Connected successfully as '${row?.user || this.target.user || 'default'}' (Version: ${row?.version || 'detected'}, Uptime: ${row?.uptime ? Math.floor(row.uptime / 3600) + 'h' : 'active'})`,
         databases: dbs.length > 0 ? dbs : [this.target.database || 'default'],
       };
-    } catch (err: any) {
-      const isTimeout = err.name === 'AbortError' || err.message?.includes('aborted');
-      let errMsg = err.message || 'Failed to connect to ClickHouse instance';
-
-      if (isTimeout) {
-        errMsg = 'Connection timed out (8s). The target host is unreachable. If ClickHouse is behind a VPN, ensure the server running Yachiru is inside the VPN network, or check firewall rules & port.';
-      } else if (err.code === 'ECONNREFUSED' || errMsg.includes('ECONNREFUSED')) {
-        errMsg = `Connection refused at port ${this.target.port}. Ensure ClickHouse HTTP interface is active and listening on 0.0.0.0 (not just 127.0.0.1).`;
-      } else if (err.code === 'ENOTFOUND' || errMsg.includes('ENOTFOUND')) {
-        errMsg = `Host '${this.target.host}' could not be resolved. Check DNS or IP address.`;
-      }
-
+    } catch (err: unknown) {
       return {
         success: false,
-        message: errMsg,
+        message: this.formatNetworkError(err, baseUrl, host, port),
       };
     }
   }
@@ -219,8 +261,43 @@ export class ClickHouseScannerClient {
 
     const { baseUrl, host, port } = this.getCleanEndpoint();
     const url = `${baseUrl}/?default_format=JSONEachRow`;
-    const targetDb = (this.target.database || 'default').trim();
+    
+    // Strict Validation & Escaping of database identifier
+    const rawDb = (this.target.database || 'default').trim();
+    if (!isValidClickHouseIdentifier(rawDb)) {
+      throw new Error(`Invalid target database identifier: '${rawDb}'. Only alphanumeric characters, dots, dashes, and underscores are allowed.`);
+    }
+    const targetDb = escapeClickHouseString(rawDb);
+
+    // Validate lookbackDays to safe integer range (1-365)
+    const rawLookback = Number(this.target.lookbackDays);
+    const lookback = Number.isFinite(rawLookback) && rawLookback > 0 ? Math.min(365, Math.max(1, Math.floor(rawLookback))) : 7;
+
     const headers = this.getHeaders();
+
+    // 0. Preliminary Health Probe & Connectivity Verification
+    try {
+      const probeController = new AbortController();
+      const probeTimeout = setTimeout(() => probeController.abort(), 6000);
+      const probeResp = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: 'SELECT version() AS version, uptime() AS uptime',
+        signal: probeController.signal,
+      });
+      clearTimeout(probeTimeout);
+
+      if (!probeResp.ok) {
+        const errText = await probeResp.text();
+        const cleanErr = errText.replace(/^[0-9]+\s*/, '').trim().slice(0, 300);
+        throw new Error(`ClickHouse server returned HTTP ${probeResp.status}: ${cleanErr || 'Failed to authenticate or connect'}`);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.startsWith('ClickHouse server returned HTTP')) {
+        throw err;
+      }
+      throw new Error(this.formatNetworkError(err, baseUrl, host, port));
+    }
 
     const runQuery = async (query: string, fallback: any[] = []): Promise<any[]> => {
       try {
@@ -231,13 +308,13 @@ export class ClickHouseScannerClient {
         });
         if (!resp.ok) {
           const errBody = await resp.text();
-          console.warn(`[ClickHouse Scanner] Query failed (${resp.status}): ${query.slice(0, 80)} -> ${errBody.slice(0, 150)}`);
+          console.warn(`[ClickHouse Scanner] Query warning (${resp.status}): ${query.slice(0, 80)} -> ${errBody.slice(0, 150)}`);
           return fallback;
         }
         const text = await resp.text();
         return this.parseClickHouseOutput(text);
       } catch (err) {
-        console.warn(`[ClickHouse Scanner] Query network error:`, err);
+        console.warn(`[ClickHouse Scanner] Non-fatal query error:`, (err as any)?.message || err);
         return fallback;
       }
     };
@@ -247,7 +324,7 @@ export class ClickHouseScannerClient {
     const version = versionRes[0]?.version || 'ClickHouse Server';
     const uptime = Number(versionRes[0]?.uptime) || 86400;
 
-    // 2. Fetch Tables in target database
+    // 2. Fetch Tables in target database (Safe escaped parameter)
     const tables = await runQuery(`
       SELECT 
         database,
@@ -264,7 +341,7 @@ export class ClickHouseScannerClient {
       WHERE database = '${targetDb}' AND is_temporary = 0
     `);
 
-    // 3. Fetch Columns
+    // 3. Fetch Columns (Safe escaped parameter)
     const columns = await runQuery(`
       SELECT 
         database,
@@ -280,7 +357,7 @@ export class ClickHouseScannerClient {
       WHERE database = '${targetDb}'
     `);
 
-    // 4. Fetch Parts status
+    // 4. Fetch Parts status (Safe escaped parameter)
     const parts = await runQuery(`
       SELECT 
         database,
@@ -312,8 +389,7 @@ export class ClickHouseScannerClient {
       FROM system.merges
     `);
 
-    // 6. Fetch Query Log (last N days)
-    const lookback = Number(this.target.lookbackDays) || 7;
+    // 6. Fetch Query Log (Safe lookback integer and escaped database parameter)
     const queryLog = await runQuery(`
       SELECT 
         query_id,
@@ -354,6 +430,8 @@ export class ClickHouseScannerClient {
     return {
       version,
       clusterName: `${host}:${port} (${targetDb})`,
+      database: targetDb,
+      targetDatabase: targetDb,
       tables,
       columns,
       parts,

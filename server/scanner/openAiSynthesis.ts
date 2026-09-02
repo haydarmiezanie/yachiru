@@ -1,5 +1,11 @@
 import { DeterministicScanResult } from './deterministicRules.js';
 import { ExecutiveSummary, Finding } from '../../src/types/yachiru.js';
+import {
+  createStructuredScanPayload,
+  enrichFindingsWithAi,
+  generateDeterministicExecutiveSummary,
+  AiFindingEnrichment,
+} from './synthesisShared.js';
 
 export interface OpenAiSynthesisResult {
   executiveSummary: ExecutiveSummary;
@@ -30,7 +36,7 @@ export async function synthesizeWithOpenAi(
 
   if (!aiEnabled) {
     return {
-      executiveSummary: generateDeterministicExecutiveSummary(scanResult),
+      executiveSummary: generateDeterministicExecutiveSummary(scanResult, 'openai'),
       enhancedFindings: scanResult.findings,
       aiStatus: 'disabled',
       provider: 'openai',
@@ -39,10 +45,10 @@ export async function synthesizeWithOpenAi(
 
   const apiKey = (customApiKey || process.env.OPENAI_API_KEY || '').trim();
   if (!apiKey || apiKey === 'MY_OPENAI_API_KEY') {
-    console.warn('[Yachiru OpenAI] OPENAI_API_KEY not configured. Falling back to deterministic analysis.');
     return {
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
+        'openai',
         'OPENAI_API_KEY not configured. Running in offline deterministic mode.'
       ),
       enhancedFindings: scanResult.findings,
@@ -52,27 +58,7 @@ export async function synthesizeWithOpenAi(
     };
   }
 
-  // Compact payload
-  const structuredPayload = {
-    database: databaseName,
-    cluster: clusterName,
-    overallScore: scanResult.overallScore,
-    overallGrade: scanResult.overallGrade,
-    stats: scanResult.stats,
-    dimensionScores: Object.fromEntries(
-      Object.entries(scanResult.dimensionScores).map(([k, v]) => [k, { score: v.score, summary: v.summary }])
-    ),
-    findings: scanResult.findings.map((f) => ({
-      id: f.id,
-      dimension: f.dimension,
-      severity: f.severity,
-      title: f.title,
-      tableName: f.tableName,
-      what: f.what,
-      whyTechnical: f.whyTechnical,
-      impact: f.estimatedImpact,
-    })),
-  };
+  const structuredPayload = createStructuredScanPayload(scanResult, databaseName, clusterName);
 
   const systemInstruction = `You are an elite ClickHouse Database Architect & Performance Optimization Specialist.
 Your job is to provide actionable, concrete, and deep technical ClickHouse optimization advice based on factual scan data.
@@ -105,7 +91,6 @@ Scan Payload:
 ${JSON.stringify(structuredPayload, null, 2)}`;
 
   let requestedModel = modelName || 'gpt-4o';
-  // Normalize model name
   if (requestedModel.includes('gpt-4o-mini')) {
     requestedModel = 'gpt-4o-mini';
   } else if (requestedModel.includes('o3-mini')) {
@@ -118,7 +103,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
 
   const candidateModels = Array.from(new Set([requestedModel, 'gpt-4o-mini', 'gpt-4o']));
 
-  let lastError: any = null;
+  let lastError: unknown = null;
   let rawJsonText = '';
   let successfulModel = requestedModel;
 
@@ -132,7 +117,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
             { role: 'user', content: userPrompt },
           ];
 
-      const requestBody: any = {
+      const requestBody: Record<string, unknown> = {
         model: modelToTry,
         messages,
         response_format: { type: 'json_object' },
@@ -159,32 +144,31 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
           if (parsedErr?.error?.message) {
             errMsg = parsedErr.error.message;
           }
-        } catch (_) {}
+        } catch {
+          // keep status msg
+        }
         throw new Error(errMsg);
       }
 
-      const data = await response.json();
+      const data: any = await response.json();
       const content = data?.choices?.[0]?.message?.content;
-      if (!content) {
-        throw new Error('Empty response content received from OpenAI API.');
+      if (content && typeof content === 'string') {
+        rawJsonText = content.trim();
+        successfulModel = modelToTry;
+        break;
       }
-
-      rawJsonText = content;
-      successfulModel = modelToTry;
-      break;
-    } catch (err: any) {
+    } catch (err: unknown) {
       lastError = err;
-      console.warn(`[Yachiru OpenAI] Error with model ${modelToTry}:`, err.message || err);
-      // Try next model
     }
   }
 
   if (!rawJsonText) {
-    const errorMsg = lastError?.message || 'Failed to synthesize analysis with OpenAI.';
+    const errorMsg = lastError instanceof Error ? lastError.message : 'OpenAI API request failed';
     return {
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
-        `OpenAI ChatGPT synthesis fallback active (${errorMsg.slice(0, 120)}). Running in deterministic rule-based mode.`
+        'openai',
+        `OpenAI synthesis unavailable (${errorMsg.slice(0, 100)}). Running in deterministic rule-based mode.`
       ),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',
@@ -196,38 +180,18 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
   try {
     const parsed = JSON.parse(rawJsonText);
 
-    // Merge AI enrichments into findings
-    const enrichmentMap = new Map<string, any>();
-    if (Array.isArray(parsed.findingEnrichments)) {
-      for (const e of parsed.findingEnrichments) {
-        enrichmentMap.set(e.id, e);
-      }
-    }
-
-    const enhancedFindings = scanResult.findings.map((f) => {
-      const aiE = enrichmentMap.get(f.id);
-      return {
-        ...f,
-        aiInsight: aiE?.aiInsight || undefined,
-        aiSqlFix: aiE?.aiSqlFix || undefined,
-        aiRiskLevel: aiE?.riskLevel || undefined,
-        relativePriority: aiE
-          ? {
-              rank: aiE.rank || 1,
-              effort: aiE.effort || 'Medium',
-              impact: aiE.impact || 'High',
-              justification: aiE.justification || 'Prioritized based on OpenAI architectural scan.',
-            }
-          : f.relativePriority,
-      };
-    });
+    const enhancedFindings = enrichFindingsWithAi(
+      scanResult.findings,
+      parsed.findingEnrichments as AiFindingEnrichment[],
+      'Prioritized based on OpenAI architectural scan.'
+    );
 
     const executiveSummary: ExecutiveSummary = {
-      overview: parsed.executiveOverview || generateDeterministicExecutiveSummary(scanResult).overview,
+      overview: parsed.executiveOverview || generateDeterministicExecutiveSummary(scanResult, 'openai').overview,
       overallHealthGrade: scanResult.overallGrade,
       topRisk: parsed.topRisk || 'Multiple partition fragmentation and query scan inefficiencies.',
-      quickWins: parsed.quickWins?.length ? parsed.quickWins : generateDeterministicExecutiveSummary(scanResult).quickWins,
-      strategicFixes: parsed.strategicFixes?.length ? parsed.strategicFixes : generateDeterministicExecutiveSummary(scanResult).strategicFixes,
+      quickWins: parsed.quickWins?.length ? parsed.quickWins : generateDeterministicExecutiveSummary(scanResult, 'openai').quickWins,
+      strategicFixes: parsed.strategicFixes?.length ? parsed.strategicFixes : generateDeterministicExecutiveSummary(scanResult, 'openai').strategicFixes,
       aiGenerated: true,
       modelUsed: successfulModel,
       provider: 'openai',
@@ -240,11 +204,11 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       modelUsed: successfulModel,
       provider: 'openai',
     };
-  } catch (parseErr: any) {
-    console.error('[Yachiru OpenAI] Failed to parse OpenAI JSON output:', parseErr);
+  } catch (parseErr: unknown) {
     return {
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
+        'openai',
         'OpenAI response formatting error. Using rule-based fallback.'
       ),
       enhancedFindings: scanResult.findings,
@@ -253,49 +217,4 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       error: 'Failed to parse JSON response from OpenAI API',
     };
   }
-}
-
-function generateDeterministicExecutiveSummary(scanResult: DeterministicScanResult, aiNote?: string): ExecutiveSummary {
-  const criticalCount = scanResult.findings.filter((f) => f.severity === 'critical').length;
-  const warningCount = scanResult.findings.filter((f) => f.severity === 'warning').length;
-
-  let overview = `[Rule-Based Heuristic Evaluation] Yachiru completed an automated deterministic scan across 9 ClickHouse architectural dimensions. The database achieved an overall health score of ${scanResult.overallScore}/100 (Grade ${scanResult.overallGrade}). `;
-  if (criticalCount > 0) {
-    overview += `There are ${criticalCount} critical bottlenecks and ${warningCount} optimization warnings flagged by static threshold analysis.`;
-  } else if (warningCount > 0) {
-    overview += `The cluster is operating within normal boundaries with ${warningCount} identified opportunities for storage and compression tuning.`;
-  } else {
-    overview += `All tested system table parameters and partition health metrics meet optimal ClickHouse production standards.`;
-  }
-
-  const quickWins: string[] = [];
-  for (const f of scanResult.findings) {
-    if (quickWins.length >= 3) break;
-    if (f.tableName) {
-      quickWins.push(`[${f.dimensionName}] ${f.recommendationSummary}`);
-    }
-  }
-  if (quickWins.length === 0) {
-    quickWins.push('Ensure async_insert = 1 is configured for batch insert buffering.');
-    quickWins.push('Verify background_pool_size is aligned with server CPU core count.');
-  }
-
-  const strategicFixes = [
-    'Align primary sorting keys (ORDER BY) with high-frequency WHERE clause filters to avoid full scans.',
-    'Implement automated TTL policies on older timeseries data to prevent unbounded storage growth.',
-    'Evaluate Materialized Views for recurring aggregation queries to reduce repeat CPU overhead.',
-  ];
-
-  return {
-    overview,
-    overallHealthGrade: scanResult.overallGrade,
-    topRisk: criticalCount > 0
-      ? scanResult.findings.find((f) => f.severity === 'critical')?.title || 'Critical bottlenecks detected by rule-based scanner.'
-      : 'No critical threshold violations detected.',
-    quickWins,
-    strategicFixes,
-    aiGenerated: false,
-    aiNote,
-    provider: 'openai',
-  };
 }

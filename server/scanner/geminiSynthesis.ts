@@ -1,6 +1,12 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { DeterministicScanResult } from './deterministicRules.js';
 import { ExecutiveSummary, Finding } from '../../src/types/yachiru.js';
+import {
+  createStructuredScanPayload,
+  enrichFindingsWithAi,
+  generateDeterministicExecutiveSummary,
+  AiFindingEnrichment,
+} from './synthesisShared.js';
 
 export interface GeminiSynthesisResult {
   executiveSummary: ExecutiveSummary;
@@ -29,10 +35,10 @@ export async function synthesizeWithGemini(
     apiKey: customApiKey,
   } = options;
 
-  // If AI is turned off by user flag
+  // If AI is disabled by user flag
   if (!aiEnabled) {
     return {
-      executiveSummary: generateDeterministicExecutiveSummary(scanResult),
+      executiveSummary: generateDeterministicExecutiveSummary(scanResult, 'gemini'),
       enhancedFindings: scanResult.findings,
       aiStatus: 'disabled',
       provider: 'gemini',
@@ -41,9 +47,12 @@ export async function synthesizeWithGemini(
 
   const apiKey = (customApiKey || process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    console.warn('[Yachiru AI] GEMINI_API_KEY not configured. Using deterministic synthesis fallback.');
     return {
-      executiveSummary: generateDeterministicExecutiveSummary(scanResult, 'GEMINI_API_KEY not configured. Running in offline deterministic mode.'),
+      executiveSummary: generateDeterministicExecutiveSummary(
+        scanResult,
+        'gemini',
+        'GEMINI_API_KEY not configured. Running in offline deterministic mode.'
+      ),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',
       provider: 'gemini',
@@ -61,27 +70,7 @@ export async function synthesizeWithGemini(
       },
     });
 
-    // Prepare compact, structured findings payload (tokens minimization)
-    const structuredPayload = {
-      database: databaseName,
-      cluster: clusterName,
-      overallScore: scanResult.overallScore,
-      overallGrade: scanResult.overallGrade,
-      stats: scanResult.stats,
-      dimensionScores: Object.fromEntries(
-        Object.entries(scanResult.dimensionScores).map(([k, v]) => [k, { score: v.score, summary: v.summary }])
-      ),
-      findings: scanResult.findings.map((f) => ({
-        id: f.id,
-        dimension: f.dimension,
-        severity: f.severity,
-        title: f.title,
-        tableName: f.tableName,
-        what: f.what,
-        whyTechnical: f.whyTechnical,
-        impact: f.estimatedImpact,
-      })),
-    };
+    const structuredPayload = createStructuredScanPayload(scanResult, databaseName, clusterName);
 
     const prompt = `You are Yachiru's senior ClickHouse Database Architect & Optimization Specialist.
 Analyze the following deterministic ClickHouse health scan results for database "${databaseName}" on cluster "${clusterName}".
@@ -102,7 +91,7 @@ Provide a comprehensive, high-value AI synthesis:
 Scan Payload:
 ${JSON.stringify(structuredPayload, null, 2)}`;
 
-    // Model candidates: chosen model first, then fallback models on transient 503/429 errors
+    // Normalize model candidates
     let requestedModel = modelName || 'gemini-3.7-flash';
     if (requestedModel === 'gemini-3.1-pro' || requestedModel === 'gemini-pro' || requestedModel.includes('3.1-pro')) {
       requestedModel = 'gemini-3.1-pro-preview';
@@ -116,7 +105,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
 
     let response: any = null;
     let successfulModel = requestedModel;
-    let lastError: any = null;
+    let lastError: unknown = null;
 
     for (const modelToTry of candidateModels) {
       let attempts = 0;
@@ -180,9 +169,9 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
             successfulModel = modelToTry;
             break;
           }
-        } catch (err: any) {
+        } catch (err: unknown) {
           lastError = err;
-          const errMsg = err?.message || String(err);
+          const errMsg = err instanceof Error ? err.message : String(err);
           const isTransient =
             errMsg.includes('503') ||
             errMsg.includes('high demand') ||
@@ -194,11 +183,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
             await new Promise((res) => setTimeout(res, 750));
             continue;
           }
-          if (isTransient) {
-            break;
-          } else {
-            break;
-          }
+          break;
         }
       }
 
@@ -211,41 +196,21 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       throw lastError || new Error('Unable to generate AI synthesis across candidate models.');
     }
 
-    const text = response.text?.trim() || '{}';
+    const text = response.text.trim();
     const parsed = JSON.parse(text);
 
-    // Merge AI enrichments into findings
-    const enrichmentMap = new Map<string, any>();
-    if (Array.isArray(parsed.findingEnrichments)) {
-      for (const e of parsed.findingEnrichments) {
-        enrichmentMap.set(e.id, e);
-      }
-    }
-
-    const enhancedFindings = scanResult.findings.map((f) => {
-      const aiE = enrichmentMap.get(f.id);
-      return {
-        ...f,
-        aiInsight: aiE?.aiInsight || undefined,
-        aiSqlFix: aiE?.aiSqlFix || undefined,
-        aiRiskLevel: aiE?.riskLevel || undefined,
-        relativePriority: aiE
-          ? {
-              rank: aiE.rank || 1,
-              effort: aiE.effort || 'Medium',
-              impact: aiE.impact || 'High',
-              justification: aiE.justification || 'Prioritized based on Gemini architectural scan.',
-            }
-          : f.relativePriority,
-      };
-    });
+    const enhancedFindings = enrichFindingsWithAi(
+      scanResult.findings,
+      parsed.findingEnrichments as AiFindingEnrichment[],
+      'Prioritized based on Gemini architectural scan.'
+    );
 
     const executiveSummary: ExecutiveSummary = {
-      overview: parsed.executiveOverview || generateDeterministicExecutiveSummary(scanResult).overview,
+      overview: parsed.executiveOverview || generateDeterministicExecutiveSummary(scanResult, 'gemini').overview,
       overallHealthGrade: scanResult.overallGrade,
       topRisk: parsed.topRisk || 'Multiple partition fragmentation and query scan inefficiencies.',
-      quickWins: parsed.quickWins?.length ? parsed.quickWins : generateDeterministicExecutiveSummary(scanResult).quickWins,
-      strategicFixes: parsed.strategicFixes?.length ? parsed.strategicFixes : generateDeterministicExecutiveSummary(scanResult).strategicFixes,
+      quickWins: parsed.quickWins?.length ? parsed.quickWins : generateDeterministicExecutiveSummary(scanResult, 'gemini').quickWins,
+      strategicFixes: parsed.strategicFixes?.length ? parsed.strategicFixes : generateDeterministicExecutiveSummary(scanResult, 'gemini').strategicFixes,
       aiGenerated: true,
       modelUsed: successfulModel,
       provider: 'gemini',
@@ -258,8 +223,8 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       modelUsed: successfulModel,
       provider: 'gemini',
     };
-  } catch (err: any) {
-    const rawMsg = err?.message || String(err);
+  } catch (err: unknown) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
     let friendlyError = rawMsg;
     try {
       if (rawMsg.startsWith('{') && rawMsg.endsWith('}')) {
@@ -268,14 +233,14 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
           friendlyError = parsed.error.message;
         }
       }
-    } catch (_) {
+    } catch {
       // keep rawMsg
     }
 
-    console.warn('[Yachiru AI Synthesis] Gemini API call failed, gracefully falling back:', friendlyError);
     return {
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
+        'gemini',
         `Gemini AI synthesis fallback active (${friendlyError.slice(0, 120)}). Running in deterministic rule-based mode.`
       ),
       enhancedFindings: scanResult.findings,
@@ -284,50 +249,4 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       error: friendlyError,
     };
   }
-}
-
-function generateDeterministicExecutiveSummary(scanResult: DeterministicScanResult, aiNote?: string): ExecutiveSummary {
-  const criticalCount = scanResult.findings.filter((f) => f.severity === 'critical').length;
-  const warningCount = scanResult.findings.filter((f) => f.severity === 'warning').length;
-
-  let overview = `[Rule-Based Heuristic Evaluation] Yachiru completed an automated deterministic scan across 9 ClickHouse architectural dimensions. The database achieved an overall health score of ${scanResult.overallScore}/100 (Grade ${scanResult.overallGrade}). `;
-  if (criticalCount > 0) {
-    overview += `There are ${criticalCount} critical bottlenecks and ${warningCount} optimization warnings flagged by static threshold analysis.`;
-  } else if (warningCount > 0) {
-    overview += `The cluster is operating within normal boundaries with ${warningCount} identified opportunities for storage and compression tuning.`;
-  } else {
-    overview += `All tested system table parameters and partition health metrics meet optimal ClickHouse production standards.`;
-  }
-
-  // Derive quick wins dynamically from actual findings
-  const quickWins: string[] = [];
-  for (const f of scanResult.findings) {
-    if (quickWins.length >= 3) break;
-    if (f.tableName) {
-      quickWins.push(`[${f.dimensionName}] ${f.recommendationSummary}`);
-    }
-  }
-  if (quickWins.length === 0) {
-    quickWins.push('Ensure async_insert = 1 is configured for batch insert buffering.');
-    quickWins.push('Verify background_pool_size is aligned with server CPU core count.');
-  }
-
-  const strategicFixes = [
-    'Align primary sorting keys (ORDER BY) with high-frequency WHERE clause filters to avoid full scans.',
-    'Implement automated TTL policies on older timeseries data to prevent unbounded storage growth.',
-    'Evaluate Materialized Views for recurring aggregation queries to reduce repeat CPU overhead.',
-  ];
-
-  return {
-    overview,
-    overallHealthGrade: scanResult.overallGrade,
-    topRisk: criticalCount > 0
-      ? scanResult.findings.find((f) => f.severity === 'critical')?.title || 'Critical bottlenecks detected by rule-based scanner.'
-      : 'No critical threshold violations detected.',
-    quickWins,
-    strategicFixes,
-    aiGenerated: false,
-    aiNote,
-    provider: 'gemini',
-  };
 }

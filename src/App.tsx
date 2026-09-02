@@ -9,23 +9,24 @@ import { ScanHistoryView } from './components/ScanHistoryView.js';
 import { CliSimulator } from './components/CliSimulator.js';
 import { DocumentationModal } from './components/DocumentationModal.js';
 import { DimensionId, ScanReport, ScanTarget } from './types/yachiru.js';
-import { RotateCw, AlertCircle, Database, Play, Activity } from 'lucide-react';
+import { RotateCw, AlertCircle, Database, Play, Zap, ArrowRight } from 'lucide-react';
 
 export function App() {
   const [report, setReport] = useState<ScanReport | null>(null);
   const [target, setTarget] = useState<ScanTarget>({
     protocol: 'http',
-    host: 'localhost',
+    host: 'apex.clickhouse.internal',
     port: 8123,
-    database: 'default',
+    database: 'ecommerce_analytics',
     user: 'default',
     password: '',
-    isDemoCluster: false,
+    isDemoCluster: true,
+    demoClusterId: 'apex_ecommerce',
     lookbackDays: 7,
   });
   const [aiEnabled, setAiEnabled] = useState(true);
   const [aiProvider, setAiProvider] = useState<'gemini' | 'openai'>('gemini');
-  const [aiModel, setAiModel] = useState('gemini-3.1-pro-preview');
+  const [aiModel, setAiModel] = useState('gemini-3.7-flash');
   const [aiApiKey, setAiApiKey] = useState('');
   const [activeTab, setActiveTab] = useState('overview');
   const [selectedDimension, setSelectedDimension] = useState<DimensionId | 'all'>('all');
@@ -50,8 +51,8 @@ export function App() {
       });
 
       if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || 'Scan execution failed');
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || errData.message || `Scan failed with status ${res.status}`);
       }
 
       const data: ScanReport = await res.json();
@@ -85,6 +86,23 @@ export function App() {
     }
   };
 
+  const switchToDemoAndScan = (demoId: string = 'apex_ecommerce') => {
+    const demoTarget: ScanTarget = {
+      protocol: 'http',
+      host: `${demoId}.clickhouse.internal`,
+      port: 8123,
+      database: demoId === 'apex_ecommerce' ? 'ecommerce_analytics' : demoId === 'nexus_iot' ? 'iot_telemetry' : 'default',
+      user: 'default',
+      password: '',
+      isDemoCluster: true,
+      demoClusterId: demoId,
+      lookbackDays: 7,
+    };
+    setTarget(demoTarget);
+    setError(null);
+    executeScan(demoTarget);
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 selection:bg-amber-500/30 selection:text-white font-sans antialiased">
       {/* Top Navbar */}
@@ -115,19 +133,37 @@ export function App() {
           scanning={scanning}
         />
 
-        {/* Global Error Banner */}
+        {/* Global Error Banner with Instant Recovery Action */}
         {error && (
-          <div className="rounded-xl border border-rose-500/30 bg-rose-950/40 p-4 flex items-center justify-between gap-3 text-xs text-rose-300">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
-              <span>{error}</span>
+          <div className="rounded-xl border border-rose-500/40 bg-rose-950/50 p-4 flex flex-wrap items-center justify-between gap-3 text-xs text-rose-200 shadow-lg">
+            <div className="flex items-start gap-2.5 max-w-3xl">
+              <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <span className="font-medium text-rose-200 block">{error}</span>
+                {!target.isDemoCluster && (
+                  <span className="text-[11px] text-rose-300/80 block">
+                    Tip: If you do not have a live ClickHouse instance running locally, you can switch to an interactive Demo Cluster to explore all 9 optimization dimensions and AI recommendations.
+                  </span>
+                )}
+              </div>
             </div>
-            <button
-              onClick={() => setError(null)}
-              className="rounded px-2 py-1 bg-rose-900/60 hover:bg-rose-800 text-white font-medium cursor-pointer"
-            >
-              Dismiss
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {!target.isDemoCluster && (
+                <button
+                  onClick={() => switchToDemoAndScan('apex_ecommerce')}
+                  className="rounded-lg px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition-all flex items-center gap-1 cursor-pointer shadow-sm"
+                >
+                  <Zap className="h-3.5 w-3.5 fill-slate-950" />
+                  <span>Switch to Demo Cluster</span>
+                </button>
+              )}
+              <button
+                onClick={() => setError(null)}
+                className="rounded-lg px-2.5 py-1.5 bg-rose-900/70 hover:bg-rose-800 text-white font-medium cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
         )}
 
@@ -151,31 +187,56 @@ export function App() {
               <Database className="h-8 w-8" />
             </div>
 
-            <div className="max-w-lg mx-auto space-y-2">
+            <div className="max-w-xl mx-auto space-y-2">
               <div className="flex items-center justify-center gap-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Database Health Score</span>
                 <span className="rounded-lg px-2.5 py-0.5 text-xs font-mono font-bold border border-slate-700 bg-slate-800 text-slate-400">
-                  Default (0/100)
+                  Ready to Audit
                 </span>
               </div>
-              <h3 className="text-xl font-bold text-white">Ready to Audit ClickHouse Database</h3>
+              <h3 className="text-xl font-bold text-white">ClickHouse 9-Dimension Architecture & Performance Auditor</h3>
               <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
-                Connect your live ClickHouse instance above and click <span className="text-amber-400 font-semibold">Execute Database Scan</span> to analyze system tables, table engines, codecs, query logs, and part fragmentation.
+                Run deterministic deep analysis on primary keys, part fragmentation, sorting keys, codecs, query logs, TTL, and materialized views with automated DDL migration scripts and AI architectural synthesis.
               </p>
             </div>
 
-            <div className="pt-2 flex justify-center">
+            <div className="pt-2 flex flex-wrap justify-center gap-3">
               <button
                 onClick={() => executeScan(target)}
                 disabled={scanning}
                 className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-6 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/20 hover:from-amber-400 hover:to-orange-400 active:scale-95 transition-all cursor-pointer"
               >
                 <Play className="h-4 w-4 fill-slate-950" />
-                <span>Execute Database Scan (Score Target)</span>
+                <span>
+                  {target.isDemoCluster ? 'Execute Demo Cluster Scan' : 'Execute Database Scan'}
+                </span>
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl mx-auto pt-4 border-t border-slate-800/80 text-left text-xs text-slate-400">
+            {/* Quick Demo Presets */}
+            <div className="pt-4 max-w-2xl mx-auto">
+              <div className="text-xs text-slate-400 mb-2 font-medium">Or run an instant audit on a sample workload:</div>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {[
+                  { id: 'apex_ecommerce', name: 'Apex E-commerce (142M rows)' },
+                  { id: 'nexus_iot', name: 'Nexus IoT Fleet (480M rows)' },
+                  { id: 'finpulse_ledger', name: 'FinPulse Ledger (65M rows)' },
+                  { id: 'cloudtrace_logs', name: 'CloudTrace Logs (310M rows)' },
+                ].map((demo) => (
+                  <button
+                    key={demo.id}
+                    onClick={() => switchToDemoAndScan(demo.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-800 bg-slate-950/80 hover:border-amber-500/40 hover:bg-slate-900 text-xs font-mono text-slate-300 transition-colors cursor-pointer"
+                  >
+                    <Zap className="h-3 w-3 text-amber-400" />
+                    <span>{demo.name}</span>
+                    <ArrowRight className="h-3 w-3 text-slate-500" />
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl mx-auto pt-6 border-t border-slate-800/80 text-left text-xs text-slate-400">
               <div className="rounded-lg bg-slate-950/60 p-3 border border-slate-800/80">
                 <span className="font-semibold text-slate-200 block mb-1">1. Read-Only Queries</span>
                 <span>Scans <code className="text-amber-400 font-mono text-[10px]">system.*</code> tables only. Zero DML or table write footprint.</span>
@@ -216,7 +277,7 @@ export function App() {
             )}
 
             {activeTab === 'cli' && (
-              <CliSimulator report={report} onScanTarget={(noAi) => executeScan({ ...target })} />
+              <CliSimulator report={report} onScanTarget={() => executeScan({ ...target })} />
             )}
           </div>
         )}

@@ -1,198 +1,291 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { DEMO_CLUSTERS } from './server/scanner/demoDatasets.js';
 import { ClickHouseScannerClient } from './server/scanner/clickhouseClient.js';
 import { runDeterministicScan } from './server/scanner/deterministicRules.js';
-import { synthesizeWithAI, AIProvider } from './server/scanner/aiSynthesis.js';
+import { synthesizeWithAI } from './server/scanner/aiSynthesis.js';
 import { ScanHistoryStore } from './server/storage/scanHistory.js';
-import { ScanReport, ScanTarget } from './src/types/yachiru.js';
+import { ScanReport } from './src/types/yachiru.js';
+import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validation/scanSchemas.js';
+import { logger } from './server/logger.js';
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+const app = express();
+const PORT = 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+// Trust reverse proxy (Cloud Run, Nginx, load balancers)
+app.set('trust proxy', 1);
 
-  // -------------------------------------------------------------
-  // API Routes
-  // -------------------------------------------------------------
-  
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'Yachiru ClickHouse Optimization Scanner',
-      version: '1.0.0',
-      aiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'),
-    });
-  });
+// -------------------------------------------------------------
+// Security Middlewares (P0)
+// -------------------------------------------------------------
 
-  // Available Demo Clusters / Presets
-  app.get('/api/demo-clusters', (req, res) => {
-    const list = Object.values(DEMO_CLUSTERS).map((c) => ({
-      id: c.id,
-      name: c.name,
-      tagline: c.tagline,
-      industry: c.industry,
-      database: c.database,
-      tableCount: c.tables.length,
-      rowCount: `${(c.totalRows / 1_000_000).toFixed(1)}M rows`,
-      typicalIssues: [
-        c.id === 'apex_ecommerce' ? 'Nullable overuse & unindexed tenant_id scan' : '',
-        c.id === 'nexus_iot' ? 'Partition explosion & missing Gorilla codec' : '',
-        c.id === 'finpulse_ledger' ? 'ReplacingMergeTree scan & missing skip index' : '',
-        c.id === 'cloudtrace_logs' ? 'LowCardinality candidates & stuck merge' : '',
-      ].filter(Boolean),
-    }));
-    res.json(list);
-  });
+// Helmet for robust HTTP security headers
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Prevents iframe preview and Vite development HMR blocking
+    crossOriginEmbedderPolicy: false,
+  })
+);
 
-  // Test Connection
-  app.post('/api/clickhouse/test-connection', async (req, res) => {
-    try {
-      const target: ScanTarget = req.body;
-      const client = new ClickHouseScannerClient(target);
-      const result = await client.testConnection();
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ success: false, message: err.message || 'Connection test failed' });
-    }
-  });
-
-  // Execute Full 9-Dimension Scan
-  app.post('/api/clickhouse/scan', async (req, res) => {
-    const startTime = Date.now();
-    try {
-      const {
-        target,
-        aiEnabled = true,
-        aiProvider = 'gemini',
-        aiModel = 'gemini-3.7-flash',
-        aiApiKey,
-      }: {
-        target: ScanTarget;
-        aiEnabled?: boolean;
-        aiProvider?: AIProvider;
-        aiModel?: string;
-        aiApiKey?: string;
-      } = req.body;
-
-      if (!target) {
-        return res.status(400).json({ error: 'Missing target connection parameters' });
+// CORS with origin whitelist support
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, or same-origin server requests)
+      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+        return callback(null, true);
       }
+      return callback(new Error(`Origin ${origin} not allowed by CORS policy`));
+    },
+    credentials: true,
+  })
+);
 
-      console.log(`[Yachiru] Starting scan on target: ${target.isDemoCluster ? `Demo (${target.demoClusterId})` : `${target.host}:${target.port}/${target.database}`} [AI: ${aiEnabled ? `${aiProvider} (${aiModel})` : 'Disabled'}]`);
+// General Rate Limiter for API endpoints
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 120, // 120 requests per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: false,
+  message: { error: 'Too many requests, please slow down.' },
+});
 
-      // 1. Fetch Cluster System Tables (Read-Only)
-      const client = new ClickHouseScannerClient(target);
-      const clusterData = await client.fetchClusterData();
+// Dedicated Scan Rate Limiter to prevent DOS / resource exhaustion
+const scanLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 scans per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: false,
+  message: { error: 'Scan request limit exceeded. Please wait a moment before initiating another cluster scan.' },
+});
 
-      // 2. Run 9-Dimension Deterministic Scanner (Source of Truth)
-      const deterministicResult = runDeterministicScan(clusterData);
+app.use('/api', apiLimiter);
+app.use(express.json({ limit: '10mb' }));
 
-      // 3. Optional AI Synthesis Layer (Gemini or OpenAI ChatGPT)
-      const synthesis = await synthesizeWithAI(deterministicResult, {
-        aiEnabled,
-        provider: aiProvider,
-        modelName: aiModel,
-        databaseName: target.database || clusterData.tables[0]?.database || 'default',
+// Minimal Authentication Middleware (Optional header-based auth if API_SECRET_KEY is configured)
+function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  const secretKey = (process.env.YACHIRU_API_KEY || process.env.API_SECRET_KEY || '').trim();
+
+  // If no auth key is configured on the server, allow single-tenant access
+  if (!secretKey) {
+    return next();
+  }
+
+  const headerKey = (req.headers['x-api-key'] as string) || '';
+  const authHeader = req.headers.authorization || '';
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+
+  if (headerKey === secretKey || bearerToken === secretKey) {
+    return next();
+  }
+
+  logger.warn({ ip: req.ip, path: req.path }, 'Unauthorized API access attempt');
+  return res.status(401).json({ error: 'Unauthorized: Invalid or missing API key header (x-api-key or Authorization Bearer).' });
+}
+
+// -------------------------------------------------------------
+// API Routes
+// -------------------------------------------------------------
+
+// Health check (Open)
+app.get('/api/health', (req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    service: 'Yachiru ClickHouse Optimization Scanner',
+    version: '1.0.0',
+    aiConfigured: Boolean(
+      (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') ||
+      (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_OPENAI_API_KEY')
+    ),
+  });
+});
+
+// Available Demo Clusters / Presets (Open)
+app.get('/api/demo-clusters', (req: Request, res: Response) => {
+  const list = Object.values(DEMO_CLUSTERS).map((c) => ({
+    id: c.id,
+    name: c.name,
+    tagline: c.tagline,
+    industry: c.industry,
+    database: c.database,
+    tableCount: c.tables.length,
+    rowCount: `${(c.totalRows / 1_000_000).toFixed(1)}M rows`,
+    typicalIssues: [
+      c.id === 'apex_ecommerce' ? 'Nullable overuse & unindexed tenant_id scan' : '',
+      c.id === 'nexus_iot' ? 'Partition explosion & missing Gorilla codec' : '',
+      c.id === 'finpulse_ledger' ? 'ReplacingMergeTree scan & missing skip index' : '',
+      c.id === 'cloudtrace_logs' ? 'LowCardinality candidates & stuck merge' : '',
+    ].filter(Boolean),
+  }));
+  res.json(list);
+});
+
+// Test Connection (Protected + Zod Runtime Validation)
+app.post('/api/clickhouse/test-connection', authMiddleware, async (req: Request, res: Response) => {
+  const parsed = TestConnectionRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid connection parameters',
+      errors: parsed.error.format(),
+    });
+  }
+
+  try {
+    const client = new ClickHouseScannerClient(parsed.data);
+    const result = await client.testConnection();
+    return res.json(result);
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error({ err: error }, 'Test connection failed');
+    return res.status(500).json({ success: false, message: error.message || 'Connection test failed' });
+  }
+});
+
+// Execute Full 9-Dimension Scan (Protected + Rate-limited + Zod Validation)
+app.post('/api/clickhouse/scan', authMiddleware, scanLimiter, async (req: Request, res: Response) => {
+  const parsed = ScanRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Invalid scan request payload',
+      details: parsed.error.format(),
+    });
+  }
+
+  const { target, aiEnabled, aiProvider, aiModel, aiApiKey } = parsed.data;
+  const startTime = Date.now();
+
+  try {
+    logger.info(
+      {
+        target: target.isDemoCluster ? `Demo (${target.demoClusterId})` : `${target.host}:${target.port}/${target.database}`,
+        ai: aiEnabled ? `${aiProvider} (${aiModel})` : 'Disabled',
+      },
+      'Starting ClickHouse health scan'
+    );
+
+    // 1. Fetch Cluster System Tables (Read-Only)
+    const client = new ClickHouseScannerClient(target);
+    const clusterData = await client.fetchClusterData();
+
+    // 2. Run 9-Dimension Deterministic Scanner (Source of Truth)
+    const deterministicResult = runDeterministicScan(clusterData);
+
+    // 3. Optional AI Synthesis Layer (Gemini or OpenAI ChatGPT)
+    const synthesis = await synthesizeWithAI(deterministicResult, {
+      aiEnabled,
+      provider: aiProvider,
+      modelName: aiModel,
+      databaseName: target.database || clusterData.tables[0]?.database || 'default',
+      clusterName: clusterData.clusterName,
+      apiKey: aiApiKey,
+    });
+
+    // 4. Assemble Final Scan Report
+    const scanId = `scan-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const durationMs = Date.now() - startTime;
+
+    const report: ScanReport = {
+      id: scanId,
+      timestamp: new Date().toISOString(),
+      target: {
+        host: target.host || 'localhost',
+        port: target.port || 8123,
+        database: target.database || clusterData.tables[0]?.database || 'default',
+        isDemoCluster: Boolean(target.isDemoCluster),
         clusterName: clusterData.clusterName,
-        apiKey: aiApiKey,
-      });
+      },
+      overallScore: deterministicResult.overallScore,
+      overallGrade: deterministicResult.overallGrade,
+      dimensionScores: deterministicResult.dimensionScores,
+      findings: synthesis.enhancedFindings,
+      executiveSummary: synthesis.executiveSummary,
+      clusterMetadata: {
+        version: clusterData.version,
+        clusterName: clusterData.clusterName,
+        totalDatabases: clusterData.totalDatabases,
+        totalTables: deterministicResult.stats.totalTables,
+        totalParts: deterministicResult.stats.totalParts,
+        totalRows: deterministicResult.stats.totalRows,
+        totalDiskSizeBytes: deterministicResult.stats.totalDiskSizeBytes,
+        totalDiskSizeFormatted: deterministicResult.stats.totalDiskSizeFormatted,
+        queriesAnalyzed: deterministicResult.stats.queriesAnalyzed,
+        timeWindow: 'Last 7 Days',
+        uptimeSeconds: clusterData.uptimeSeconds,
+      },
+      rawStats: {
+        tables: clusterData.tables,
+        partsSummary: { totalParts: clusterData.parts.length, sample: clusterData.parts.slice(0, 10) },
+        mergesSummary: { activeMerges: clusterData.merges.length, sample: clusterData.merges },
+        slowQueries: clusterData.queryLog.slice(0, 10),
+        expensivePatterns: clusterData.queryLog.filter((q) => q.read_rows > 1_000_000),
+        columnsWithIssues: clusterData.columns.filter((c) => c.is_nullable || (c.cardinality_approx && c.cardinality_approx < 100)),
+        configSettings: clusterData.settings,
+      },
+      migrationScript: deterministicResult.migrationScript,
+      scanDurationMs: durationMs,
+      aiStatus: synthesis.aiStatus,
+      aiProvider: synthesis.provider,
+      aiErrorMessage: synthesis.error,
+    };
 
-      // 4. Assemble Final Scan Report
-      const scanId = `scan-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-      const durationMs = Date.now() - startTime;
+    // 5. Save Report to History Store (Asynchronously & Atomically with PII masking)
+    await ScanHistoryStore.saveScan(report);
 
-      const report: ScanReport = {
-        id: scanId,
-        timestamp: new Date().toISOString(),
-        target: {
-          host: target.host || 'localhost',
-          port: target.port || 8123,
-          database: target.database || clusterData.tables[0]?.database || 'default',
-          isDemoCluster: Boolean(target.isDemoCluster),
-          clusterName: clusterData.clusterName,
-        },
-        overallScore: deterministicResult.overallScore,
-        overallGrade: deterministicResult.overallGrade,
-        dimensionScores: deterministicResult.dimensionScores,
-        findings: synthesis.enhancedFindings,
-        executiveSummary: synthesis.executiveSummary,
-        clusterMetadata: {
-          version: clusterData.version,
-          clusterName: clusterData.clusterName,
-          totalDatabases: clusterData.totalDatabases,
-          totalTables: deterministicResult.stats.totalTables,
-          totalParts: deterministicResult.stats.totalParts,
-          totalRows: deterministicResult.stats.totalRows,
-          totalDiskSizeBytes: deterministicResult.stats.totalDiskSizeBytes,
-          totalDiskSizeFormatted: deterministicResult.stats.totalDiskSizeFormatted,
-          queriesAnalyzed: deterministicResult.stats.queriesAnalyzed,
-          timeWindow: 'Last 7 Days',
-          uptimeSeconds: clusterData.uptimeSeconds,
-        },
-        rawStats: {
-          tables: clusterData.tables,
-          partsSummary: { totalParts: clusterData.parts.length, sample: clusterData.parts.slice(0, 10) },
-          mergesSummary: { activeMerges: clusterData.merges.length, sample: clusterData.merges },
-          slowQueries: clusterData.queryLog.slice(0, 10),
-          expensivePatterns: clusterData.queryLog.filter((q) => q.read_rows > 1_000_000),
-          columnsWithIssues: clusterData.columns.filter((c) => c.is_nullable || (c.cardinality_approx && c.cardinality_approx < 100)),
-          configSettings: clusterData.settings,
-        },
-        migrationScript: deterministicResult.migrationScript,
-        scanDurationMs: durationMs,
-        aiStatus: synthesis.aiStatus,
-        aiProvider: synthesis.provider,
-        aiErrorMessage: synthesis.error,
-      };
+    logger.info(
+      { scanId, durationMs, overallScore: report.overallScore, grade: report.overallGrade },
+      'Scan completed successfully'
+    );
+    return res.json(report);
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.warn({ err: error.message }, 'Scan execution could not connect or failed');
+    return res.status(400).json({ error: error.message || 'Scan execution failed' });
+  }
+});
 
-      // 5. Save Report to History Store
-      ScanHistoryStore.saveScan(report);
+// History Endpoints (Protected)
+app.get('/api/history', authMiddleware, async (req: Request, res: Response) => {
+  const scans = await ScanHistoryStore.getAllScans();
+  const list = scans.map((s) => ({
+    id: s.id,
+    timestamp: s.timestamp,
+    target: s.target,
+    overallScore: s.overallScore,
+    overallGrade: s.overallGrade,
+    findingsCount: s.findings.length,
+    criticalCount: s.findings.filter((f) => f.severity === 'critical').length,
+    warningCount: s.findings.filter((f) => f.severity === 'warning').length,
+    aiStatus: s.aiStatus,
+  }));
+  res.json(list);
+});
 
-      console.log(`[Yachiru] Scan complete in ${durationMs}ms with overall score: ${report.overallScore}/100`);
-      res.json(report);
-    } catch (err: any) {
-      console.error('[Yachiru] Scan error:', err);
-      res.status(500).json({ error: err.message || 'Internal server error during scan execution' });
-    }
-  });
+app.get('/api/history/:id', authMiddleware, async (req: Request, res: Response) => {
+  const report = await ScanHistoryStore.getScanById(req.params.id);
+  if (!report) {
+    return res.status(404).json({ error: 'Scan report not found' });
+  }
+  return res.json(report);
+});
 
-  // History Endpoints
-  app.get('/api/history', (req, res) => {
-    const list = ScanHistoryStore.getAllScans().map((s) => ({
-      id: s.id,
-      timestamp: s.timestamp,
-      target: s.target,
-      overallScore: s.overallScore,
-      overallGrade: s.overallGrade,
-      findingsCount: s.findings.length,
-      criticalCount: s.findings.filter((f) => f.severity === 'critical').length,
-      warningCount: s.findings.filter((f) => f.severity === 'warning').length,
-      aiStatus: s.aiStatus,
-    }));
-    res.json(list);
-  });
+app.delete('/api/history', authMiddleware, async (req: Request, res: Response) => {
+  await ScanHistoryStore.clearHistory();
+  return res.json({ success: true, message: 'Scan history cleared' });
+});
 
-  app.get('/api/history/:id', (req, res) => {
-    const report = ScanHistoryStore.getScanById(req.params.id);
-    if (!report) {
-      return res.status(404).json({ error: 'Scan report not found' });
-    }
-    res.json(report);
-  });
-
-  app.delete('/api/history', (req, res) => {
-    ScanHistoryStore.clearHistory();
-    res.json({ success: true, message: 'Scan history cleared' });
-  });
-
-  // -------------------------------------------------------------
-  // Vite Integration / Static Serving
-  // -------------------------------------------------------------
+// -------------------------------------------------------------
+// Vite Integration / Static Serving & Server Startup
+// -------------------------------------------------------------
+async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -202,14 +295,32 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Yachiru Server] Running on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    logger.info(`[Yachiru Server] Listening on http://0.0.0.0:${PORT}`);
   });
+
+  // Graceful shutdown handling (P2)
+  const shutdown = (signal: string) => {
+    logger.info({ signal }, 'Received termination signal. Closing server gracefully...');
+    server.close(() => {
+      logger.info('HTTP server closed. Exiting process.');
+      process.exit(0);
+    });
+
+    // Force shutdown after 10s if hanging
+    setTimeout(() => {
+      logger.error('Forced shutdown due to timeout.');
+      process.exit(1);
+    }, 10000).unref();
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 startServer();
