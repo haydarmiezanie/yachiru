@@ -21,12 +21,23 @@ A developer-grade, zero-mutation audit and optimization platform for ClickHouse.
   - Deep architectural summaries powered by **Google Gemini** (`gemini-3.7-flash`, etc.) and **OpenAI** (`gpt-4o`, `gpt-4o-mini`).
   - Token-minimized prompt payloads with deterministic offline fallbacks when AI is disabled.
 
+- **🔐 Team Access Control & RBAC (Firebase Auth + Firestore)**:
+  - **Google OAuth & Email/Password**: Single-click sign-in and user onboarding.
+  - **Role-Based Access Control (RBAC)**:
+    - **Super Admin** (`idarstore24@gmail.com`): Unrestricted access, user approval management, and role promotion/revocation.
+    - **Admin**: Manage member requests, adjust access levels, and configure audit parameters.
+    - **Auditor**: Execute live cluster scans, inspect raw telemetry, test credentials, and generate migration DDL.
+    - **Viewer**: Read-only access to health scorecards and historical audit trails.
+  - **Access Request Workflow**: Automatic pending state for new registrants with approval dashboard for administrators.
+  - **Strict Firestore Security Rules**: Profile creation locked to pending `viewer` role unless approved by an administrator.
+
 - **🛡️ Enterprise-Grade Security & Safety**:
   - **Zero-Mutation**: Read-only queries against `system.*` tables.
   - **SQL Injection Prevention**: Strict ClickHouse identifier validation and escaping.
   - **Server Hardening**: Helmet HTTP headers, CORS origin whitelisting, and multi-tier rate limiting.
-  - **Data Privacy & PII Redaction**: Automatic regex masking of literal query parameters and credentials prior to disk persistence.
-  - **Optional API Key Authentication**: Protect your auditing endpoints via `x-api-key` or `Authorization: Bearer`.
+  - **Data Privacy & PII Redaction**: Deep recursive regex masking of literal query parameters, passwords, API tokens, and customer email addresses in both findings metrics and `rawStats` query logs prior to disk persistence.
+  - **API Boundary Protection (`YACHIRU_API_KEY`)**: Protect your auditing backend endpoints via `x-api-key` or `Authorization: Bearer <key>`.
+  - **Concurrency Mutex**: FIFO in-process asynchronous mutex around scan history operations ensuring zero lost updates during concurrent audits.
 
 - **📜 Automated Migration Scripts**:
   - Generates ready-to-review SQL migration scripts with column inference and staging safety disclaimers.
@@ -34,6 +45,19 @@ A developer-grade, zero-mutation audit and optimization platform for ClickHouse.
 - **📊 Modern Web UI & Presets**:
   - Clean, high-contrast dashboard with live metrics, interactive findings breakdown, copyable DDL, and historical scan comparison.
   - 4 built-in realistic demo datasets (*Apex E-commerce*, *Nexus IoT*, *FinPulse Ledger*, *CloudTrace Logs*) for instant testing.
+
+---
+
+## 🔒 Security Architecture: Frontend Portal vs. Backend API
+
+Yachiru adopts a pragmatic defense-in-depth model:
+
+| Layer | Technology | Purpose & Scope |
+|---|---|---|
+| **Tier 1: Web Portal Access** | Firebase Auth + Firestore Rules | Controls browser UI access, user registration, onboarding approval queues, and team role management (Admin / Auditor / Viewer). |
+| **Tier 2: Backend API Boundary** | `YACHIRU_API_KEY` (`x-api-key` or `Bearer`) | Protects server-side `/api/clickhouse/*` and `/api/history/*` endpoints from unauthorized REST calls or programmatic abuse. |
+
+> **Note on Architecture**: The React portal uses client-side Firebase Auth and Firestore security rules to manage user sessions and roles. The Node/Express server does not require Firebase Admin service account keys; instead, server-side endpoint protection is enforced via `YACHIRU_API_KEY`. In production deployments, administrators should define `YACHIRU_API_KEY` (and optionally `REQUIRE_API_KEY=true`) in their environment to enforce strict API access control.
 
 ---
 
@@ -99,6 +123,7 @@ Configure these settings in your `.env` file or environment:
 | `GEMINI_API_KEY` | Google Gemini API key for AI synthesis | No | - |
 | `OPENAI_API_KEY` | OpenAI API key for AI synthesis | No | - |
 | `YACHIRU_API_KEY` | Secret API key to require `x-api-key` / `Bearer` authentication | No | *(Disabled)* |
+| `REQUIRE_API_KEY` | Set `true` to block API requests if `YACHIRU_API_KEY` is not set | No | `false` |
 | `ALLOWED_ORIGINS` | Comma-separated list of allowed CORS origins | No | `*` |
 | `LOG_LEVEL` | Structured logging level (`fatal`, `error`, `warn`, `info`, `debug`) | No | `info` |
 

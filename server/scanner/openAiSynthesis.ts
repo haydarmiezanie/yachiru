@@ -49,12 +49,12 @@ export async function synthesizeWithOpenAi(
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
         'openai',
-        'OPENAI_API_KEY not configured. Running in offline deterministic mode.'
+        'OpenAI API key is not configured. Running in offline deterministic mode.'
       ),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',
       provider: 'openai',
-      error: 'OPENAI_API_KEY environment variable is not configured.',
+      error: 'OpenAI API key is not configured. Provide a custom API key in the scan bar or set OPENAI_API_KEY.',
     };
   }
 
@@ -90,90 +90,83 @@ Provide a comprehensive, high-value AI synthesis in valid JSON format:
 Scan Payload:
 ${JSON.stringify(structuredPayload, null, 2)}`;
 
-  let requestedModel = (modelName || 'gpt-5.6-sol').trim();
-  if (requestedModel.includes('gpt-5.6-sol')) {
-    requestedModel = 'gpt-5.6-sol';
-  } else if (requestedModel.includes('gpt-5.6-terra')) {
-    requestedModel = 'gpt-5.6-terra';
-  } else if (requestedModel.includes('gpt-5.6-luna')) {
-    requestedModel = 'gpt-5.6-luna';
-  } else if (requestedModel.includes('gpt-5.5')) {
-    requestedModel = 'gpt-5.5';
-  } else if (requestedModel.includes('gpt-5.4')) {
-    requestedModel = 'gpt-5.4';
+  let targetModel = (modelName || 'gpt-4o').trim();
+  // Map any legacy or custom strings to valid official OpenAI models
+  if (targetModel.includes('gpt-5') || targetModel === 'gpt-4o-latest') {
+    targetModel = 'gpt-4o';
+  } else if (targetModel === 'gpt-4') {
+    targetModel = 'gpt-4-turbo';
   }
 
-  const candidateModels = Array.from(new Set([requestedModel, 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4', 'gpt-5.6-luna', 'gpt-4o']));
-
-  let lastError: unknown = null;
   let rawJsonText = '';
-  let successfulModel = requestedModel;
 
-  for (const modelToTry of candidateModels) {
-    try {
-      const isO3 = modelToTry.startsWith('o1') || modelToTry.startsWith('o3');
-      const messages = isO3
-        ? [{ role: 'user', content: `${systemInstruction}\n\n${userPrompt}` }]
-        : [
-            { role: 'system', content: systemInstruction },
-            { role: 'user', content: userPrompt },
-          ];
+  try {
+    const isO1orO3 = targetModel.startsWith('o1') || targetModel.startsWith('o3');
+    const messages = isO1orO3
+      ? [{ role: 'user', content: `${systemInstruction}\n\n${userPrompt}` }]
+      : [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: userPrompt },
+        ];
 
-      const requestBody: Record<string, unknown> = {
-        model: modelToTry,
-        messages,
-        response_format: { type: 'json_object' },
-      };
+    const requestBody: Record<string, unknown> = {
+      model: targetModel,
+      messages,
+      response_format: { type: 'json_object' },
+    };
 
-      if (!isO3) {
-        requestBody.temperature = 0.2;
-      }
-
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        const errBody = await response.text();
-        let errMsg = `OpenAI API returned status ${response.status}`;
-        try {
-          const parsedErr = JSON.parse(errBody);
-          if (parsedErr?.error?.message) {
-            errMsg = parsedErr.error.message;
-          }
-        } catch {
-          // keep status msg
-        }
-        throw new Error(errMsg);
-      }
-
-      const data: any = await response.json();
-      const content = data?.choices?.[0]?.message?.content;
-      if (content && typeof content === 'string') {
-        rawJsonText = content.trim();
-        successfulModel = modelToTry;
-        break;
-      }
-    } catch (err: unknown) {
-      lastError = err;
+    if (!isO1orO3) {
+      requestBody.temperature = 0.2;
     }
-  }
 
-  if (!rawJsonText) {
-    const errorMsg = lastError instanceof Error ? lastError.message : 'OpenAI API request failed';
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      let errMsg = `OpenAI API returned status ${response.status}`;
+      try {
+        const parsedErr = JSON.parse(errBody);
+        if (parsedErr?.error?.message) {
+          errMsg = parsedErr.error.message;
+        }
+      } catch {
+        // keep status msg
+      }
+      if (response.status === 401) {
+        errMsg = 'OpenAI API key is invalid or deactivated. Please check your API key.';
+      } else if (response.status === 429) {
+        errMsg = 'OpenAI rate limit or usage quota exceeded. Please check your billing plan.';
+      } else if (response.status === 404) {
+        errMsg = `Requested model "${targetModel}" is not available with your OpenAI account.`;
+      }
+      throw new Error(errMsg);
+    }
+
+    const data: any = await response.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (content && typeof content === 'string') {
+      rawJsonText = content.trim();
+    } else {
+      throw new Error('Empty response from OpenAI');
+    }
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'OpenAI API request failed';
     return {
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
         'openai',
-        `OpenAI synthesis unavailable (${errorMsg.slice(0, 100)}). Running in deterministic rule-based mode.`
+        `OpenAI synthesis unavailable: ${errorMsg}. Running in deterministic rule-based mode.`
       ),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',
+      modelUsed: targetModel,
       provider: 'openai',
       error: errorMsg,
     };
@@ -195,7 +188,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       quickWins: parsed.quickWins?.length ? parsed.quickWins : generateDeterministicExecutiveSummary(scanResult, 'openai').quickWins,
       strategicFixes: parsed.strategicFixes?.length ? parsed.strategicFixes : generateDeterministicExecutiveSummary(scanResult, 'openai').strategicFixes,
       aiGenerated: true,
-      modelUsed: successfulModel,
+      modelUsed: targetModel,
       provider: 'openai',
     };
 
@@ -203,7 +196,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       executiveSummary,
       enhancedFindings,
       aiStatus: 'success',
-      modelUsed: successfulModel,
+      modelUsed: targetModel,
       provider: 'openai',
     };
   } catch (parseErr: unknown) {

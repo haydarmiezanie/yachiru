@@ -51,12 +51,12 @@ export async function synthesizeWithGemini(
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
         'gemini',
-        'GEMINI_API_KEY not configured. Running in offline deterministic mode.'
+        'Google Gemini API key is not configured. Running in offline deterministic mode.'
       ),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',
       provider: 'gemini',
-      error: 'GEMINI_API_KEY environment variable is not configured.',
+      error: 'Google Gemini API key is not configured. Provide a custom API key in the scan bar or set GEMINI_API_KEY.',
     };
   }
 
@@ -91,113 +91,112 @@ Provide a comprehensive, high-value AI synthesis:
 Scan Payload:
 ${JSON.stringify(structuredPayload, null, 2)}`;
 
-    // Normalize model candidates
-    let requestedModel = (modelName || 'gemini-3.1-pro').trim();
-    if (requestedModel === 'gemini-3.1-pro' || requestedModel === 'gemini-pro') {
-      requestedModel = 'gemini-3.1-pro-preview';
-    } else if (requestedModel === 'gemini-deep-think-engine') {
-      requestedModel = 'gemini-3.1-pro-preview';
-    } else if (requestedModel === 'gemini-2.5-pro') {
-      requestedModel = 'gemini-2.5-pro';
+    // Normalize model and detect thinking mode
+    let targetModel = (modelName || 'gemini-3.7-flash').trim();
+    let isThinkingModel = false;
+
+    if (targetModel === 'gemini-3.7-flash-thinking' || targetModel === 'gemini-deep-think-engine') {
+      targetModel = 'gemini-3.7-flash';
+      isThinkingModel = true;
+    } else if (targetModel === 'gemini-3.1-pro' || targetModel === 'gemini-pro' || targetModel === 'gemini-3.5-pro') {
+      targetModel = 'gemini-3.1-pro-preview';
+    } else if (targetModel === 'gemini-flash' || targetModel === 'gemini-flash-latest') {
+      targetModel = 'gemini-3.7-flash';
+    } else if (targetModel === 'gemini-flash-lite' || targetModel === 'gemini-lite') {
+      targetModel = 'gemini-3.1-flash-lite';
     }
 
-    const candidateModels = Array.from(
-      new Set([requestedModel, 'gemini-3.1-pro-preview', 'gemini-3.7-flash', 'gemini-2.5-pro'])
-    );
+    const config: any = {
+      systemInstruction: `You are an elite ClickHouse Database Architect. Your job is to provide actionable, concrete, and deep technical ClickHouse optimization advice. Avoid vague generalities—always reference specific table names, column types, settings, and SQL statements from the provided scan data.`,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          executiveOverview: {
+            type: Type.STRING,
+            description: '2-3 paragraph executive summary in clear natural language explaining the health state, key risks, and primary optimization opportunities.',
+          },
+          topRisk: {
+            type: Type.STRING,
+            description: 'The single most urgent cluster bottleneck or stability risk identified.',
+          },
+          quickWins: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: 'List of 3-5 immediate low-effort / high-reward fixes referencing specific tables/settings.',
+          },
+          strategicFixes: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: 'List of 2-4 larger architectural changes.',
+          },
+          findingEnrichments: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                rank: { type: Type.INTEGER },
+                effort: { type: Type.STRING, enum: ['Low', 'Medium', 'High'] },
+                impact: { type: Type.STRING, enum: ['Low', 'Medium', 'High', 'Critical'] },
+                riskLevel: { type: Type.STRING, enum: ['Low', 'Medium', 'High', 'Critical'] },
+                justification: { type: Type.STRING },
+                aiInsight: { type: Type.STRING },
+                aiSqlFix: { type: Type.STRING },
+              },
+              required: ['id', 'rank', 'effort', 'impact', 'aiInsight', 'aiSqlFix'],
+            },
+            description: 'Deep AI architectural insight and custom SQL remediation for each finding.',
+          },
+        },
+        required: ['executiveOverview', 'topRisk', 'quickWins', 'strategicFixes', 'findingEnrichments'],
+      },
+    };
+
+    if (isThinkingModel) {
+      config.thinkingConfig = { thinkingBudget: 4096 };
+    }
 
     let response: any = null;
-    let successfulModel = requestedModel;
+    let attempts = 0;
+    const maxAttempts = 2;
     let lastError: unknown = null;
 
-    for (const modelToTry of candidateModels) {
-      let attempts = 0;
-      const maxAttempts = 2;
+    while (attempts < maxAttempts) {
+      try {
+        attempts++;
+        response = await ai.models.generateContent({
+          model: targetModel,
+          contents: prompt,
+          config,
+        });
 
-      while (attempts < maxAttempts) {
-        try {
-          attempts++;
-          response = await ai.models.generateContent({
-            model: modelToTry,
-            contents: prompt,
-            config: {
-              systemInstruction: `You are an elite ClickHouse Database Architect. Your job is to provide actionable, concrete, and deep technical ClickHouse optimization advice. Avoid vague generalities—always reference specific table names, column types, settings, and SQL statements from the provided scan data.`,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  executiveOverview: {
-                    type: Type.STRING,
-                    description: '2-3 paragraph executive summary in clear natural language explaining the health state, key risks, and primary optimization opportunities.',
-                  },
-                  topRisk: {
-                    type: Type.STRING,
-                    description: 'The single most urgent cluster bottleneck or stability risk identified.',
-                  },
-                  quickWins: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'List of 3-5 immediate low-effort / high-reward fixes referencing specific tables/settings.',
-                  },
-                  strategicFixes: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'List of 2-4 larger architectural changes.',
-                  },
-                  findingEnrichments: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        id: { type: Type.STRING },
-                        rank: { type: Type.INTEGER },
-                        effort: { type: Type.STRING, enum: ['Low', 'Medium', 'High'] },
-                        impact: { type: Type.STRING, enum: ['Low', 'Medium', 'High', 'Critical'] },
-                        riskLevel: { type: Type.STRING, enum: ['Low', 'Medium', 'High', 'Critical'] },
-                        justification: { type: Type.STRING },
-                        aiInsight: { type: Type.STRING },
-                        aiSqlFix: { type: Type.STRING },
-                      },
-                      required: ['id', 'rank', 'effort', 'impact', 'aiInsight', 'aiSqlFix'],
-                    },
-                    description: 'Deep AI architectural insight and custom SQL remediation for each finding.',
-                  },
-                },
-                required: ['executiveOverview', 'topRisk', 'quickWins', 'strategicFixes', 'findingEnrichments'],
-              },
-            },
-          });
-
-          if (response && response.text) {
-            successfulModel = modelToTry;
-            break;
-          }
-        } catch (err: unknown) {
-          lastError = err;
-          const errMsg = err instanceof Error ? err.message : String(err);
-          const isTransient =
-            errMsg.includes('503') ||
-            errMsg.includes('high demand') ||
-            errMsg.includes('UNAVAILABLE') ||
-            errMsg.includes('429') ||
-            errMsg.includes('RESOURCE_EXHAUSTED');
-
-          if (isTransient && attempts < maxAttempts) {
-            await new Promise((res) => setTimeout(res, 750));
-            continue;
-          }
+        if (response && response.text) {
           break;
         }
-      }
+      } catch (err: unknown) {
+        lastError = err;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const isTransient =
+          errMsg.includes('503') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('UNAVAILABLE') ||
+          errMsg.includes('429') ||
+          errMsg.includes('RESOURCE_EXHAUSTED');
 
-      if (response && response.text) {
+        if (isTransient && attempts < maxAttempts) {
+          await new Promise((res) => setTimeout(res, 750));
+          continue;
+        }
         break;
       }
     }
 
     if (!response || !response.text) {
-      throw lastError || new Error('Unable to generate AI synthesis across candidate models.');
+      throw lastError || new Error(`Unable to generate AI synthesis using model ${targetModel}.`);
     }
 
+    const modelDisplayName = isThinkingModel ? `${targetModel} (Thinking Mode)` : targetModel;
     const text = response.text.trim();
     const parsed = JSON.parse(text);
 
@@ -214,7 +213,7 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       quickWins: parsed.quickWins?.length ? parsed.quickWins : generateDeterministicExecutiveSummary(scanResult, 'gemini').quickWins,
       strategicFixes: parsed.strategicFixes?.length ? parsed.strategicFixes : generateDeterministicExecutiveSummary(scanResult, 'gemini').strategicFixes,
       aiGenerated: true,
-      modelUsed: successfulModel,
+      modelUsed: modelDisplayName,
       provider: 'gemini',
     };
 
@@ -222,28 +221,39 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       executiveSummary,
       enhancedFindings,
       aiStatus: 'success',
-      modelUsed: successfulModel,
+      modelUsed: modelDisplayName,
       provider: 'gemini',
     };
   } catch (err: unknown) {
     const rawMsg = err instanceof Error ? err.message : String(err);
     let friendlyError = rawMsg;
-    try {
-      if (rawMsg.startsWith('{') && rawMsg.endsWith('}')) {
-        const parsed = JSON.parse(rawMsg);
-        if (parsed?.error?.message) {
-          friendlyError = parsed.error.message;
+
+    if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('API key not valid') || rawMsg.includes('401') || rawMsg.includes('UNAUTHENTICATED')) {
+      friendlyError = 'Gemini API Key is invalid or expired. Please verify your custom API key.';
+    } else if (rawMsg.includes('RESOURCE_EXHAUSTED') || rawMsg.includes('429') || rawMsg.includes('quota')) {
+      friendlyError = 'Gemini API quota or rate limit exceeded for this key. Please check billing or quota.';
+    } else if (rawMsg.includes('PERMISSION_DENIED') || rawMsg.includes('403')) {
+      friendlyError = 'Gemini API Permission Denied (403): Key is not permitted for the requested model.';
+    } else if (rawMsg.includes('models/') && rawMsg.includes('not found')) {
+      friendlyError = 'Requested Gemini model is not accessible or not found for this API key tier.';
+    } else {
+      try {
+        if (rawMsg.startsWith('{') && rawMsg.endsWith('}')) {
+          const parsed = JSON.parse(rawMsg);
+          if (parsed?.error?.message) {
+            friendlyError = parsed.error.message;
+          }
         }
+      } catch {
+        // keep rawMsg
       }
-    } catch {
-      // keep rawMsg
     }
 
     return {
       executiveSummary: generateDeterministicExecutiveSummary(
         scanResult,
         'gemini',
-        `Gemini AI synthesis fallback active (${friendlyError.slice(0, 120)}). Running in deterministic rule-based mode.`
+        `Gemini AI synthesis fallback active: ${friendlyError}. Running in deterministic rule-based mode.`
       ),
       enhancedFindings: scanResult.findings,
       aiStatus: 'fallback',

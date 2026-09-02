@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { History, Trash2, ArrowUpRight, TrendingUp, Calendar, Database, ShieldAlert, CheckCircle2 } from 'lucide-react';
 import { ScanReport } from '../types/yachiru';
+import { authenticatedFetch } from '../lib/api';
 
 interface ScanHistoryViewProps {
   currentReportId: string | null;
@@ -14,7 +15,7 @@ export const ScanHistoryView: React.FC<ScanHistoryViewProps> = ({ currentReportI
   const fetchHistory = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/history');
+      const res = await authenticatedFetch('/api/history');
       const data = await res.json();
       setHistory(data);
     } catch (e) {
@@ -30,7 +31,7 @@ export const ScanHistoryView: React.FC<ScanHistoryViewProps> = ({ currentReportI
 
   const handleClear = async () => {
     if (window.confirm('Are you sure you want to clear all historical scan records?')) {
-      await fetch('/api/history', { method: 'DELETE' });
+      await authenticatedFetch('/api/history', { method: 'DELETE' });
       fetchHistory();
     }
   };

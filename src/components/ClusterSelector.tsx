@@ -14,6 +14,8 @@ import {
 } from 'lucide-react';
 import { ScanTarget } from '../types/yachiru';
 
+import { authenticatedFetch } from '../lib/api';
+
 interface ClusterSelectorProps {
   target: ScanTarget;
   setTarget: React.Dispatch<React.SetStateAction<ScanTarget>>;
@@ -86,9 +88,9 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
   const handleProviderChange = (newProvider: 'gemini' | 'openai') => {
     setAiProvider(newProvider);
     if (newProvider === 'openai') {
-      setAiModel('gpt-5.6-sol');
+      setAiModel('gpt-4o');
     } else {
-      setAiModel('gemini-3.1-pro');
+      setAiModel('gemini-3.7-flash');
     }
   };
 
@@ -120,7 +122,7 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
     setTestingConn(true);
     setTestResult(null);
     try {
-      const res = await fetch('/api/clickhouse/test-connection', {
+      const res = await authenticatedFetch('/api/clickhouse/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(target),
@@ -378,19 +380,18 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
                 >
                   {aiProvider === 'gemini' ? (
                     <>
-                      <option value="gemini-3.1-pro">Gemini 3.1 Pro (Deep Reasoning & Complex Architecture)</option>
-                      <option value="gemini-deep-think-engine">Gemini Deep Think Engine (Ultra Deep Analysis & Algorithmic Tuning)</option>
-                      <option value="gemini-3.5-pro">Gemini 3.5 Pro (Advanced Multi-Modal & Schema Synthesis)</option>
                       <option value="gemini-3.7-flash">Gemini 3.7 Flash (Fast, Balanced & Low Latency)</option>
-                      <option value="gemini-2.5-pro">Gemini 2.5 Pro (Established Enterprise Grade Reasoning)</option>
+                      <option value="gemini-3.7-flash-thinking">Gemini 3.7 Flash Thinking (Deep Reasoning & Algorithmic Tuning)</option>
+                      <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview (Complex Architecture & Deep Reasoning)</option>
+                      <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Ultra Low-Latency)</option>
                     </>
                   ) : (
                     <>
-                      <option value="gpt-5.6-sol">GPT-5.6 Sol (Flagship Architecture & High-Scale Reasoning)</option>
-                      <option value="gpt-5.6-terra">GPT-5.6 Terra (Balanced Performance & Deep Query Optimization)</option>
-                      <option value="gpt-5.5">GPT-5.5 (Advanced Multi-Modal & Schema Analysis)</option>
-                      <option value="gpt-5.4">GPT-5.4 (High-Speed & Cost-Efficient SQL Tuning)</option>
-                      <option value="gpt-5.6-luna">GPT-5.6 Luna (Ultra Low-Latency & Real-Time Audit Synthesis)</option>
+                      <option value="gpt-4o">GPT-4o (Flagship Multimodal & High-Speed Architecture)</option>
+                      <option value="gpt-4o-mini">GPT-4o Mini (Fast & Cost-Efficient SQL Tuning)</option>
+                      <option value="o3-mini">o3-mini (High-Reasoning STEM & Deep Query Optimization)</option>
+                      <option value="o1">o1 (Ultra Deep Reasoning & System Architecture)</option>
+                      <option value="gpt-4-turbo">GPT-4 Turbo (High Context Database Analysis)</option>
                     </>
                   )}
                 </select>

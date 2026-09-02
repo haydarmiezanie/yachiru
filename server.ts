@@ -70,12 +70,24 @@ const scanLimiter = rateLimit({
 app.use('/api', apiLimiter);
 app.use(express.json({ limit: '10mb' }));
 
-// Minimal Authentication Middleware (Optional header-based auth if API_SECRET_KEY is configured)
+// Authentication Middleware (Protects ClickHouse and Scan History API routes)
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const secretKey = (process.env.YACHIRU_API_KEY || process.env.API_SECRET_KEY || '').trim();
 
-  // If no auth key is configured on the server, allow single-tenant access
+  // If no auth key is configured on the server
   if (!secretKey) {
+    // In strict mode (or if REQUIRE_API_KEY is enabled), reject requests when server key is missing
+    if (process.env.REQUIRE_API_KEY === 'true' || process.env.STRICT_AUTH === 'true') {
+      logger.error({ ip: req.ip, path: req.path }, 'Request blocked: REQUIRE_API_KEY is active but YACHIRU_API_KEY is not set');
+      return res.status(500).json({
+        error: 'Server configuration error: YACHIRU_API_KEY is mandatory but not configured in server environment.',
+      });
+    }
+
+    // Otherwise in open mode (single-tenant / dev mode), allow with security warning in production
+    if (process.env.NODE_ENV === 'production') {
+      logger.warn({ ip: req.ip, path: req.path }, 'Open API access: YACHIRU_API_KEY is not set in production.');
+    }
     return next();
   }
 
@@ -88,7 +100,9 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
   }
 
   logger.warn({ ip: req.ip, path: req.path }, 'Unauthorized API access attempt');
-  return res.status(401).json({ error: 'Unauthorized: Invalid or missing API key header (x-api-key or Authorization Bearer).' });
+  return res.status(401).json({
+    error: 'Unauthorized: Invalid or missing API key header (x-api-key or Authorization: Bearer <key>).',
+  });
 }
 
 // -------------------------------------------------------------
@@ -302,6 +316,17 @@ async function startServer() {
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     logger.info(`[Yachiru Server] Listening on http://0.0.0.0:${PORT}`);
+
+    const secretKey = (process.env.YACHIRU_API_KEY || process.env.API_SECRET_KEY || '').trim();
+    if (secretKey) {
+      logger.info('[Yachiru Auth] YACHIRU_API_KEY boundary is ACTIVE. API endpoints are protected.');
+    } else if (process.env.NODE_ENV === 'production') {
+      logger.warn(
+        '⚠️  SECURITY NOTICE: YACHIRU_API_KEY is not set in production. Set YACHIRU_API_KEY or REQUIRE_API_KEY=true in .env to enforce API boundary protection.'
+      );
+    } else {
+      logger.info('[Yachiru Auth] Running in development mode without API key constraint.');
+    }
   });
 
   // Graceful shutdown handling (P2)

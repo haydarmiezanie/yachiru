@@ -14,6 +14,7 @@ import { CliSimulator } from './components/CliSimulator';
 import { DocumentationModal } from './components/DocumentationModal';
 import { DimensionId, ScanReport, ScanTarget } from './types/yachiru';
 import { RotateCw, AlertCircle, Database, Play, Zap, ArrowRight, Shield } from 'lucide-react';
+import { authenticatedFetch } from './lib/api';
 
 function AuditorApp() {
   const { user, profile, loading: authLoading, isAuthorized, isAdmin } = useAuth();
@@ -31,8 +32,13 @@ function AuditorApp() {
   });
   const [aiEnabled, setAiEnabled] = useState(true);
   const [aiProvider, setAiProvider] = useState<'gemini' | 'openai'>('gemini');
-  const [aiModel, setAiModel] = useState('gemini-3.1-pro');
+  const [aiModel, setAiModel] = useState('gemini-3.7-flash');
   const [aiApiKey, setAiApiKey] = useState('');
+  const [aiAlert, setAiAlert] = useState<{
+    provider: 'gemini' | 'openai';
+    model: string;
+    message: string;
+  } | null>(null);
   const [activeTab, setActiveTab] = useState('overview');
   const [selectedDimension, setSelectedDimension] = useState<DimensionId | 'all'>('all');
   const [scanning, setScanning] = useState(false);
@@ -71,7 +77,7 @@ function AuditorApp() {
     setScanning(true);
     setError(null);
     try {
-      const res = await fetch('/api/clickhouse/scan', {
+      const res = await authenticatedFetch('/api/clickhouse/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -90,6 +96,17 @@ function AuditorApp() {
 
       const data: ScanReport = await res.json();
       setReport(data);
+
+      // Check if AI was requested but returned in fallback mode due to API key / provider error
+      if (aiEnabled && data.aiStatus === 'fallback') {
+        setAiAlert({
+          provider: aiProvider,
+          model: aiModel,
+          message: data.aiErrorMessage || `API key could not be used with ${aiProvider === 'gemini' ? 'Google Gemini' : 'OpenAI'} model "${aiModel}". Running in deterministic rule-based mode.`,
+        });
+      } else {
+        setAiAlert(null);
+      }
     } catch (err: any) {
       console.error('Scan error:', err);
       setError(err.message || 'Failed to complete cluster scan');
@@ -107,7 +124,7 @@ function AuditorApp() {
     setScanning(true);
     setError(null);
     try {
-      const res = await fetch(`/api/history/${scanId}`);
+      const res = await authenticatedFetch(`/api/history/${scanId}`);
       if (!res.ok) throw new Error('Could not fetch scan report');
       const data: ScanReport = await res.json();
       setReport(data);
@@ -194,6 +211,41 @@ function AuditorApp() {
               <button
                 onClick={() => setError(null)}
                 className="rounded-lg px-2.5 py-1.5 bg-rose-900/70 hover:bg-rose-800 text-white font-medium cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* AI Synthesis Notification Banner (when API key is inactive/invalid or quota exceeded) */}
+        {aiAlert && (
+          <div className="rounded-xl border border-amber-500/40 bg-gradient-to-r from-amber-950/60 via-slate-900/80 to-amber-950/40 p-4 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-200 shadow-lg animate-fade-in">
+            <div className="flex items-start gap-3 max-w-3xl">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/20 border border-amber-500/30 text-amber-400 mt-0.5">
+                <AlertCircle className="h-4 w-4" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-amber-300 uppercase tracking-wider text-[11px]">
+                    AI Provider Notification ({aiAlert.provider === 'gemini' ? 'Google Gemini' : 'OpenAI'})
+                  </span>
+                  <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-mono text-[10px] text-amber-200">
+                    Model: {aiAlert.model}
+                  </span>
+                </div>
+                <p className="text-amber-100/90 leading-relaxed text-xs">
+                  {aiAlert.message}
+                </p>
+                <p className="text-[11px] text-amber-300/75">
+                  The health scan completed using 100% deterministic ClickHouse rules. You can provide a custom API key in the top bar or test another model to enable AI architectural synthesis.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => setAiAlert(null)}
+                className="rounded-lg px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 font-semibold cursor-pointer transition-colors"
               >
                 Dismiss
               </button>
