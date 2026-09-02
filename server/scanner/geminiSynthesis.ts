@@ -92,15 +92,17 @@ Scan Payload:
 ${JSON.stringify(structuredPayload, null, 2)}`;
 
     // Normalize model candidates
-    let requestedModel = modelName || 'gemini-3.7-flash';
-    if (requestedModel === 'gemini-3.1-pro' || requestedModel === 'gemini-pro' || requestedModel.includes('3.1-pro')) {
+    let requestedModel = (modelName || 'gemini-3.1-pro').trim();
+    if (requestedModel === 'gemini-3.1-pro' || requestedModel === 'gemini-pro') {
       requestedModel = 'gemini-3.1-pro-preview';
-    } else if (requestedModel.includes('2.5-flash-lite') || requestedModel === 'gemini-flash-lite') {
-      requestedModel = 'gemini-3.1-flash-lite';
+    } else if (requestedModel === 'gemini-deep-think-engine') {
+      requestedModel = 'gemini-3.1-pro-preview';
+    } else if (requestedModel === 'gemini-2.5-pro') {
+      requestedModel = 'gemini-2.5-pro';
     }
 
     const candidateModels = Array.from(
-      new Set([requestedModel, 'gemini-3.7-flash', 'gemini-3.1-flash-lite'])
+      new Set([requestedModel, 'gemini-3.1-pro-preview', 'gemini-3.7-flash', 'gemini-2.5-pro'])
     );
 
     let response: any = null;

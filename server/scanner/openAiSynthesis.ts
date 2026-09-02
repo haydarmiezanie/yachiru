@@ -90,18 +90,20 @@ Provide a comprehensive, high-value AI synthesis in valid JSON format:
 Scan Payload:
 ${JSON.stringify(structuredPayload, null, 2)}`;
 
-  let requestedModel = modelName || 'gpt-4o';
-  if (requestedModel.includes('gpt-4o-mini')) {
-    requestedModel = 'gpt-4o-mini';
-  } else if (requestedModel.includes('o3-mini')) {
-    requestedModel = 'o3-mini';
-  } else if (requestedModel.includes('gpt-4o')) {
-    requestedModel = 'gpt-4o';
-  } else if (requestedModel.includes('gpt-4-turbo')) {
-    requestedModel = 'gpt-4-turbo';
+  let requestedModel = (modelName || 'gpt-5.6-sol').trim();
+  if (requestedModel.includes('gpt-5.6-sol')) {
+    requestedModel = 'gpt-5.6-sol';
+  } else if (requestedModel.includes('gpt-5.6-terra')) {
+    requestedModel = 'gpt-5.6-terra';
+  } else if (requestedModel.includes('gpt-5.6-luna')) {
+    requestedModel = 'gpt-5.6-luna';
+  } else if (requestedModel.includes('gpt-5.5')) {
+    requestedModel = 'gpt-5.5';
+  } else if (requestedModel.includes('gpt-5.4')) {
+    requestedModel = 'gpt-5.4';
   }
 
-  const candidateModels = Array.from(new Set([requestedModel, 'gpt-4o-mini', 'gpt-4o']));
+  const candidateModels = Array.from(new Set([requestedModel, 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4', 'gpt-5.6-luna', 'gpt-4o']));
 
   let lastError: unknown = null;
   let rawJsonText = '';

@@ -26,7 +26,7 @@ export function App() {
   });
   const [aiEnabled, setAiEnabled] = useState(true);
   const [aiProvider, setAiProvider] = useState<'gemini' | 'openai'>('gemini');
-  const [aiModel, setAiModel] = useState('gemini-3.7-flash');
+  const [aiModel, setAiModel] = useState('gemini-3.1-pro');
   const [aiApiKey, setAiApiKey] = useState('');
   const [activeTab, setActiveTab] = useState('overview');
   const [selectedDimension, setSelectedDimension] = useState<DimensionId | 'all'>('all');

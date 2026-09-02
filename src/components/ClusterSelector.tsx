@@ -86,9 +86,9 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
   const handleProviderChange = (newProvider: 'gemini' | 'openai') => {
     setAiProvider(newProvider);
     if (newProvider === 'openai') {
-      setAiModel('gpt-4o');
+      setAiModel('gpt-5.6-sol');
     } else {
-      setAiModel('gemini-3.7-flash');
+      setAiModel('gemini-3.1-pro');
     }
   };
 
@@ -378,16 +378,19 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
                 >
                   {aiProvider === 'gemini' ? (
                     <>
-                      <option value="gemini-3.7-flash">gemini-3.7-flash (Recommended / Balanced)</option>
-                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Deep Reasoning)</option>
-                      <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Fast / Low-Latency)</option>
+                      <option value="gemini-3.1-pro">Gemini 3.1 Pro (Deep Reasoning & Complex Architecture)</option>
+                      <option value="gemini-deep-think-engine">Gemini Deep Think Engine (Ultra Deep Analysis & Algorithmic Tuning)</option>
+                      <option value="gemini-3.5-pro">Gemini 3.5 Pro (Advanced Multi-Modal & Schema Synthesis)</option>
+                      <option value="gemini-3.7-flash">Gemini 3.7 Flash (Fast, Balanced & Low Latency)</option>
+                      <option value="gemini-2.5-pro">Gemini 2.5 Pro (Established Enterprise Grade Reasoning)</option>
                     </>
                   ) : (
                     <>
-                      <option value="gpt-4o">gpt-4o (Flagship Omni / SQL & Architecture)</option>
-                      <option value="gpt-4o-mini">gpt-4o-mini (Fast & Cost-Efficient)</option>
-                      <option value="o3-mini">o3-mini (Advanced Reasoning)</option>
-                      <option value="gpt-4-turbo">gpt-4-turbo (High Context)</option>
+                      <option value="gpt-5.6-sol">GPT-5.6 Sol (Flagship Architecture & High-Scale Reasoning)</option>
+                      <option value="gpt-5.6-terra">GPT-5.6 Terra (Balanced Performance & Deep Query Optimization)</option>
+                      <option value="gpt-5.5">GPT-5.5 (Advanced Multi-Modal & Schema Analysis)</option>
+                      <option value="gpt-5.4">GPT-5.4 (High-Speed & Cost-Efficient SQL Tuning)</option>
+                      <option value="gpt-5.6-luna">GPT-5.6 Luna (Ultra Low-Latency & Real-Time Audit Synthesis)</option>
                     </>
                   )}
                 </select>
