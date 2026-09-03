@@ -15,8 +15,6 @@ services:
       - PORT=3000
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - yachiru-data:/app/data
 
