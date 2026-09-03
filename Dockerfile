@@ -25,9 +25,12 @@ FROM node:20-slim AS builder
 
 WORKDIR /app
 
-# Copy full dependencies from deps stage
-COPY --from=deps /app/node_modules ./node_modules
+# Ensure local npm bin is prioritized in PATH
+ENV PATH="/app/node_modules/.bin:${PATH}"
+
+# Copy source code first, then overlay freshly resolved dependencies
 COPY . .
+COPY --from=deps /app/node_modules ./node_modules
 
 # Compile Vite frontend into dist/ and bundle Express server into dist/server.cjs
 RUN npm run build
