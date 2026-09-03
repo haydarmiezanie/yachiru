@@ -5,12 +5,13 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Explicitly ensure development environment so devDependencies (vite, esbuild) are installed
+# Explicitly ensure development environment and node_modules/.bin in PATH
 ENV NODE_ENV=development
+ENV PATH="/app/node_modules/.bin:${PATH}"
 
-# Install build dependencies
+# Install all dependencies including build toolchains
 COPY package*.json ./
-RUN npm install
+RUN npm install --include=dev --production=false
 
 # Copy source files
 COPY . .
