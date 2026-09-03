@@ -25,12 +25,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
+# Install production dependencies only
 COPY package*.json ./
-
-# 1. Gunakan BuildKit cache mount & skip audit/fund (tidak perlu 'npm cache clean')
-# 2. --ignore-scripts agar tidak buang waktu menjalankan lifecycle scripts
-RUN --mount=type=cache,target=/root/.npm \
-    npm install --omit=dev --no-audit --no-fund --ignore-scripts
+RUN npm install --omit=dev && npm cache clean --force
 
 # Copy compiled artifacts from builder stage
 COPY --from=builder /app/dist ./dist
@@ -38,10 +35,15 @@ COPY --from=builder /app/dist ./dist
 # Create persistent data directory for scan histories
 RUN mkdir -p /app/data && chown -R node:node /app
 
+# Switch to non-root user for container security
 USER node
+
+# Expose HTTP port
 EXPOSE 3000
 
+# Health check against Yachiru API
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
 
+# Start Yachiru server
 CMD ["node", "dist/server.cjs"]
