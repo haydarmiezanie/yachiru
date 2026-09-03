@@ -1,82 +1,52 @@
-# ===================================================
-# Stage 1: Dependencies Resolution & Installation
-# ===================================================
-FROM node:20-slim AS deps
+# ---------------------------------------------------
+# Stage 1: Build Phase
+# ---------------------------------------------------
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy dependency manifests for deterministic installation
-COPY package.json package-lock.json ./
+# Explicitly ensure development environment so devDependencies (vite, esbuild) are installed
+ENV NODE_ENV=development
 
-# Harden npm network resilience against transient socket resets (ECONNRESET)
-RUN npm config set fetch-retries 5 && \
-    npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000
+# Install build dependencies
+COPY package*.json ./
+RUN npm install
 
-# Install all dependencies (production + devDependencies required for Vite/esbuild)
-# Using BuildKit cache mount to preserve downloaded tarballs across builds
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --no-audit --no-fund
-
-# ===================================================
-# Stage 2: Build Client SPA & Server Bundle
-# ===================================================
-FROM node:20-slim AS builder
-
-WORKDIR /app
-
-# Ensure local npm bin is prioritized in PATH
-ENV PATH="/app/node_modules/.bin:${PATH}"
-
-# Copy source code first, then overlay freshly resolved dependencies
+# Copy source files
 COPY . .
-COPY --from=deps /app/node_modules ./node_modules
 
-# Compile Vite frontend into dist/ and bundle Express server into dist/server.cjs
+# Build Vite client and bundle Express server to dist/server.cjs
 RUN npm run build
 
-# ===================================================
-# Stage 3: Production Dependencies (Pruned Locally)
-# ===================================================
-FROM node:20-slim AS prod-deps
+# ---------------------------------------------------
+# Stage 2: Production Runtime
+# ---------------------------------------------------
+FROM node:20-alpine AS runner
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-COPY --from=deps /app/node_modules ./node_modules
-
-# Prune devDependencies in-place (takes ~1-2s, 0 network requests, 0 ECONNRESET risk)
-RUN npm prune --omit=dev --no-audit --no-fund
-
-# ===================================================
-# Stage 4: Production Minimal Runtime
-# ===================================================
-FROM node:20-slim AS runner
-
-WORKDIR /app
-
-# Enforce production environment
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Copy only production node_modules from prod-deps stage
-COPY --from=prod-deps /app/node_modules ./node_modules
+# Install production dependencies only
+COPY package*.json ./
+RUN npm install --omit=dev && npm cache clean --force
 
-# Copy compiled production artifacts
+# Copy compiled artifacts from builder stage
 COPY --from=builder /app/dist ./dist
-COPY package.json ./
 
-# Prepare persistent volume directory and assign non-root ownership
+# Create persistent data directory for scan histories
 RUN mkdir -p /app/data && chown -R node:node /app
 
-# Run as non-root user for security hardening
+# Switch to non-root user for container security
 USER node
 
+# Expose HTTP port
 EXPOSE 3000
 
-# Built-in lightweight healthcheck using native Node.js HTTP client (zero external binary overhead)
+# Health check against Yachiru API
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {if (r.statusCode !== 200) process.exit(1)}).on('error', () => process.exit(1))"
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
 
-# Start production server
+# Start Yachiru server
 CMD ["node", "dist/server.cjs"]
