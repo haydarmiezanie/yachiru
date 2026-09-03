@@ -1,28 +1,26 @@
 # ---------------------------------------------------
 # Stage 1: Build Phase
 # ---------------------------------------------------
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 
 WORKDIR /app
 
-# Explicitly ensure development environment and node_modules/.bin in PATH
-ENV NODE_ENV=development
-ENV PATH="/app/node_modules/.bin:${PATH}"
+# Copy package.json only to avoid lockfile libc (musl/glibc) mismatches
+COPY package.json ./
 
-# Install all dependencies including build toolchains
-COPY package*.json ./
-RUN npm install --include=dev --production=false
+# Install all dependencies (including vite, esbuild, typescript)
+RUN npm install
 
 # Copy source files
 COPY . .
 
-# Build Vite client and bundle Express server to dist/server.cjs
+# Build Vite frontend and bundle Express backend to dist/server.cjs
 RUN npm run build
 
 # ---------------------------------------------------
 # Stage 2: Production Runtime
 # ---------------------------------------------------
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 
 WORKDIR /app
 
@@ -30,7 +28,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 
 # Install production dependencies only
-COPY package*.json ./
+COPY package.json ./
 RUN npm install --omit=dev && npm cache clean --force
 
 # Copy compiled artifacts from builder stage
@@ -45,9 +43,9 @@ USER node
 # Expose HTTP port
 EXPOSE 3000
 
-# Health check against Yachiru API
+# Health check against Yachiru API using Node built-in http client
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
+  CMD node -e "require('http').get('http://localhost:3000/api/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 # Start Yachiru server
 CMD ["node", "dist/server.cjs"]
