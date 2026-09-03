@@ -1,7 +1,7 @@
 # ---------------------------------------------------
 # Stage 1: Build Phase
 # ---------------------------------------------------
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 
 WORKDIR /app
 
@@ -18,16 +18,16 @@ RUN npm run build
 # ---------------------------------------------------
 # Stage 2: Production Runtime
 # ---------------------------------------------------
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 
 WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Install production dependencies only
+# Install production runtime dependencies
 COPY package*.json ./
-RUN npm install --omit=dev && npm cache clean --force
+RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Copy compiled artifacts from builder stage
 COPY --from=builder /app/dist ./dist
@@ -41,9 +41,9 @@ USER node
 # Expose HTTP port
 EXPOSE 3000
 
-# Health check against Yachiru API
+# Health check using native Node.js (no external curl/wget dependency required)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
+  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {if (r.statusCode !== 200) process.exit(1)}).on('error', () => process.exit(1))"
 
 # Start Yachiru server
 CMD ["node", "dist/server.cjs"]
