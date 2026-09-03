@@ -13,16 +13,12 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - APP_URL=${APP_URL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - YACHIRU_API_KEY=${YACHIRU_API_KEY:-}
-      - REQUIRE_API_KEY=${REQUIRE_API_KEY:-false}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - yachiru-data:/app/data
 
 volumes:
   yachiru-data:
     driver: local
+
