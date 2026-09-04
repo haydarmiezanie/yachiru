@@ -13,6 +13,7 @@ import { ScanHistoryStore } from './server/storage/scanHistory.js';
 import { ScanReport } from './src/types/yachiru.js';
 import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validation/scanSchemas.js';
 import { logger } from './server/logger.js';
+import { requireRole } from './server/auth/rbacMiddleware.js';
 
 const app = express();
 const PORT = 3000;
@@ -72,48 +73,20 @@ const scanLimiter = rateLimit({
 app.use('/api', apiLimiter);
 app.use(express.json({ limit: '10mb' }));
 
-// Authentication Middleware (Protects ClickHouse and Scan History API routes)
-function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  const secretKeyEnv = (process.env.YACHIRU_API_KEY || process.env.API_SECRET_KEY || '').trim();
-  const allowedKeys = secretKeyEnv
-    .split(',')
-    .map((k) => k.trim())
-    .filter(Boolean);
-
-  // If no auth key is configured on the server
-  if (allowedKeys.length === 0) {
-    // In strict mode (or if REQUIRE_API_KEY is enabled), reject requests when server key is missing
-    if (process.env.REQUIRE_API_KEY === 'true' || process.env.STRICT_AUTH === 'true') {
-      logger.error({ ip: req.ip, path: req.path }, 'Request blocked: REQUIRE_API_KEY is active but YACHIRU_API_KEY is not set');
-      return res.status(500).json({
-        error: 'Server configuration error: YACHIRU_API_KEY is mandatory but not configured in server environment (.env).',
-      });
-    }
-
-    // Otherwise in open mode (single-tenant / dev mode), allow with security warning in production
-    if (process.env.NODE_ENV === 'production') {
-      logger.warn({ ip: req.ip, path: req.path }, 'Open API access: YACHIRU_API_KEY is not set in production.');
-    }
-    return next();
-  }
-
-  const headerKey = ((req.headers['x-api-key'] || req.headers['api-key']) as string)?.trim() || '';
-  const authHeader = req.headers.authorization?.trim() || '';
-  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-
-  if ((headerKey && allowedKeys.includes(headerKey)) || (bearerToken && allowedKeys.includes(bearerToken))) {
-    return next();
-  }
-
-  logger.warn({ ip: req.ip, path: req.path }, 'Unauthorized API access attempt');
-  return res.status(401).json({
-    error: 'Unauthorized: Invalid or missing API key header (x-api-key or Authorization: Bearer <key>).',
-  });
-}
+// Authentication Middleware (Enforces Firebase ID token & RBAC roles)
+// Roles: 'viewer' (read-only history), 'auditor' (scans & probes), 'admin' (destructive operations)
+const requireViewer = requireRole('viewer');
+const requireAuditor = requireRole('auditor');
+const requireAdmin = requireRole('admin');
 
 // -------------------------------------------------------------
 // API Routes
 // -------------------------------------------------------------
+
+// Current Authenticated User & Role Context
+app.get('/api/auth/me', requireViewer, (req: Request, res: Response) => {
+  return res.json({ user: req.user });
+});
 
 // Health check (Open)
 app.get('/api/health', (req: Request, res: Response) => {
@@ -148,8 +121,8 @@ app.get('/api/demo-clusters', (req: Request, res: Response) => {
   res.json(list);
 });
 
-// Test Connection (Protected + Zod Runtime Validation)
-app.post('/api/clickhouse/test-connection', authMiddleware, async (req: Request, res: Response) => {
+// Test Connection (Protected: Auditor role required + Zod Runtime Validation)
+app.post('/api/clickhouse/test-connection', requireAuditor, async (req: Request, res: Response) => {
   const parsed = TestConnectionRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -170,8 +143,8 @@ app.post('/api/clickhouse/test-connection', authMiddleware, async (req: Request,
   }
 });
 
-// Execute Full 9-Dimension Scan (Protected + Rate-limited + Zod Validation)
-app.post('/api/clickhouse/scan', authMiddleware, scanLimiter, async (req: Request, res: Response) => {
+// Execute Full 9-Dimension Scan (Protected: Auditor role required + Rate-limited + Zod Validation)
+app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Request, res: Response) => {
   // Support AI agentic options via JSON body or HTTP headers (with full alias support)
   const rawPayload = {
     ...req.body,
@@ -305,8 +278,8 @@ app.post('/api/clickhouse/scan', authMiddleware, scanLimiter, async (req: Reques
   }
 });
 
-// History Endpoints (Protected)
-app.get('/api/history', authMiddleware, async (req: Request, res: Response) => {
+// History Endpoints (Protected: Viewer role for reading, Admin role for deletion)
+app.get('/api/history', requireViewer, async (req: Request, res: Response) => {
   const scans = await ScanHistoryStore.getAllScans();
   const list = scans.map((s) => ({
     id: s.id,
@@ -322,7 +295,7 @@ app.get('/api/history', authMiddleware, async (req: Request, res: Response) => {
   res.json(list);
 });
 
-app.get('/api/history/:id', authMiddleware, async (req: Request, res: Response) => {
+app.get('/api/history/:id', requireViewer, async (req: Request, res: Response) => {
   const report = await ScanHistoryStore.getScanById(req.params.id);
   if (!report) {
     return res.status(404).json({ error: 'Scan report not found' });
@@ -330,7 +303,7 @@ app.get('/api/history/:id', authMiddleware, async (req: Request, res: Response) 
   return res.json(report);
 });
 
-app.delete('/api/history', authMiddleware, async (req: Request, res: Response) => {
+app.delete('/api/history', requireAdmin, async (req: Request, res: Response) => {
   await ScanHistoryStore.clearHistory();
   return res.json({ success: true, message: 'Scan history cleared' });
 });

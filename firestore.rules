@@ -45,6 +45,11 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // Connection probe rule for initial status checks
+    match /test/{docId} {
+      allow read: if true;
+    }
+
     // Access Requests Collection
     match /access_requests/{requestId} {
       allow read: if isAdmin() || (isAuthenticated() && resource.data.uid == request.auth.uid);

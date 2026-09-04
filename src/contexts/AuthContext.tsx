@@ -94,85 +94,92 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const email = (firebaseUser.email || '').toLowerCase().trim();
       const userRef = doc(db, 'users', firebaseUser.uid);
-
       const isSuperAdmin = email === SUPER_ADMIN_EMAIL.toLowerCase();
 
-      try {
-        const docSnap = await getDoc(userRef);
+      // Seed immediate baseline profile so the interface never freezes on offline/latency
+      const defaultProfile: UserProfile = {
+        uid: firebaseUser.uid,
+        email: email,
+        displayName: firebaseUser.displayName || email.split('@')[0] || 'User',
+        role: isSuperAdmin ? 'admin' : 'viewer',
+        status: isSuperAdmin ? 'approved' : 'pending',
+        photoURL: firebaseUser.photoURL || undefined,
+        createdAt: new Date().toISOString(),
+        lastLoginAt: new Date().toISOString(),
+      };
+      setProfile((prev) => prev || defaultProfile);
 
-        if (!docSnap.exists()) {
-          // Check if there was a pre-whitelisted invite record by email
-          let initialRole: UserRole = isSuperAdmin ? 'admin' : 'viewer';
-          let initialStatus: UserStatus = isSuperAdmin ? 'approved' : 'pending';
-
-          try {
-            const usersByEmail = query(collection(db, 'users'), where('email', '==', email));
-            const emailSnap = await getDocs(usersByEmail);
-            if (!emailSnap.empty) {
-              const inviteDoc = emailSnap.docs[0].data() as UserProfile;
-              if (inviteDoc.role) initialRole = inviteDoc.role;
-              if (inviteDoc.status) initialStatus = inviteDoc.status;
-            }
-          } catch (e) {
-            console.warn('Could not query email invites:', e);
-          }
-
-          const newProfile: UserProfile = {
-            uid: firebaseUser.uid,
-            email: email,
-            displayName: firebaseUser.displayName || email.split('@')[0] || 'User',
-            role: initialRole,
-            status: initialStatus,
-            createdAt: new Date().toISOString(),
-            lastLoginAt: new Date().toISOString(),
-          };
-
-          if (firebaseUser.photoURL) {
-            newProfile.photoURL = firebaseUser.photoURL;
-          }
-
-          await setDoc(userRef, newProfile);
-          setProfile(newProfile);
-        } else {
-          // Update last login
-          const existing = docSnap.data() as UserProfile;
-          if (isSuperAdmin && (existing.role !== 'admin' || existing.status !== 'approved')) {
-            await updateDoc(userRef, {
-              role: 'admin',
-              status: 'approved',
-              lastLoginAt: new Date().toISOString(),
-            });
-          } else {
-            await updateDoc(userRef, {
-              lastLoginAt: new Date().toISOString(),
-            });
-          }
-        }
-
-        // Real-time listener for profile changes (e.g. when an admin approves or updates role)
-        unsubscribeProfile = onSnapshot(userRef, (snapshot) => {
+      // Real-time listener for profile changes (handles both offline cache and live server updates seamlessly)
+      unsubscribeProfile = onSnapshot(
+        userRef,
+        async (snapshot) => {
+          const hasPendingWrites = snapshot.metadata?.hasPendingWrites;
           if (snapshot.exists()) {
-            setProfile(snapshot.data() as UserProfile);
+            const remoteProfile = snapshot.data() as UserProfile;
+            setProfile(remoteProfile);
+            setLoading(false);
+
+            if (isSuperAdmin && (remoteProfile.role !== 'admin' || remoteProfile.status !== 'approved')) {
+              try {
+                await updateDoc(userRef, {
+                  role: 'admin',
+                  status: 'approved',
+                  lastLoginAt: new Date().toISOString(),
+                });
+              } catch (updateErr) {
+                console.warn('Could not sync super admin elevation:', updateErr);
+              }
+            }
+          } else if (!hasPendingWrites) {
+            // Document does not exist yet on server or in local pending queue: bootstrap new profile
+            let initialRole: UserRole = isSuperAdmin ? 'admin' : 'viewer';
+            let initialStatus: UserStatus = isSuperAdmin ? 'approved' : 'pending';
+
+            try {
+              const usersByEmail = query(collection(db, 'users'), where('email', '==', email));
+              const emailSnap = await getDocs(usersByEmail);
+              if (!emailSnap.empty) {
+                const inviteDoc = emailSnap.docs[0].data() as UserProfile;
+                if (inviteDoc.role) initialRole = inviteDoc.role;
+                if (inviteDoc.status) initialStatus = inviteDoc.status;
+              }
+            } catch (e) {
+              console.warn('Could not query email invites (using default role/status):', e);
+            }
+
+            const newProfile: UserProfile = {
+              uid: firebaseUser.uid,
+              email: email,
+              displayName: firebaseUser.displayName || email.split('@')[0] || 'User',
+              role: initialRole,
+              status: initialStatus,
+              photoURL: firebaseUser.photoURL || undefined,
+              createdAt: new Date().toISOString(),
+              lastLoginAt: new Date().toISOString(),
+            };
+
+            try {
+              await setDoc(userRef, newProfile);
+              setProfile(newProfile);
+            } catch (createErr: any) {
+              if (createErr?.message?.includes('the client is offline')) {
+                console.warn('User profile creation queued locally (client currently offline)');
+              } else {
+                console.error('Error creating user profile:', createErr);
+              }
+            }
+            setLoading(false);
+          }
+        },
+        (err) => {
+          if (err.message.includes('the client is offline') || err.message.includes('offline')) {
+            console.warn('User profile listener operating in offline mode.');
+          } else {
+            console.error('User profile subscription error:', err);
           }
           setLoading(false);
-        }, (err) => {
-          console.error('User profile subscription error:', err);
-          setLoading(false);
-        });
-      } catch (err: any) {
-        console.error('Error synchronizing user doc:', err);
-        // Fallback profile if offline/permission issue
-        setProfile({
-          uid: firebaseUser.uid,
-          email: email,
-          displayName: firebaseUser.displayName || 'User',
-          role: isSuperAdmin ? 'admin' : 'viewer',
-          status: isSuperAdmin ? 'approved' : 'pending',
-          createdAt: new Date().toISOString(),
-          lastLoginAt: new Date().toISOString(),
-        });
-        setLoading(false);
-      }
+        }
+      );
     });
 
     return () => {

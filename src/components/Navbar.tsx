@@ -35,7 +35,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
 }) => {
-  const { user, profile, isAdmin, signOut } = useAuth();
+  const { user, profile, isAdmin, isAuditor, signOut } = useAuth();
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
 
   return (
@@ -171,11 +171,20 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={onScan}
-            disabled={scanning}
-            className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-1.5 text-sm font-semibold text-slate-950 shadow-md shadow-amber-500/20 hover:from-amber-400 hover:to-orange-400 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
+            disabled={scanning || !isAuditor}
+            title={
+              !isAuditor
+                ? 'Your role is Viewer (read-only). Auditor or Admin role is required to run audits.'
+                : 'Execute 9-dimension health audit'
+            }
+            className={`flex items-center gap-2 rounded-lg px-4 py-1.5 text-sm font-semibold transition-all shadow-md ${
+              !isAuditor
+                ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed opacity-60'
+                : 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-amber-500/20 hover:from-amber-400 hover:to-orange-400 active:scale-95 disabled:opacity-50 cursor-pointer'
+            }`}
           >
             <RotateCw className={`h-4 w-4 ${scanning ? 'animate-spin' : ''}`} />
-            <span>{scanning ? 'Scanning...' : 'Run Audit'}</span>
+            <span>{scanning ? 'Scanning...' : !isAuditor ? 'Read-Only' : 'Run Audit'}</span>
           </button>
 
           {/* User Profile Pill & Dropdown */}

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { History, Trash2, ArrowUpRight, TrendingUp, Calendar, Database, ShieldAlert, CheckCircle2 } from 'lucide-react';
 import { ScanReport } from '../types/yachiru';
 import { authenticatedFetch } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
 
 interface ScanHistoryViewProps {
   currentReportId: string | null;
@@ -9,6 +10,7 @@ interface ScanHistoryViewProps {
 }
 
 export const ScanHistoryView: React.FC<ScanHistoryViewProps> = ({ currentReportId, onLoadScan }) => {
+  const { isAdmin } = useAuth();
   const [history, setHistory] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -43,13 +45,14 @@ export const ScanHistoryView: React.FC<ScanHistoryViewProps> = ({ currentReportI
           <History className="h-5 w-5 text-amber-400" />
           <h3 className="font-semibold text-white">Historical Scan Audit Trail & Score Evolution</h3>
         </div>
-        {history.length > 0 && (
+        {isAdmin && history.length > 0 && (
           <button
             onClick={handleClear}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-rose-400 hover:bg-rose-950/40 transition-colors"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-rose-400 hover:bg-rose-950/40 transition-colors cursor-pointer"
+            title="Admin-only: Delete all scan audit records"
           >
             <Trash2 className="h-3.5 w-3.5" />
-            <span>Clear History</span>
+            <span>Clear History (Admin)</span>
           </button>
         )}
       </div>

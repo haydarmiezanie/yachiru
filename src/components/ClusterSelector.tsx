@@ -13,8 +13,8 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { ScanTarget } from '../types/yachiru';
-
 import { authenticatedFetch } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
 
 interface ClusterSelectorProps {
   target: ScanTarget;
@@ -80,6 +80,7 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
   onScan,
   scanning,
 }) => {
+  const { isAuditor } = useAuth();
   const [activeMode, setActiveMode] = useState<'demo' | 'custom'>(target.isDemoCluster ? 'demo' : 'custom');
   const [testingConn, setTestingConn] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -419,13 +420,24 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
         {/* Execute Scan Trigger */}
         <button
           onClick={onScan}
-          disabled={scanning}
-          className="flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 active:scale-95 transition-all shadow-md shadow-amber-500/20 cursor-pointer shrink-0"
+          disabled={scanning || !isAuditor}
+          title={
+            !isAuditor
+              ? 'Your role is Viewer (read-only). Auditor or Admin role is required to run scans.'
+              : undefined
+          }
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all shadow-md shrink-0 ${
+            !isAuditor
+              ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed opacity-60'
+              : 'bg-amber-500 text-slate-950 hover:bg-amber-400 active:scale-95 shadow-amber-500/20 cursor-pointer'
+          }`}
         >
           <RefreshCw className={`h-3.5 w-3.5 ${scanning ? 'animate-spin' : ''}`} />
           <span>
             {scanning
               ? 'Auditing 9 Dimensions...'
+              : !isAuditor
+              ? 'Read-Only (Viewer)'
               : activeMode === 'demo'
               ? 'Execute Demo Cluster Scan'
               : 'Execute Database Scan'}

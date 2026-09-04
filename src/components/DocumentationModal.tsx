@@ -520,16 +520,26 @@ docker compose up -d
                   </div>
                 </div>
 
-                {/* Headers required */}
-                <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
-                  <span className="text-[11px] font-semibold text-slate-200">Accepted Request Headers:</span>
+                {/* Headers required & RBAC Matrix */}
+                <div className="space-y-2 pt-2 border-t border-slate-800/80">
+                  <span className="text-[11px] font-semibold text-slate-200">Accepted Authentication & RBAC Headers:</span>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-[11px]">
                     <div className="p-2 rounded bg-slate-900 border border-slate-800 text-slate-300">
-                      <span className="text-amber-400">x-api-key:</span> &lt;your_secret_api_key&gt;
+                      <span className="text-amber-400">Authorization:</span> Bearer &lt;firebase_id_token&gt;
+                      <p className="text-[10px] text-slate-400 font-sans mt-0.5">Verified by Firebase Admin. Enforces User Role (Admin / Auditor / Viewer) and Approval Status.</p>
                     </div>
                     <div className="p-2 rounded bg-slate-900 border border-slate-800 text-slate-300">
-                      <span className="text-amber-400">Authorization:</span> Bearer &lt;your_secret_api_key&gt;
+                      <span className="text-amber-400">x-api-key:</span> &lt;your_secret_api_key&gt;
+                      <p className="text-[10px] text-slate-400 font-sans mt-0.5">Machine Service Account key for CI/CD automation & headless scripts.</p>
                     </div>
+                  </div>
+                  <div className="p-2 rounded bg-slate-900/60 border border-slate-800 text-[10px] text-slate-400 space-y-1">
+                    <span className="font-semibold text-slate-300">Server-Side Enforced Endpoint Permissions:</span>
+                    <ul className="list-disc pl-4 space-y-0.5 text-slate-400">
+                      <li><strong className="text-slate-200">Viewer (Rank 0):</strong> Read-only access to history (<code className="text-amber-300">GET /api/history</code>) and report scorecards.</li>
+                      <li><strong className="text-slate-200">Auditor (Rank 1):</strong> Can execute cluster audits (<code className="text-amber-300">POST /api/clickhouse/scan</code>) and test connections.</li>
+                      <li><strong className="text-slate-200">Admin (Rank 2):</strong> Full control, user management, and history purging (<code className="text-amber-300">DELETE /api/history</code>).</li>
+                    </ul>
                   </div>
                 </div>
 

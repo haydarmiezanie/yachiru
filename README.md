@@ -48,16 +48,21 @@ A developer-grade, zero-mutation audit and optimization platform for ClickHouse.
 
 ---
 
-## 🔒 Security Architecture: Frontend Portal vs. Backend API
+## 🔒 Security Architecture: End-to-End Cryptographic RBAC
 
-Yachiru adopts a pragmatic defense-in-depth model:
+Yachiru enforces strict, server-side Role-Based Access Control (RBAC) across both the web portal and backend API endpoints:
 
-| Layer | Technology | Purpose & Scope |
+| Layer | Technology | Enforcement & Scope |
 |---|---|---|
-| **Tier 1: Web Portal Access** | Firebase Auth + Firestore Rules | Controls browser UI access, user registration, onboarding approval queues, and team role management (Admin / Auditor / Viewer). |
-| **Tier 2: Backend API Boundary** | `YACHIRU_API_KEY` (`x-api-key` or `Bearer`) | Protects server-side `/api/clickhouse/*` and `/api/history/*` endpoints from unauthorized REST calls or programmatic abuse. |
+| **End-User Authentication** | Firebase Auth (`Authorization: Bearer <ID_Token>`) | Cryptographically verified on the Express server via `firebase-admin/auth` (`verifyIdToken`). Token validity, expiration, and project binding are strictly enforced. |
+| **Server-Side RBAC Enforcement** | `requireRole('viewer' \| 'auditor' \| 'admin')` | Queries user document from Firestore (via Admin SDK with REST fallback) to verify `status === 'approved'` and enforce the hierarchical role rank. |
+| **Machine Service Account** | `YACHIRU_API_KEY` (`x-api-key`) | Grants authorized automated scripts, CI/CD runners, and headless workers access without requiring an interactive browser session. |
 
-> **Note on Architecture**: The React portal uses client-side Firebase Auth and Firestore security rules to manage user sessions and roles. The Node/Express server does not require Firebase Admin service account keys; instead, server-side endpoint protection is enforced via `YACHIRU_API_KEY`. In production deployments, administrators should define `YACHIRU_API_KEY` (and optionally `REQUIRE_API_KEY=true`) in their environment to enforce strict API access control.
+### Role Hierarchy & Endpoint Permissions:
+- **`viewer` (Rank 0)**: Read-only access to health scorecards, scan history (`GET /api/history`), and report views (`GET /api/history/:id`). Direct API attempts by Viewers to trigger scans receive `403 Forbidden: Insufficient role`.
+- **`auditor` (Rank 1)**: Authorized to execute live cluster scans (`POST /api/clickhouse/scan`), test database connections (`POST /api/clickhouse/test-connection`), and inspect query workloads. Blocked from deleting history.
+- **`admin` (Rank 2)**: Full administrative control, including clearing historical audits (`DELETE /api/history`) and managing team access whitelist/approvals.
+- **Super Admin** (`idarstore24@gmail.com`): Master administrator with automatic approval, full role promotion authority, and complete system oversight.
 
 ---
 
