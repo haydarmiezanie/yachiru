@@ -13,7 +13,8 @@ import { ScanHistoryStore } from './server/storage/scanHistory.js';
 import { ScanReport } from './src/types/yachiru.js';
 import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validation/scanSchemas.js';
 import { logger } from './server/logger.js';
-import { requireRole, isRequireApiKey, isStrictAuth } from './server/auth/rbacMiddleware.js';
+import { requireRole, isRequireApiKey, isStrictAuth, safeCompare, matchesAllowedApiKey } from './server/auth/rbacMiddleware.js';
+export { safeCompare, matchesAllowedApiKey };
 
 export function resolveAllowedOrigins(env = process.env): string[] {
   const configured = (env.ALLOWED_ORIGINS || '')

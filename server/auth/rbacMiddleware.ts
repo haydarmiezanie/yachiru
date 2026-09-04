@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { timingSafeEqual } from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { initializeApp, getApps, App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
@@ -220,6 +221,39 @@ export function isStrictAuth(): boolean {
 }
 
 /**
+ * Timing-safe constant-time string comparison preventing side-channel timing attacks
+ * in secret authentication verification (OWASP compliance).
+ */
+export function safeCompare(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') {
+    return false;
+  }
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) {
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Validates whether a candidate API key matches any key in allowedKeys
+ * using constant-time string comparisons.
+ */
+export function matchesAllowedApiKey(candidate: string, allowedKeys: string[]): boolean {
+  if (!candidate || !allowedKeys || allowedKeys.length === 0) {
+    return false;
+  }
+  let matched = false;
+  for (const key of allowedKeys) {
+    if (safeCompare(candidate, key)) {
+      matched = true;
+    }
+  }
+  return matched;
+}
+
+/**
  * Core RBAC Middleware enforcing minimum role ('viewer' | 'auditor' | 'admin')
  * and strict user approval status on the server.
  */
@@ -294,7 +328,7 @@ export function requireRole(minRole: UserRole = 'viewer') {
 
     const candidateApiKey = headerApiKey || (bearerToken && bearerToken.split('.').length !== 3 ? bearerToken : '');
 
-    if (candidateApiKey && allowedKeys.length > 0 && allowedKeys.includes(candidateApiKey)) {
+    if (candidateApiKey && matchesAllowedApiKey(candidateApiKey, allowedKeys)) {
       req.user = {
         uid: 'machine-service-account',
         email: 'system@yachiru.internal',
