@@ -28,18 +28,25 @@ export async function synthesizeWithAI(
   const provider = options.provider || 'gemini';
 
   if (provider === 'openai') {
+    const validOpenAiModel = options.modelName && !options.modelName.startsWith('gemini')
+      ? options.modelName
+      : 'gpt-4o';
     return synthesizeWithOpenAi(scanResult, {
       aiEnabled: options.aiEnabled,
-      modelName: options.modelName || 'gpt-5.6-sol',
+      modelName: validOpenAiModel,
       databaseName: options.databaseName,
       clusterName: options.clusterName,
       apiKey: options.apiKey,
     });
   }
 
+  const validGeminiModel = options.modelName && !options.modelName.startsWith('gpt')
+    ? options.modelName
+    : 'gemini-3.7-flash';
+
   return synthesizeWithGemini(scanResult, {
     aiEnabled: options.aiEnabled,
-    modelName: options.modelName || 'gemini-3.1-pro-preview',
+    modelName: validGeminiModel,
     databaseName: options.databaseName,
     clusterName: options.clusterName,
     apiKey: options.apiKey,

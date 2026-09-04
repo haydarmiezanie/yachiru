@@ -172,7 +172,40 @@ app.post('/api/clickhouse/test-connection', authMiddleware, async (req: Request,
 
 // Execute Full 9-Dimension Scan (Protected + Rate-limited + Zod Validation)
 app.post('/api/clickhouse/scan', authMiddleware, scanLimiter, async (req: Request, res: Response) => {
-  const parsed = ScanRequestSchema.safeParse(req.body);
+  // Support AI agentic options via JSON body or HTTP headers (with full alias support)
+  const rawPayload = {
+    ...req.body,
+    aiProvider:
+      req.body?.aiProvider ||
+      req.body?.provider ||
+      req.body?.ai_provider ||
+      (req.headers['x-ai-provider'] as string) ||
+      undefined,
+    aiModel:
+      req.body?.aiModel ||
+      req.body?.model ||
+      req.body?.ai_model ||
+      (req.headers['x-ai-model'] as string) ||
+      undefined,
+    aiApiKey:
+      req.body?.aiApiKey ||
+      req.body?.apiKey ||
+      req.body?.customApiKey ||
+      req.body?.customKey ||
+      req.body?.ai_api_key ||
+      req.body?.openai_api_key ||
+      req.body?.openai_key ||
+      req.body?.gemini_api_key ||
+      req.body?.gemini_key ||
+      ((req.headers['x-ai-api-key'] ||
+        req.headers['x-openai-key'] ||
+        req.headers['x-gemini-key'] ||
+        req.headers['x-custom-api-key'] ||
+        req.headers['x-ai-key']) as string) ||
+      undefined,
+  };
+
+  const parsed = ScanRequestSchema.safeParse(rawPayload);
   if (!parsed.success) {
     return res.status(400).json({
       error: 'Invalid scan request payload',

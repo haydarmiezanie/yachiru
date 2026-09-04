@@ -44,7 +44,13 @@ function AuditorApp() {
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [docsOpen, setDocsOpen] = useState(false);
+  const [docsInitialTab, setDocsInitialTab] = useState<'overview' | 'api' | 'docker'>('overview');
   const [userManagementOpen, setUserManagementOpen] = useState(false);
+
+  const handleOpenDocs = (tab: 'overview' | 'api' | 'docker' = 'overview') => {
+    setDocsInitialTab(tab);
+    setDocsOpen(true);
+  };
 
   // If Auth is loading initial state
   if (authLoading) {
@@ -160,7 +166,7 @@ function AuditorApp() {
         report={report}
         scanning={scanning}
         onScan={() => executeScan(target)}
-        onOpenDocs={() => setDocsOpen(true)}
+        onOpenDocs={handleOpenDocs}
         onOpenUserManagement={() => setUserManagementOpen(true)}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -370,7 +376,11 @@ function AuditorApp() {
       </main>
 
       {/* Docs & Setup Grants Modal */}
-      <DocumentationModal isOpen={docsOpen} onClose={() => setDocsOpen(false)} />
+      <DocumentationModal
+        isOpen={docsOpen}
+        onClose={() => setDocsOpen(false)}
+        initialTab={docsInitialTab}
+      />
 
       {/* Admin User Management Modal */}
       {isAdmin && (

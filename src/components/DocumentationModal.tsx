@@ -1,26 +1,40 @@
-import React, { useState } from 'react';
-import { X, ShieldCheck, BookOpen, Layers, Check, Copy, Container, Terminal, Code, Globe, Key, ArrowRight } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, ShieldCheck, BookOpen, Layers, Check, Copy, Container, Terminal, Code, Globe, Key, ArrowRight, Database, History, RefreshCw, Sparkles, Bot, Cpu, CheckCircle2 } from 'lucide-react';
 
 interface DocumentationModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: 'overview' | 'api' | 'docker';
 }
 
-export const DocumentationModal: React.FC<DocumentationModalProps> = ({ isOpen, onClose }) => {
-  const [modalTab, setModalTab] = useState<'overview' | 'api' | 'docker'>('overview');
+export const DocumentationModal: React.FC<DocumentationModalProps> = ({ isOpen, onClose, initialTab = 'overview' }) => {
+  const [modalTab, setModalTab] = useState<'overview' | 'api' | 'docker'>(initialTab);
   const [copiedSql, setCopiedSql] = useState(false);
   const [copiedDockerRun, setCopiedDockerRun] = useState(false);
   const [copiedCompose, setCopiedCompose] = useState(false);
   const [copiedApiTest, setCopiedApiTest] = useState(false);
   const [copiedApiDemo, setCopiedApiDemo] = useState(false);
-  const [copiedApiScan, setCopiedApiScan] = useState(false);
+  const [copiedApiScanGemini, setCopiedApiScanGemini] = useState(false);
+  const [copiedApiScanOpenAi, setCopiedApiScanOpenAi] = useState(false);
+  const [copiedApiScanHeaders, setCopiedApiScanHeaders] = useState(false);
+  const [copiedApiScanOffline, setCopiedApiScanOffline] = useState(false);
+  const [copiedApiHistory, setCopiedApiHistory] = useState(false);
+  const [copiedApiDatabases, setCopiedApiDatabases] = useState(false);
   const [copiedApiHealth, setCopiedApiHealth] = useState(false);
   const [copiedEnvSnippet, setCopiedEnvSnippet] = useState(false);
   const [apiSnippetLang, setApiSnippetLang] = useState<'curl' | 'node' | 'python'>('curl');
+  const [aiScanTab, setAiScanTab] = useState<'gemini' | 'openai' | 'headers' | 'offline'>('gemini');
+  const [customAiKey, setCustomAiKey] = useState('');
   const [clientApiKey, setClientApiKey] = useState(() => {
     return (typeof window !== 'undefined' ? localStorage.getItem('yachiru_api_key') : '') || '';
   });
   const [apiKeySaved, setApiKeySaved] = useState(false);
+
+  useEffect(() => {
+    if (isOpen && initialTab) {
+      setModalTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 
@@ -37,6 +51,8 @@ export const DocumentationModal: React.FC<DocumentationModalProps> = ({ isOpen, 
       setTimeout(() => setApiKeySaved(false), 2500);
     }
   };
+
+  const activeKey = clientApiKey.trim() || 'your_strong_secret_api_key_here';
 
   const vmEnvSnippet = `
 # On your VM: nano .env
@@ -72,6 +88,7 @@ GRANT SELECT ON target_db.* TO yachiru_readonly;
 # 1. Test connection to a live ClickHouse instance
 curl -X POST https://yachiru.id/api/clickhouse/test-connection \\
   -H "Content-Type: application/json" \\
+  -H "x-api-key: ${activeKey}" \\
   -d '{
     "host": "clickhouse.internal.company.com",
     "port": 8123,
@@ -86,16 +103,65 @@ curl -X POST https://yachiru.id/api/clickhouse/test-connection \\
 # 2. Test connection with built-in Mock Demo Cluster
 curl -X POST https://yachiru.id/api/clickhouse/test-connection \\
   -H "Content-Type: application/json" \\
+  -H "x-api-key: ${activeKey}" \\
   -d '{
     "isDemoCluster": true,
     "demoClusterId": "apex_ecommerce"
   }'
 `.trim();
 
-  const apiScanCurl = `
-# 3. Trigger full 9-dimension audit scan & AI analysis
+  const apiScanGeminiCurl = `
+# 3A. Run Full Audit with Google Gemini 3.7 Flash Agentic Synthesis
 curl -X POST https://yachiru.id/api/clickhouse/scan \\
   -H "Content-Type: application/json" \\
+  -H "x-api-key: ${activeKey}" \\
+  -d '{
+    "target": {
+      "host": "clickhouse.internal.company.com",
+      "port": 8123,
+      "protocol": "http",
+      "user": "yachiru_readonly",
+      "password": "StrongPassword123!",
+      "database": "analytics",
+      "lookbackDays": 7
+    },
+    "aiEnabled": true,
+    "aiProvider": "gemini",
+    "aiModel": "gemini-3.7-flash",
+    "aiApiKey": "${customAiKey.trim() || 'AIzaSy_YOUR_GEMINI_KEY (or omit if set in VM .env)'}"
+  }'
+`.trim();
+
+  const apiScanOpenAiCurl = `
+# 3B. Run Full Audit with OpenAI GPT-4o Agentic Synthesis
+curl -X POST https://yachiru.id/api/clickhouse/scan \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: ${activeKey}" \\
+  -d '{
+    "target": {
+      "host": "clickhouse.internal.company.com",
+      "port": 8123,
+      "protocol": "http",
+      "user": "yachiru_readonly",
+      "password": "StrongPassword123!",
+      "database": "analytics",
+      "lookbackDays": 7
+    },
+    "aiEnabled": true,
+    "aiProvider": "openai",
+    "aiModel": "gpt-4o",
+    "aiApiKey": "${customAiKey.trim() || 'sk-proj_YOUR_OPENAI_KEY (or omit if set in VM .env)'}"
+  }'
+`.trim();
+
+  const apiScanHeadersCurl = `
+# 3C. Configure AI Agent Brain & Keys via HTTP Headers
+curl -X POST https://yachiru.id/api/clickhouse/scan \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: ${activeKey}" \\
+  -H "x-ai-provider: openai" \\
+  -H "x-ai-model: gpt-4o" \\
+  -H "x-ai-api-key: ${customAiKey.trim() || 'sk-proj_YOUR_OPENAI_KEY'}" \\
   -d '{
     "target": {
       "host": "clickhouse.internal.company.com",
@@ -109,50 +175,117 @@ curl -X POST https://yachiru.id/api/clickhouse/scan \\
   }'
 `.trim();
 
-  const apiHealthCurl = `
-# 4. Service Health Check endpoint
-curl -X GET https://yachiru.id/api/health
+  const apiScanOfflineCurl = `
+# 3D. 100% Deterministic Engine Only (Offline / Zero AI Keys Needed)
+curl -X POST https://yachiru.id/api/clickhouse/scan \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: ${activeKey}" \\
+  -d '{
+    "target": {
+      "host": "clickhouse.internal.company.com",
+      "port": 8123,
+      "protocol": "http",
+      "user": "yachiru_readonly",
+      "password": "StrongPassword123!",
+      "database": "analytics"
+    },
+    "aiEnabled": false
+  }'
 `.trim();
 
-  const apiNodeSnippet = `
-// Node.js (v18+) Testing ClickHouse Connection
-const testConnection = async () => {
-  const response = await fetch('https://yachiru.id/api/clickhouse/test-connection', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      host: 'clickhouse.internal.company.com',
-      port: 8123,
-      protocol: 'http',
-      user: 'yachiru_readonly',
-      password: 'StrongPassword123!',
-      database: 'default'
-    })
-  });
-  const data = await response.json();
-  console.log('Result:', data);
-};
-
-testConnection();
-`.trim();
-
-  const apiPythonSnippet = `
-# Python (requests) Testing ClickHouse Connection
-import requests
-
-url = "https://yachiru.id/api/clickhouse/test-connection"
-payload = {
+  const apiDatabasesCurl = `
+# 4. Discover databases on a ClickHouse cluster
+curl -X POST https://yachiru.id/api/clickhouse/databases \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: ${activeKey}" \\
+  -d '{
     "host": "clickhouse.internal.company.com",
     "port": 8123,
     "protocol": "http",
     "user": "yachiru_readonly",
-    "password": "StrongPassword123!",
-    "database": "default"
+    "password": "StrongPassword123!"
+  }'
+`.trim();
+
+  const apiHistoryCurl = `
+# 5. Retrieve saved audit scan history
+curl -X GET https://yachiru.id/api/history \\
+  -H "x-api-key: ${activeKey}"
+`.trim();
+
+  const apiHealthCurl = `
+# 6. Service Health Check endpoint (Public, probe)
+curl -X GET https://yachiru.id/api/health
+`.trim();
+
+  const apiNodeSnippet = `
+// Node.js (v18+) Triggering ClickHouse Audit with OpenAI / Gemini Agentic Synthesis
+const runAuditScan = async () => {
+  const response = await fetch('https://yachiru.id/api/clickhouse/scan', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': '${activeKey}'
+    },
+    body: JSON.stringify({
+      target: {
+        host: 'clickhouse.internal.company.com',
+        port: 8123,
+        protocol: 'http',
+        user: 'yachiru_readonly',
+        password: 'StrongPassword123!',
+        database: 'analytics',
+        lookbackDays: 7
+      },
+      // Agentic AI synthesis options:
+      aiEnabled: true,
+      aiProvider: 'openai',       // 'gemini' | 'openai'
+      aiModel: 'gpt-4o',          // or 'gemini-3.7-flash'
+      aiApiKey: '${customAiKey.trim() || 'sk-proj_YOUR_OPENAI_KEY'}' // Optional if set on VM server .env
+    })
+  });
+
+  const report = await response.json();
+  console.log('Overall Grade:', report.overallGrade, \`(\${report.overallScore}/100)\`);
+  console.log('Executive Summary:', report.executiveSummary);
+  console.log('Automated DDL Migrations:', report.findings.map(f => f.suggestedDdl).filter(Boolean));
+};
+
+runAuditScan();
+`.trim();
+
+  const apiPythonSnippet = `
+# Python (requests) ClickHouse Audit with OpenAI / Gemini Agentic Synthesis
+import requests
+
+url = "https://yachiru.id/api/clickhouse/scan"
+headers = {
+    "Content-Type": "application/json",
+    "x-api-key": "${activeKey}"
+}
+payload = {
+    "target": {
+        "host": "clickhouse.internal.company.com",
+        "port": 8123,
+        "protocol": "http",
+        "user": "yachiru_readonly",
+        "password": "StrongPassword123!",
+        "database": "analytics",
+        "lookbackDays": 7
+    },
+    # Agentic AI synthesis options:
+    "aiEnabled": True,
+    "aiProvider": "openai",      # 'gemini' | 'openai'
+    "aiModel": "gpt-4o",         # or 'gemini-3.7-flash'
+    "aiApiKey": "${customAiKey.trim() || 'sk-proj_YOUR_OPENAI_KEY'}" # Optional if set in VM .env
 }
 
-response = requests.post(url, json=payload)
-print("Status:", response.status_code)
-print("Result:", response.json())
+response = requests.post(url, json=payload, headers=headers)
+report = response.json()
+
+print(f"Overall Grade: {report.get('overallGrade')} ({report.get('overallScore')}/100)")
+print("Executive Summary:", report.get("executiveSummary", {}).get("summary"))
+print("AI Findings Count:", len(report.get("findings", [])))
 `.trim();
 
   const dockerRunCmd = `
@@ -370,14 +503,21 @@ docker compose up -d
 
                 <div className="space-y-2 text-[11px] text-slate-300">
                   <p>
-                    To require that <strong>every request MUST provide your secret API Key</strong>, add these two environment variables to your VM server's <code className="text-amber-300 font-mono">.env</code> file:
+                    Configure your VM server's <code className="text-amber-300 font-mono">.env</code> file with both gateway security and your preferred AI provider keys:
                   </p>
                   <pre className="p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-[11px] text-amber-200 overflow-x-auto">
                     <code>{vmEnvSnippet}</code>
                   </pre>
-                  <p className="text-slate-400">
-                    When <code className="text-amber-300 font-mono">REQUIRE_API_KEY=true</code> is active, the server immediately rejects with <strong>401 Unauthorized</strong> any requests to <code className="text-amber-300 font-mono">/api/clickhouse/*</code> and <code className="text-amber-300 font-mono">/api/history/*</code> that lack a matching key.
-                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-[10px]">
+                    <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
+                      <strong className="text-amber-300">1. Gateway Security (YACHIRU_API_KEY):</strong>
+                      <p className="text-slate-400 mt-0.5">Enforces mandatory authentication. When active, requests lacking <code className="text-amber-400">x-api-key</code> are rejected with 401.</p>
+                    </div>
+                    <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
+                      <strong className="text-emerald-300">2. AI Synthesis (GEMINI & OPENAI):</strong>
+                      <p className="text-slate-400 mt-0.5">Set once in <code className="text-emerald-400">.env</code> so your scripts/cURLs don't need to include AI keys, OR pass dynamically via <code className="text-emerald-400">aiApiKey</code>.</p>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Headers required */}
@@ -487,35 +627,251 @@ docker compose up -d
                 </pre>
               </div>
 
-              {/* Endpoint 3: Run Full Scan */}
-              <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 space-y-3">
-                <div className="flex items-center justify-between">
+              {/* Endpoint 3: Run Full Scan & Agentic AI Synthesis */}
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div className="flex items-center gap-2 font-bold text-emerald-400">
                     <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 uppercase">
                       POST
                     </span>
                     <span className="font-mono text-xs">/api/clickhouse/scan</span>
+                    <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] text-amber-300 font-medium">
+                      <Sparkles className="h-2.5 w-2.5" /> Agentic AI Synthesis
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {aiScanTab === 'gemini' && (
+                      <button
+                        onClick={() => handleCopy(apiScanGeminiCurl, setCopiedApiScanGemini)}
+                        className="flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/30 transition-colors cursor-pointer"
+                      >
+                        {copiedApiScanGemini ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                        <span>{copiedApiScanGemini ? 'Copied' : 'Copy Gemini cURL'}</span>
+                      </button>
+                    )}
+                    {aiScanTab === 'openai' && (
+                      <button
+                        onClick={() => handleCopy(apiScanOpenAiCurl, setCopiedApiScanOpenAi)}
+                        className="flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/30 transition-colors cursor-pointer"
+                      >
+                        {copiedApiScanOpenAi ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                        <span>{copiedApiScanOpenAi ? 'Copied' : 'Copy OpenAI cURL'}</span>
+                      </button>
+                    )}
+                    {aiScanTab === 'headers' && (
+                      <button
+                        onClick={() => handleCopy(apiScanHeadersCurl, setCopiedApiScanHeaders)}
+                        className="flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/30 transition-colors cursor-pointer"
+                      >
+                        {copiedApiScanHeaders ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                        <span>{copiedApiScanHeaders ? 'Copied' : 'Copy Headers cURL'}</span>
+                      </button>
+                    )}
+                    {aiScanTab === 'offline' && (
+                      <button
+                        onClick={() => handleCopy(apiScanOfflineCurl, setCopiedApiScanOffline)}
+                        className="flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/30 transition-colors cursor-pointer"
+                      >
+                        {copiedApiScanOffline ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                        <span>{copiedApiScanOffline ? 'Copied' : 'Copy Offline cURL'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <p className="text-slate-300 text-[11px]">
+                  Executes the full 9-dimension health audit, computes efficiency scores, and runs an autonomous AI synthesis agent (powered by <strong>Google Gemini</strong> or <strong>OpenAI ChatGPT</strong>) to diagnose root causes and output automated ClickHouse DDL migrations.
+                </p>
+
+                {/* AI Provider & Engine Selector Tabs */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-lg bg-slate-900 border border-slate-800 text-[11px]">
+                    <button
+                      onClick={() => setAiScanTab('gemini')}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
+                        aiScanTab === 'gemini'
+                          ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30 font-semibold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Sparkles className="h-3.5 w-3.5 text-blue-400" />
+                      <span>Google Gemini 3.7 Flash</span>
+                    </button>
+                    <button
+                      onClick={() => setAiScanTab('openai')}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
+                        aiScanTab === 'openai'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Bot className="h-3.5 w-3.5 text-emerald-400" />
+                      <span>OpenAI GPT-4o</span>
+                    </button>
+                    <button
+                      onClick={() => setAiScanTab('headers')}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
+                        aiScanTab === 'headers'
+                          ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30 font-semibold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Cpu className="h-3.5 w-3.5 text-purple-400" />
+                      <span>HTTP Headers Config</span>
+                    </button>
+                    <button
+                      onClick={() => setAiScanTab('offline')}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
+                        aiScanTab === 'offline'
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Layers className="h-3.5 w-3.5 text-amber-400" />
+                      <span>Deterministic Only (Zero AI)</span>
+                    </button>
+                  </div>
+
+                  {/* Optional Key Injection Field */}
+                  {aiScanTab !== 'offline' && (
+                    <div className="flex items-center gap-2 rounded-lg bg-slate-900/80 border border-slate-800/80 p-2 text-[11px]">
+                      <span className="text-slate-400 whitespace-nowrap">Inject Custom AI Key:</span>
+                      <input
+                        type="password"
+                        placeholder={aiScanTab === 'gemini' ? 'AIzaSy... (leave blank to use VM .env GEMINI_API_KEY)' : 'sk-proj... (leave blank to use VM .env OPENAI_API_KEY)'}
+                        value={customAiKey}
+                        onChange={(e) => setCustomAiKey(e.target.value)}
+                        className="flex-1 rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-100 placeholder-slate-600 focus:border-emerald-500 focus:outline-none font-mono"
+                      />
+                    </div>
+                  )}
+
+                  {/* Code Display */}
+                  <pre className="p-3 rounded-lg bg-slate-950 font-mono text-[11px] text-emerald-200 overflow-x-auto border border-slate-800">
+                    <code>
+                      {aiScanTab === 'gemini' && apiScanGeminiCurl}
+                      {aiScanTab === 'openai' && apiScanOpenAiCurl}
+                      {aiScanTab === 'headers' && apiScanHeadersCurl}
+                      {aiScanTab === 'offline' && apiScanOfflineCurl}
+                    </code>
+                  </pre>
+                </div>
+
+                {/* API Request Parameters & Schema Guide */}
+                <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-3 space-y-2 text-[11px]">
+                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>Scan & Agentic AI Parameters:</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-300 font-mono">
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800/70">
+                      <span className="text-amber-400 font-bold">aiEnabled</span>: <span className="text-emerald-400">true | false</span>
+                      <p className="text-[10px] text-slate-400 font-sans mt-0.5">Toggles AI agentic analysis. When false, runs 100% offline deterministic audit.</p>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800/70">
+                      <span className="text-amber-400 font-bold">aiProvider</span>: <span className="text-emerald-400">"gemini" | "openai"</span>
+                      <p className="text-[10px] text-slate-400 font-sans mt-0.5">Selects the agent brain: Google Gemini or OpenAI ChatGPT.</p>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800/70">
+                      <span className="text-amber-400 font-bold">aiModel</span>: <span className="text-emerald-400">string</span>
+                      <p className="text-[10px] text-slate-400 font-sans mt-0.5">e.g. <code>gemini-3.7-flash</code>, <code>gemini-2.5-pro</code>, <code>gpt-4o</code>, <code>gpt-4o-mini</code>.</p>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800/70">
+                      <span className="text-amber-400 font-bold">aiApiKey</span>: <span className="text-emerald-400">string (optional)</span>
+                      <p className="text-[10px] text-slate-400 font-sans mt-0.5">Custom key per request. If omitted, uses <code>GEMINI_API_KEY</code> or <code>OPENAI_API_KEY</code> from VM server <code>.env</code>.</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Response Structure */}
+                <div className="space-y-1.5 text-[11px] text-slate-400">
+                  <span className="font-semibold text-slate-300">AI Agentic Response Payload Highlights:</span>
+                  <pre className="p-2.5 rounded bg-slate-950 text-emerald-400 font-mono text-[10px] border border-slate-800/80 overflow-x-auto">
+{`{
+  "id": "scan-1725408000-xyz",
+  "overallScore": 88,
+  "overallGrade": "B+",
+  "executiveSummary": {
+    "summary": "Cluster health is generally solid, but write amplification detected on events_v2.",
+    "criticalBottlenecks": ["Over-partitioned time-series table events_v2 (1,420 active parts)"],
+    "immediateWins": ["Convert Nullable(tenant_id) to LowCardinality(String) saving ~32% RAM"],
+    "systemicRisks": ["Background merge pool contention during peak ingestion hours"]
+  },
+  "findings": [
+    {
+      "id": "nullable-tenant-id",
+      "dimension": "Column Types & Encodings",
+      "severity": "MEDIUM",
+      "title": "Unnecessary Nullable wrapper on high-cardinality column",
+      "aiDiagnosis": "Nullable adds an extra uint8 mask byte per row and breaks vectorization.",
+      "suggestedDdl": "ALTER TABLE analytics.events_v2 MODIFY COLUMN tenant_id LowCardinality(String);",
+      "remediationRollbackDdl": "ALTER TABLE analytics.events_v2 MODIFY COLUMN tenant_id Nullable(String);"
+    }
+  ]
+}`}
+                  </pre>
+                </div>
+              </div>
+
+              {/* Endpoint 4: Discover Databases */}
+              <div className="rounded-xl border border-purple-500/30 bg-purple-950/20 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-bold text-purple-400">
+                    <span className="rounded bg-purple-500/20 px-1.5 py-0.5 font-mono text-[10px] text-purple-300 uppercase">
+                      POST
+                    </span>
+                    <span className="font-mono text-xs">/api/clickhouse/databases</span>
                   </div>
                   <button
-                    onClick={() => handleCopy(apiScanCurl, setCopiedApiScan)}
-                    className="flex items-center gap-1 rounded bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/30 transition-colors cursor-pointer"
+                    onClick={() => handleCopy(apiDatabasesCurl, setCopiedApiDatabases)}
+                    className="flex items-center gap-1 rounded bg-purple-500/20 px-2 py-0.5 text-[11px] font-semibold text-purple-300 hover:bg-purple-500/30 transition-colors cursor-pointer"
                   >
-                    {copiedApiScan ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                    <span>{copiedApiScan ? 'Copied' : 'Copy cURL'}</span>
+                    {copiedApiDatabases ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    <span>{copiedApiDatabases ? 'Copied' : 'Copy cURL'}</span>
                   </button>
                 </div>
                 <p className="text-slate-300 text-[11px]">
-                  Executes the full 9-dimension health audit, computes efficiency scores, generates automated DDL migrations, and returns structured findings:
+                  Lists accessible databases and non-system schemas on the target ClickHouse server:
                 </p>
-                <pre className="p-3 rounded-lg bg-slate-950 font-mono text-[11px] text-emerald-200 overflow-x-auto border border-slate-800">
-                  <code>{apiScanCurl}</code>
+                <pre className="p-3 rounded-lg bg-slate-950 font-mono text-[11px] text-purple-200 overflow-x-auto border border-slate-800">
+                  <code>{apiDatabasesCurl}</code>
+                </pre>
+              </div>
+
+              {/* Endpoint 5: Scan History */}
+              <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/20 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-bold text-cyan-400">
+                    <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300 uppercase">
+                      GET
+                    </span>
+                    <span className="font-mono text-xs">/api/history</span>
+                  </div>
+                  <button
+                    onClick={() => handleCopy(apiHistoryCurl, setCopiedApiHistory)}
+                    className="flex items-center gap-1 rounded bg-cyan-500/20 px-2 py-0.5 text-[11px] font-semibold text-cyan-300 hover:bg-cyan-500/30 transition-colors cursor-pointer"
+                  >
+                    {copiedApiHistory ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    <span>{copiedApiHistory ? 'Copied' : 'Copy cURL'}</span>
+                  </button>
+                </div>
+                <p className="text-slate-300 text-[11px]">
+                  Retrieves chronological audit scan history and executive score summaries:
+                </p>
+                <pre className="p-3 rounded-lg bg-slate-950 font-mono text-[11px] text-cyan-200 overflow-x-auto border border-slate-800">
+                  <code>{apiHistoryCurl}</code>
                 </pre>
               </div>
 
               {/* Multi-language Code Examples */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <h4 className="font-bold text-sm text-slate-100">Programmatic Code Snippets</h4>
+                  <div className="space-y-0.5">
+                    <h4 className="font-bold text-sm text-slate-100">Programmatic Code Snippets</h4>
+                    <p className="text-[11px] text-slate-400">
+                      Pre-filled with your active key: <code className="text-amber-300 font-mono">{activeKey}</code>
+                    </p>
+                  </div>
                   <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-0.5 text-[11px]">
                     <button
                       onClick={() => setApiSnippetLang('curl')}
@@ -555,7 +911,7 @@ docker compose up -d
                 </div>
               </div>
 
-              {/* Endpoint 4: Health Check */}
+              {/* Endpoint 6: Health Check */}
               <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 font-bold text-slate-300">

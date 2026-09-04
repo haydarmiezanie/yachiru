@@ -11,6 +11,7 @@ import {
   LogOut,
   UserCheck,
   ChevronDown,
+  Code,
 } from 'lucide-react';
 import { ScanReport } from '../types/yachiru';
 import { useAuth } from '../contexts/AuthContext';
@@ -19,7 +20,7 @@ interface NavbarProps {
   report: ScanReport | null;
   scanning: boolean;
   onScan: () => void;
-  onOpenDocs: () => void;
+  onOpenDocs: (tab?: 'overview' | 'api' | 'docker') => void;
   onOpenUserManagement: () => void;
   activeTab: string;
   setActiveTab: (tab: string) => void;
@@ -140,10 +141,20 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           <button
-            onClick={onOpenDocs}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-700 hover:bg-slate-800 transition-colors"
+            onClick={() => onOpenDocs('api')}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-700 hover:bg-slate-800 transition-colors cursor-pointer"
+            title="View REST API documentation, endpoints, and cURL commands"
           >
-            <BookOpen className="h-3.5 w-3.5 text-amber-400" />
+            <Code className="h-3.5 w-3.5 text-amber-400" />
+            <span className="hidden sm:inline">REST API</span>
+          </button>
+
+          <button
+            onClick={() => onOpenDocs('overview')}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-700 hover:bg-slate-800 transition-colors cursor-pointer"
+            title="ClickHouse grants, architecture, and Docker guide"
+          >
+            <BookOpen className="h-3.5 w-3.5 text-slate-400" />
             <span className="hidden sm:inline">Docs & Grants</span>
           </button>
 

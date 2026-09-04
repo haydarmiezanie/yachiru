@@ -58,6 +58,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     let unsubscribeProfile: (() => void) | null = null;
 
+    // Check for any redirect sign-in results (fallback when popups are blocked)
+    getRedirectResult(auth)
+      .then((result) => {
+        if (result && result.user) {
+          console.log('Successfully authenticated via redirect:', result.user.email);
+        }
+      })
+      .catch((err: any) => {
+        console.error('Redirect sign-in error:', err);
+        const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+        if (err.code === 'auth/unauthorized-domain') {
+          setAuthError(
+            `Domain "${currentHost}" is not authorized in Firebase. Please add "${currentHost}" to Firebase Console > Authentication > Settings > Authorized domains.`
+          );
+        } else {
+          setAuthError(err.message || 'Redirect sign-in failed. Please try again.');
+        }
+      });
+
     const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
       setAuthError(null);
@@ -175,15 +194,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           `Domain "${currentHost}" is not authorized in Firebase. Please add "${currentHost}" to Firebase Console > Authentication > Settings > Authorized domains.`
         );
       } else if (err.code === 'auth/popup-blocked') {
-        setAuthError('Sign-in popup was blocked by your browser. Please allow popups for this site.');
-      } else if (err.code === 'auth/popup-closed-by-user') {
+        setAuthError('Sign-in popup was blocked by your browser. Please allow popups for this site or use the redirect sign-in option below.');
+      } else if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
         setAuthError(
-          `Sign-in window closed before completion. If using domain "${currentHost}", ensure it is added to Authorized Domains in Firebase Console.`
+          `Google sign-in popup was closed or cancelled. If you did not close it manually, ensure "${currentHost}" is added to Firebase Console > Authentication > Settings > Authorized domains, or use Full-Page Redirect below.`
         );
       } else if (err.code === 'auth/operation-not-allowed') {
         setAuthError('Google Sign-In is not enabled in Firebase Console > Authentication > Sign-in method.');
       } else {
         setAuthError(err.message || 'Google sign-in failed. Please try again.');
+      }
+      setLoading(false);
+    }
+  };
+
+  const signInWithGoogleRedirect = async () => {
+    setLoading(true);
+    setAuthError(null);
+    try {
+      await signInWithRedirect(auth, googleProvider);
+    } catch (err: any) {
+      console.error('Google Redirect Sign-In Error:', err);
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+      if (err.code === 'auth/unauthorized-domain') {
+        setAuthError(
+          `Domain "${currentHost}" is not authorized in Firebase. Please add "${currentHost}" to Firebase Console > Authentication > Settings > Authorized domains.`
+        );
+      } else {
+        setAuthError(err.message || 'Google redirect sign-in failed. Please try again.');
       }
       setLoading(false);
     }
@@ -299,6 +337,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isViewer,
         authError,
         signInWithGoogle,
+        signInWithGoogleRedirect,
         signInWithEmail,
         signUpWithEmail,
         signOut,

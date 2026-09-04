@@ -40,7 +40,7 @@ export const ScanRequestSchema = z.object({
   target: ScanTargetSchema,
   aiEnabled: z.boolean().optional().default(true),
   aiProvider: z.enum(['gemini', 'openai']).optional().default('gemini'),
-  aiModel: z.string().max(100).optional().default('gemini-3.7-flash'),
+  aiModel: z.string().max(100).optional(),
   aiApiKey: z.string().max(500).optional(),
 });
 

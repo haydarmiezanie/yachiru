@@ -120,6 +120,17 @@ export const AuthModal: React.FC = () => {
               </svg>
               <span>Continue with Google</span>
             </button>
+
+            <div className="mt-2 flex items-center justify-center">
+              <button
+                type="button"
+                onClick={handleGoogleRedirectSignIn}
+                disabled={submitting || loading}
+                className="text-[11px] text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+              >
+                Popup issue? <span className="underline">Use Full-Page Redirect</span>
+              </button>
+            </div>
           </div>
 
           <div className="relative my-5 text-center">
