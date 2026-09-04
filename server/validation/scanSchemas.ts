@@ -99,13 +99,18 @@ export const ScanTargetSchema = z
     }
   });
 
-export const ScanRequestSchema = z.object({
-  target: ScanTargetSchema,
-  aiEnabled: z.boolean().optional().default(true),
-  aiProvider: z.enum(['gemini', 'openai']).optional().default('gemini'),
-  aiModel: z.string().max(100).optional(),
-  aiApiKey: z.string().max(500).optional(),
-});
+export const ScanRequestSchema = z
+  .object({
+    target: ScanTargetSchema,
+    aiEnabled: z.boolean().optional().default(true),
+    aiProvider: z.enum(['gemini', 'openai']).optional().default('gemini'),
+    aiModel: z.string().max(100).optional(),
+    aiApiKey: z.string().max(500).optional(),
+  })
+  .transform((data) => ({
+    ...data,
+    aiModel: data.aiModel || (data.aiProvider === 'gemini' ? 'gemini-3.7-flash' : 'gpt-4o-mini'),
+  }));
 
 export const TestConnectionRequestSchema = z.union([
   z.object({ target: ScanTargetSchema }).transform((data) => data.target),

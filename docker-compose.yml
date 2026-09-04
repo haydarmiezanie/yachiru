@@ -15,7 +15,7 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - YACHIRU_API_KEY=${YACHIRU_API_KEY:-}
-      - REQUIRE_API_KEY=${REQUIRE_API_KEY:-false}
+      - REQUIRE_API_KEY=${REQUIRE_API_KEY:-true}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}

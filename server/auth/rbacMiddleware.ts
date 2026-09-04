@@ -195,6 +195,31 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
 }
 
 /**
+ * Resolves whether API key authentication is mandatory.
+ * Default is TRUE in production (fail-closed by default).
+ * In non-production, defaults to false unless explicitly configured to 'true'.
+ */
+export function isRequireApiKey(): boolean {
+  if (process.env.REQUIRE_API_KEY !== undefined && process.env.REQUIRE_API_KEY.trim() !== '') {
+    return process.env.REQUIRE_API_KEY.trim() === 'true';
+  }
+  // Default to true in production (fail-closed)
+  return process.env.NODE_ENV === 'production';
+}
+
+/**
+ * Resolves whether strict authentication mode is active.
+ * Default is TRUE in production (fail-closed by default).
+ */
+export function isStrictAuth(): boolean {
+  if (process.env.STRICT_AUTH !== undefined && process.env.STRICT_AUTH.trim() !== '') {
+    return process.env.STRICT_AUTH.trim() === 'true';
+  }
+  // Default to true in production
+  return process.env.NODE_ENV === 'production';
+}
+
+/**
  * Core RBAC Middleware enforcing minimum role ('viewer' | 'auditor' | 'admin')
  * and strict user approval status on the server.
  */
@@ -282,10 +307,13 @@ export function requireRole(minRole: UserRole = 'viewer') {
     }
 
     // 3. Open Development Mode (Only when no keys configured, strictly in non-production, and ONLY for viewer-level endpoints)
+    const requireApiKey = isRequireApiKey();
+    const strictAuth = isStrictAuth();
+
     if (
       allowedKeys.length === 0 &&
-      process.env.REQUIRE_API_KEY !== 'true' &&
-      process.env.STRICT_AUTH !== 'true' &&
+      !requireApiKey &&
+      !strictAuth &&
       process.env.NODE_ENV !== 'production' &&
       minRole === 'viewer'
     ) {

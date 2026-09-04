@@ -127,9 +127,10 @@ Configure these settings in your `.env` file or environment:
 | `NODE_ENV` | Environment mode (`production` / `development`) | No | `development` |
 | `GEMINI_API_KEY` | Google Gemini API key for AI synthesis | No | - |
 | `OPENAI_API_KEY` | OpenAI API key for AI synthesis | No | - |
-| `YACHIRU_API_KEY` | Secret API key to require `x-api-key` / `Bearer` authentication | No | *(Disabled)* |
-| `REQUIRE_API_KEY` | Set `true` to block API requests if `YACHIRU_API_KEY` is not set | No | `false` |
-| `ALLOWED_ORIGINS` | Comma-separated list of allowed CORS origins | No | `*` |
+| `YACHIRU_API_KEY` | Secret API key to require `x-api-key` / `Bearer` authentication | No | *(None)* |
+| `REQUIRE_API_KEY` | Enforce API authentication; defaults to `true` in production (fail-closed) | No | `true` (prod) / `false` (dev) |
+| `STRICT_AUTH` | Block requests without valid credentials; defaults to `true` in production | No | `true` (prod) / `false` (dev) |
+| `ALLOWED_ORIGINS` | Comma-separated whitelist of allowed CORS origins (fail-closed in production) | Prod only | *(APP_URL / Whitelist)* |
 | `LOG_LEVEL` | Structured logging level (`fatal`, `error`, `warn`, `info`, `debug`) | No | `info` |
 
 ---

@@ -5,13 +5,13 @@ describe('Zod API Request Validation Schemas', () => {
   describe('TestConnectionRequestSchema', () => {
     it('validates direct target payload', () => {
       const result = TestConnectionRequestSchema.safeParse({
-        host: 'ch-prod.internal',
+        host: 'ch-prod.example.com',
         port: 8123,
         database: 'analytics',
       });
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data.host).toBe('ch-prod.internal');
+        expect(result.data.host).toBe('ch-prod.example.com');
         expect(result.data.port).toBe(8123);
       }
     });
@@ -19,7 +19,7 @@ describe('Zod API Request Validation Schemas', () => {
     it('validates wrapped { target: { ... } } payload', () => {
       const result = TestConnectionRequestSchema.safeParse({
         target: {
-          host: '10.0.0.5',
+          host: 'clickhouse.cloud.provider.com',
           port: '8443',
           protocol: 'https',
           database: 'default',
@@ -30,6 +30,22 @@ describe('Zod API Request Validation Schemas', () => {
         expect(result.data.port).toBe(8443);
         expect(result.data.protocol).toBe('https');
       }
+    });
+
+    it('blocks SSRF targets by default', () => {
+      const internalTarget = TestConnectionRequestSchema.safeParse({
+        host: 'ch-prod.internal',
+        port: 8123,
+      });
+      expect(internalTarget.success).toBe(false);
+
+      const privateIpTarget = TestConnectionRequestSchema.safeParse({
+        target: {
+          host: '10.0.0.5',
+          port: 8123,
+        },
+      });
+      expect(privateIpTarget.success).toBe(false);
     });
 
     it('rejects invalid ports or dangerous database names', () => {

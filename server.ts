@@ -13,7 +13,41 @@ import { ScanHistoryStore } from './server/storage/scanHistory.js';
 import { ScanReport } from './src/types/yachiru.js';
 import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validation/scanSchemas.js';
 import { logger } from './server/logger.js';
-import { requireRole } from './server/auth/rbacMiddleware.js';
+import { requireRole, isRequireApiKey, isStrictAuth } from './server/auth/rbacMiddleware.js';
+
+export function resolveAllowedOrigins(env = process.env): string[] {
+  const configured = (env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (env.APP_URL) {
+    try {
+      const appOrigin = new URL(env.APP_URL).origin;
+      if (!configured.includes(appOrigin)) {
+        configured.push(appOrigin);
+      }
+    } catch {
+      // Ignore invalid APP_URL format
+    }
+  }
+
+  if (env.NODE_ENV !== 'production') {
+    const devOrigins = [
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:5173',
+    ];
+    for (const dev of devOrigins) {
+      if (!configured.includes(dev)) {
+        configured.push(dev);
+      }
+    }
+  }
+
+  return configured;
+}
 
 const app = express();
 const PORT = 3000;
@@ -35,13 +69,23 @@ app.use(
   })
 );
 
-// CORS with origin whitelist support
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+// CORS with strict origin whitelist enforcement (Defense-in-depth: No fail-open with credentials)
+const allowedOrigins = resolveAllowedOrigins();
+
+// Wajibkan konfigurasi eksplisit di production, jangan fail-open
+if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
+  throw new Error('ALLOWED_ORIGINS must be explicitly configured in production.');
+}
+
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, or same-origin server requests)
-      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      // Allow requests with no origin (like mobile apps, curl, or same-origin direct requests)
+      if (!origin) {
+        return callback(null, true);
+      }
+      // Strictly check against whitelisted origins - NEVER allow arbitrary origins when credentials: true
+      if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
       return callback(new Error(`Origin ${origin} not allowed by CORS policy`));
@@ -330,14 +374,19 @@ async function startServer() {
     logger.info(`[Yachiru Server] Listening on http://0.0.0.0:${PORT}`);
 
     const secretKey = (process.env.YACHIRU_API_KEY || process.env.API_SECRET_KEY || '').trim();
+    const requireKey = isRequireApiKey();
+    const strictAuth = isStrictAuth();
+
     if (secretKey) {
       logger.info('[Yachiru Auth] YACHIRU_API_KEY boundary is ACTIVE. API endpoints are protected.');
     } else if (process.env.NODE_ENV === 'production') {
-      logger.warn(
-        '⚠️  SECURITY NOTICE: YACHIRU_API_KEY is not set in production. Set YACHIRU_API_KEY or REQUIRE_API_KEY=true in .env to enforce API boundary protection.'
+      logger.info(
+        `[Yachiru Auth] Running in production with fail-closed security: REQUIRE_API_KEY=${requireKey} and STRICT_AUTH=${strictAuth} active by default. Authentication is strictly enforced on API endpoints.`
       );
     } else {
-      logger.info('[Yachiru Auth] Running in development mode without API key constraint.');
+      logger.info(
+        `[Yachiru Auth] Running in development mode (REQUIRE_API_KEY=${requireKey}, STRICT_AUTH=${strictAuth}).`
+      );
     }
   });
 
