@@ -65,6 +65,9 @@ REQUIRE_API_KEY=true
 # 3. Optional: AI Provider Keys
 GEMINI_API_KEY=your_gemini_key_here
 OPENAI_API_KEY=your_openai_key_here
+
+# 4. Data Privacy (Zero Raw Query Mode for GDPR / strict compliance)
+STORE_RAW_QUERIES=false # Discards raw SQL; stores only fingerprints & normalized patterns
 `.trim();
 
   const grantSql = `
@@ -508,7 +511,7 @@ docker compose up -d
                   <pre className="p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-[11px] text-amber-200 overflow-x-auto">
                     <code>{vmEnvSnippet}</code>
                   </pre>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-[10px]">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[10px]">
                     <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
                       <strong className="text-amber-300">1. Gateway Security (YACHIRU_API_KEY):</strong>
                       <p className="text-slate-400 mt-0.5">Enforces mandatory authentication. When active, requests lacking <code className="text-amber-400">x-api-key</code> are rejected with 401.</p>
@@ -516,6 +519,10 @@ docker compose up -d
                     <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
                       <strong className="text-emerald-300">2. AI Synthesis (GEMINI & OPENAI):</strong>
                       <p className="text-slate-400 mt-0.5">Set once in <code className="text-emerald-400">.env</code> so your scripts/cURLs don't need to include AI keys, OR pass dynamically via <code className="text-emerald-400">aiApiKey</code>.</p>
+                    </div>
+                    <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
+                      <strong className="text-sky-300">3. Privacy Compliance (Zero Raw Query):</strong>
+                      <p className="text-slate-400 mt-0.5">Set <code className="text-sky-400">STORE_RAW_QUERIES=false</code> for strict GDPR compliance. Raw queries are completely discarded and replaced with SHA-256 fingerprints.</p>
                     </div>
                   </div>
                 </div>

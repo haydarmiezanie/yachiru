@@ -35,7 +35,9 @@ A developer-grade, zero-mutation audit and optimization platform for ClickHouse.
   - **Zero-Mutation**: Read-only queries against `system.*` tables.
   - **SQL Injection Prevention**: Strict ClickHouse identifier validation and escaping.
   - **Server Hardening**: Helmet HTTP headers, CORS origin whitelisting, and multi-tier rate limiting.
-  - **Data Privacy & PII Redaction**: Deep recursive regex masking of literal query parameters, passwords, API tokens, and customer email addresses in both findings metrics and `rawStats` query logs prior to disk persistence.
+  - **Data Privacy & Query Sanitization (Best-Effort Heuristic & Zero-Raw-Query Mode)**:
+    - **Heuristic Redaction (Default)**: Best-effort regex masking of string/numeric literals, passwords, API tokens, and emails in query logs prior to disk persistence. *(Note: Heuristic regex masking is a convenience layer, not a certified regulatory compliance boundary)*.
+    - **Zero-Raw-Query Mode (`STORE_RAW_QUERIES=false` / `PRIVACY_PRESERVING_HISTORY=true`)**: For strict GDPR/enterprise compliance, entirely eliminates raw query storage on disk, storing only normalized structural AST skeletons and SHA-256 query fingerprints (`fp_<hash>`) for bug pattern deduplication.
   - **API Boundary Protection (`YACHIRU_API_KEY`)**: Protect your auditing backend endpoints via `x-api-key` or `Authorization: Bearer <key>`.
   - **Concurrency Mutex**: FIFO in-process asynchronous mutex around scan history operations ensuring zero lost updates during concurrent audits.
 
@@ -117,6 +119,33 @@ GRANT SELECT ON target_db.* TO yachiru_readonly;
 
 ---
 
+## 🔐 Data Privacy & Compliance: Heuristic Redaction vs. Zero-Raw-Query Mode
+
+### ⚠️ Best-Effort Heuristic Sanitization Notice
+By default, Yachiru applies regular-expression-based sanitization (`maskQueryPii`) to query samples in audit findings and `rawStats` before saving scan history to disk.
+
+**Important Compliance Disclosure:**
+- **Best-Effort Layer**: Regex-based masking is a heuristic hygiene measure to redact plain string literals, numeric comparison thresholds, email addresses, and obvious credential assignments (`password`, `token`, `api_key`).
+- **Inherent Limitations**: Heuristic regexes **do not guarantee formal GDPR, HIPAA, or financial PII compliance**. Complex patterns—such as concatenated strings (`concat('val', 'ue')`), base64-encoded payloads, nested arrays, or unquoted JSON function expressions (`JSONExtractRaw`)—may evade pattern matching (*under-masking*). Conversely, non-sensitive structural clauses (*over-masking*) can occasionally be obscured.
+- **Rule of Thumb**: Regex redaction should never be treated as the sole security boundary for regulated or multi-tenant production databases.
+
+### 🛡️ Zero-Raw-Query / Privacy-Preserving History Mode
+For enterprise environments with strict regulatory requirements, Yachiru provides **Zero-Raw-Query Mode** (`STORE_RAW_QUERIES=false` or `PRIVACY_PRESERVING_HISTORY=true`).
+
+When enabled:
+1. **Raw SQL Queries Are Completely Discarded**: No customer SQL statements, literal parameters, or raw query text are ever persisted to disk.
+2. **Normalized AST Pattern Skeletons (`normalizeQueryPattern`)**: Variable literals, strings, tuples, and parameters are normalized into neutral placeholders (`?`), preserving only the structural query skeleton (e.g. `SELECT col1, col2 FROM table WHERE status = '?' AND amount > ? LIMIT ?`).
+3. **Cryptographic Pattern Fingerprinting (`fingerprintQuery`)**: A deterministic SHA-256 hash (`fp_<16_hex_chars>`) is generated for each normalized pattern. This allows audit comparison, query frequency tracking, and bug deduplication across scans without exposing any proprietary or customer data.
+
+```bash
+# Enable in .env or Docker container for zero-raw-query compliance
+STORE_RAW_QUERIES=false
+# or
+PRIVACY_PRESERVING_HISTORY=true
+```
+
+---
+
 ## ⚙️ Environment Variables
 
 Configure these settings in your `.env` file or environment:
@@ -131,6 +160,8 @@ Configure these settings in your `.env` file or environment:
 | `REQUIRE_API_KEY` | Enforce API authentication; defaults to `true` in production (fail-closed) | No | `true` (prod) / `false` (dev) |
 | `STRICT_AUTH` | Block requests without valid credentials; defaults to `true` in production | No | `true` (prod) / `false` (dev) |
 | `ALLOWED_ORIGINS` | Comma-separated whitelist of allowed CORS origins (fail-closed in production) | Prod only | *(APP_URL / Whitelist)* |
+| `STORE_RAW_QUERIES` | Whether to store raw (heuristic-masked) SQL in history. Set to `false` for zero-raw-query mode | No | `true` |
+| `PRIVACY_PRESERVING_HISTORY` | Alias for zero-raw-query mode. Discards all raw SQL; stores only fingerprints and patterns | No | `false` |
 | `LOG_LEVEL` | Structured logging level (`fatal`, `error`, `warn`, `info`, `debug`) | No | `info` |
 
 ---

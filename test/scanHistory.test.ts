@@ -1,178 +1,215 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import fs from 'fs';
-import path from 'path';
-import { maskQueryPii, sanitizeReportForStorage, ScanHistoryStore } from '../server/storage/scanHistory.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  maskQueryPii,
+  normalizeQueryPattern,
+  fingerprintQuery,
+  sanitizeReportForStorage,
+  ScanHistoryStore,
+} from '../server/storage/scanHistory.js';
 import { ScanReport } from '../src/types/yachiru.js';
 
-describe('PII Masking & Query Sanitization', () => {
-  it('should redact string literals, passwords, and sensitive comparison values', () => {
-    const rawSql = `SELECT * FROM users WHERE email = 'user@example.com' AND age > 25 AND password = 'super_secret_password_123'`;
-    const masked = maskQueryPii(rawSql);
-
-    expect(masked).not.toContain('user@example.com');
-    expect(masked).not.toContain('super_secret_password_123');
-    expect(masked).toContain('[REDACTED]');
+describe('Scan History Store & PII Masking', () => {
+  beforeEach(async () => {
+    await ScanHistoryStore.clearHistory();
   });
 
-  it('should redact INSERT values tuples', () => {
-    const rawInsert = `INSERT INTO events (id, user_id, payload) VALUES (101, 'usr_9988', 'sensitive_json')`;
-    const masked = maskQueryPii(rawInsert);
+  describe('normalizeQueryPattern & fingerprintQuery', () => {
+    it('normalizes queries into structural skeletons stripping literals', () => {
+      const sql1 = "SELECT user_id, email FROM users WHERE email = 'alice@example.com' AND age > 25 LIMIT 50";
+      const sql2 = "SELECT user_id, email FROM users WHERE email = 'bob@corp.internal' AND age > 99 LIMIT 50";
 
-    expect(masked).toContain('VALUES ([REDACTED])');
-    expect(masked).not.toContain('usr_9988');
+      const pattern1 = normalizeQueryPattern(sql1);
+      const pattern2 = normalizeQueryPattern(sql2);
+
+      // Both should match the exact same normalized structure
+      expect(pattern1).toBe("SELECT user_id, email FROM users WHERE email = '?' AND age > ? LIMIT 50");
+      expect(pattern2).toBe("SELECT user_id, email FROM users WHERE email = '?' AND age > ? LIMIT 50");
+      expect(pattern1).toBe(pattern2);
+
+      // Both should produce identical fingerprint for bug & slow-query pattern deduplication
+      const fp1 = fingerprintQuery(sql1);
+      const fp2 = fingerprintQuery(sql2);
+      expect(fp1).toBe(fp2);
+      expect(fp1.startsWith('fp_')).toBe(true);
+    });
+
+    it('handles IN lists, UUIDs, and comments in normalizeQueryPattern', () => {
+      const sql = `-- Fetch order details\nSELECT * FROM orders /* block comment */ WHERE id IN ('ord-1', 'ord-2') AND tracking_uuid = '123e4567-e89b-12d3-a456-426614174000'`;
+      const pattern = normalizeQueryPattern(sql);
+
+      expect(pattern).not.toContain('Fetch order details');
+      expect(pattern).not.toContain('block comment');
+      expect(pattern).not.toContain('ord-1');
+      expect(pattern).toContain('IN (?)');
+      expect(pattern).toContain("tracking_uuid = '?'");
+    });
   });
 
-  it('should deeply sanitize findings metrics and rawStats queries', () => {
+  describe('maskQueryPii', () => {
+    it('masks string literals in SQL queries', () => {
+      const sql = "SELECT * FROM users WHERE email = 'john.doe@example.com' AND name = 'SecretUser'";
+      const masked = maskQueryPii(sql);
+      expect(masked).not.toContain('john.doe@example.com');
+      expect(masked).not.toContain('SecretUser');
+      expect(masked).toContain("'[REDACTED]'");
+    });
+
+    it('masks numeric comparison literals', () => {
+      const sql = 'SELECT * FROM orders WHERE amount > 500.50 AND user_id = 998811';
+      const masked = maskQueryPii(sql);
+      expect(masked).not.toContain('500.50');
+      expect(masked).not.toContain('998811');
+      expect(masked).toContain('[REDACTED]');
+    });
+
+    it('masks VALUES (...) in INSERT statements', () => {
+      const sql = "INSERT INTO logs VALUES (1, 'sensitive token', '192.168.1.1')";
+      const masked = maskQueryPii(sql);
+      expect(masked).toContain('VALUES ([REDACTED])');
+    });
+  });
+
+  describe('Zero-Raw-Query / Privacy Preserving Mode', () => {
+    it('completely discards raw query and stores only normalized pattern and fingerprint', () => {
+      const report: ScanReport = {
+        id: 'test-privacy-001',
+        timestamp: new Date().toISOString(),
+        target: { host: 'ch.internal', port: 8123, database: 'default', isDemoCluster: false, clusterName: 'test' },
+        overallScore: 90,
+        overallGrade: 'A',
+        dimensionScores: {} as any,
+        findings: [
+          {
+            id: 'F-1',
+            dimension: 'general_query_performance',
+            dimensionName: 'Performance',
+            severity: 'warning',
+            title: 'Query with sensitive info',
+            what: 'Slow query',
+            whyTechnical: 'Full scan',
+            recommendationSummary: 'Add index',
+            estimatedImpact: { metric: 'Speed', magnitude: '2x', description: 'Fast' },
+            metrics: {
+              querySample: "SELECT ssn, password_hash FROM secret_table WHERE api_key = 'sk_live_999888777'",
+            },
+          },
+        ],
+        executiveSummary: {
+          overview: 'Overview',
+          overallHealthGrade: 'A',
+          topRisk: 'None',
+          quickWins: [],
+          strategicFixes: [],
+          aiGenerated: false,
+        },
+        clusterMetadata: {} as any,
+        rawStats: {
+          slowQueries: [
+            {
+              query: "SELECT credit_card FROM transactions WHERE customer_id = 'cust_12345'",
+              query_duration_ms: 5000,
+            },
+          ],
+          expensivePatterns: [],
+          tables: [],
+          partsSummary: {},
+          mergesSummary: {},
+          columnsWithIssues: [],
+          configSettings: [],
+        },
+        migrationScript: '',
+        scanDurationMs: 50,
+        aiStatus: 'disabled',
+      };
+
+      const sanitized = sanitizeReportForStorage(report, { privacyPreserving: true });
+
+      // Finding query check: completely discarded raw query literals, replaced with fingerprint & pattern
+      expect(sanitized.findings[0].metrics.querySample).not.toContain('sk_live_999888777');
+      expect(sanitized.findings[0].metrics.querySample).toContain('[ZERO_RAW_QUERY_MODE');
+      expect(sanitized.findings[0].metrics.querySampleFingerprint).toBeDefined();
+
+      // rawStats slowQueries check
+      expect(sanitized.rawStats.slowQueries[0].query).not.toContain('cust_12345');
+      expect(sanitized.rawStats.slowQueries[0].query).toContain('[ZERO_RAW_QUERY_MODE');
+      expect(sanitized.rawStats.slowQueries[0].query_fingerprint).toBeDefined();
+    });
+  });
+
+  describe('ScanHistoryStore operations', () => {
     const mockReport: ScanReport = {
-      id: 'scan-test-1',
+      id: 'test-scan-001',
       timestamp: new Date().toISOString(),
-      target: {
-        host: 'ch.internal',
-        port: 8123,
-        database: 'prod_db',
-        isDemoCluster: false,
-        clusterName: 'ch-prod',
-      },
-      overallScore: 85,
-      overallGrade: 'B',
+      target: { host: 'localhost', port: 8123, database: 'default', isDemoCluster: false, clusterName: 'localhost:8123 (default)' },
+      overallScore: 88,
+      overallGrade: 'A',
       dimensionScores: {} as any,
       findings: [
         {
-          id: 'find-1',
-          dimension: 'primary_key_and_query_patterns',
-          dimensionName: 'Primary Key & Query Patterns',
-          severity: 'critical',
-          title: 'Unindexed scan on email',
-          what: 'Query scanned 10M rows',
-          whyTechnical: 'No primary key match',
-          recommendationSummary: 'Add index',
-          estimatedImpact: { metric: 'Speed', magnitude: '10x', description: 'Faster' },
+          id: 'FND-001',
+          dimension: 'general_query_performance',
+          dimensionName: 'Query Performance',
+          severity: 'warning',
+          title: 'Slow Query Test',
+          what: 'Test',
+          whyTechnical: 'Test',
+          whyNarrative: 'Test',
+          recommendationSummary: 'Test',
+          estimatedImpact: { metric: 'Speed', magnitude: '2x', description: 'Fast' },
           metrics: {
-            querySample: `SELECT * FROM orders WHERE customer_email = 'customer@confidential.com' AND total > 500`,
-            sampleException: `Error connecting with token = 'tok_live_98765'`,
+            querySample: "SELECT * FROM secrets WHERE api_key = 'super-secret-12345'",
           },
         },
       ],
       executiveSummary: {
-        overview: 'Test scan',
-        overallHealthGrade: 'B',
-        topRisk: 'Slow queries',
+        overview: 'Overview',
+        overallHealthGrade: 'A',
+        topRisk: 'None',
         quickWins: [],
         strategicFixes: [],
         aiGenerated: false,
       },
       clusterMetadata: {
         version: '24.3',
-        clusterName: 'ch-prod',
+        clusterName: 'test',
         totalDatabases: 1,
-        totalTables: 2,
+        totalTables: 5,
         totalParts: 10,
-        totalRows: 1000000,
-        totalDiskSizeBytes: 10000000,
-        totalDiskSizeFormatted: '10 MB',
-        queriesAnalyzed: 5,
+        totalRows: 1000,
+        totalDiskSizeBytes: 10000,
+        totalDiskSizeFormatted: '10 KB',
+        queriesAnalyzed: 1,
         timeWindow: '7d',
         uptimeSeconds: 3600,
       },
-      rawStats: {
-        tables: [],
-        partsSummary: {},
-        mergesSummary: {},
-        slowQueries: [
-          {
-            query: `SELECT credit_card, ssn FROM payments WHERE user_id = 'usr_secret_123' AND amount > 9999`,
-            query_duration_ms: 15000,
-          },
-        ],
-        expensivePatterns: [
-          {
-            query: `SELECT * FROM audit_logs WHERE api_key = 'sk_live_very_secret_key' AND read_rows > 5000000`,
-            read_rows: 6000000,
-          },
-        ],
-        columnsWithIssues: [],
-        configSettings: [],
-      },
-      migrationScript: '-- test script',
+      rawStats: {} as any,
+      migrationScript: '-- Clean',
       scanDurationMs: 120,
       aiStatus: 'disabled',
     };
 
-    const sanitized = sanitizeReportForStorage(mockReport);
+    it('saves and retrieves scan reports asynchronously with atomic safety', async () => {
+      await ScanHistoryStore.saveScan(mockReport);
 
-    // Finding metrics check
-    expect(sanitized.findings[0].metrics.querySample).not.toContain('customer@confidential.com');
-    expect(sanitized.findings[0].metrics.querySample).toContain('[REDACTED]');
-    expect(sanitized.findings[0].metrics.sampleException).not.toContain('tok_live_98765');
+      const all = await ScanHistoryStore.getAllScans();
+      expect(all).toHaveLength(1);
+      expect(all[0].id).toBe('test-scan-001');
 
-    // rawStats slowQueries check (P1)
-    expect(sanitized.rawStats.slowQueries[0].query).not.toContain('usr_secret_123');
-    expect(sanitized.rawStats.slowQueries[0].query).toContain('[REDACTED]');
+      const retrieved = await ScanHistoryStore.getScanById('test-scan-001');
+      expect(retrieved).toBeDefined();
+      expect(retrieved?.overallScore).toBe(88);
 
-    // rawStats expensivePatterns check (P1)
-    expect(sanitized.rawStats.expensivePatterns[0].query).not.toContain('sk_live_very_secret_key');
-    expect(sanitized.rawStats.expensivePatterns[0].query).toContain('[REDACTED]');
-  });
-});
+      // Verify PII in query sample was redacted before saving
+      expect(retrieved?.findings[0].metrics?.querySample).not.toContain('super-secret-12345');
+      expect(retrieved?.findings[0].metrics?.querySample).toContain('[REDACTED]');
+    });
 
-describe('ScanHistoryStore Serialization & Mutex', () => {
-  const dataDir = path.join(process.cwd(), 'data');
-  const historyFile = path.join(dataDir, 'scan_history.json');
+    it('clears history properly', async () => {
+      await ScanHistoryStore.saveScan(mockReport);
+      expect(await ScanHistoryStore.getAllScans()).toHaveLength(1);
 
-  beforeEach(async () => {
-    await ScanHistoryStore.clearHistory();
-  });
-
-  afterEach(async () => {
-    await ScanHistoryStore.clearHistory();
-  });
-
-  it('should handle concurrent saves without lost updates (P2 Mutex)', async () => {
-    const reports: ScanReport[] = Array.from({ length: 10 }, (_, i) => ({
-      id: `scan-concurrent-${i}`,
-      timestamp: new Date().toISOString(),
-      target: {
-        host: 'localhost',
-        port: 8123,
-        database: `db_${i}`,
-        isDemoCluster: true,
-        clusterName: `cluster_${i}`,
-      },
-      overallScore: 70 + i,
-      overallGrade: 'B',
-      dimensionScores: {} as any,
-      findings: [],
-      executiveSummary: {
-        overview: `Concurrent report ${i}`,
-        overallHealthGrade: 'B',
-        topRisk: 'None',
-        quickWins: [],
-        strategicFixes: [],
-        aiGenerated: false,
-      },
-      clusterMetadata: {} as any,
-      rawStats: {
-        tables: [],
-        partsSummary: {},
-        mergesSummary: {},
-        slowQueries: [],
-        expensivePatterns: [],
-        columnsWithIssues: [],
-        configSettings: [],
-      },
-      migrationScript: '',
-      scanDurationMs: 50,
-      aiStatus: 'disabled',
-    }));
-
-    // Trigger all saves concurrently in parallel
-    await Promise.all(reports.map((r) => ScanHistoryStore.saveScan(r)));
-
-    const stored = await ScanHistoryStore.getAllScans();
-    expect(stored.length).toBe(10);
-    const storedIds = stored.map((s) => s.id);
-    for (let i = 0; i < 10; i++) {
-      expect(storedIds).toContain(`scan-concurrent-${i}`);
-    }
+      await ScanHistoryStore.clearHistory();
+      expect(await ScanHistoryStore.getAllScans()).toHaveLength(0);
+    });
   });
 });

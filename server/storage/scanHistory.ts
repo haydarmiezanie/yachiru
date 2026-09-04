@@ -1,10 +1,68 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { ScanReport } from '../../src/types/yachiru.js';
 import { logger } from '../logger.js';
 
 const STORAGE_DIR = path.join(process.cwd(), 'data');
 const HISTORY_FILE = path.join(STORAGE_DIR, 'scan_history.json');
+
+/**
+ * Checks whether high-privacy / zero-raw-query mode is active.
+ * When true, Yachiru completely discards raw SQL queries and stores only
+ * normalized query patterns and SHA-256 fingerprints.
+ */
+export function isPrivacyPreservingMode(env = process.env): boolean {
+  if (env.PRIVACY_PRESERVING_HISTORY === 'true') return true;
+  if (env.STORE_RAW_QUERIES === 'false') return true;
+  return false;
+}
+
+/**
+ * Normalizes an arbitrary SQL query into a structural AST-like pattern skeleton,
+ * stripping all variable literals (strings, numbers, parameter tuples).
+ *
+ * This normalizes:
+ * - Comments (-- and /* * /)
+ * - Single-quoted string literals -> '?'
+ * - VALUES (...) tuples -> VALUES (?)
+ * - IN (...) lists -> IN (?)
+ * - Comparison and arithmetic numeric values -> ?
+ * - Multiple whitespaces collapsed to a single space
+ */
+export function normalizeQueryPattern(queryText: string): string {
+  if (!queryText || typeof queryText !== 'string') return '';
+
+  return queryText
+    // Remove inline and block comments
+    .replace(/--.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    // Redact string literals
+    .replace(/'(?:[^'\\]|\\.)*'/g, "'?'")
+    // Redact VALUES clause contents
+    .replace(/VALUES\s*\([^)]+\)/gi, 'VALUES (?)')
+    // Redact IN list contents
+    .replace(/IN\s*\([^)]+\)/gi, 'IN (?)')
+    // Redact comparison numbers: = 12345, > 99999, <= 0.5
+    .replace(/(=|!=|<>|>=|<=|>|<)\s*\d+(\.\d+)?/g, '$1 ?')
+    // Redact UUIDs & hex hashes
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '?')
+    .replace(/\b0x[0-9a-fA-F]+\b/g, '?')
+    // Collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Generates a deterministic, truncated SHA-256 fingerprint from a normalized query pattern.
+ * Enables deduplicating query patterns and bug profiles across audit scans without exposing sensitive data.
+ */
+export function fingerprintQuery(queryText: string): string {
+  if (!queryText || typeof queryText !== 'string') return 'fp_empty';
+  const normalized = normalizeQueryPattern(queryText);
+  const hash = crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+  return `fp_${hash}`;
+}
 
 /**
  * Simple in-process FIFO mutex to serialize read-modify-write cycles and prevent lost updates during concurrent scans.
@@ -33,7 +91,17 @@ class AsyncMutex {
 const storageMutex = new AsyncMutex();
 
 /**
- * Redacts literal string, numeric values, and credentials from SQL queries to prevent saving PII/sensitive customer data to disk.
+ * Best-effort heuristic sanitization helper.
+ *
+ * ⚠️ COMPLIANCE & PRIVACY NOTICE:
+ * Regex-based masking is a best-effort, heuristic hygiene layer to catch obvious
+ * literal strings, numeric values, passwords, and tokens before writing to local disk.
+ * It is NOT a cryptographic guarantee or formal regulatory compliance boundary (e.g. GDPR, HIPAA).
+ * Heuristics can over-mask benign numbers or under-mask complex/nested structures
+ * (e.g. concatenated strings, base64 values, JSON-embedded attributes).
+ *
+ * For zero-risk privacy compliance, configure `PRIVACY_PRESERVING_HISTORY=true` or
+ * `STORE_RAW_QUERIES=false` to store ONLY normalized structural patterns and SHA-256 fingerprints.
  */
 export function maskQueryPii(queryText: string): string {
   if (!queryText || typeof queryText !== 'string') return '';
@@ -54,10 +122,32 @@ export function maskQueryPii(queryText: string): string {
 /**
  * Deeply sanitizes any query text or metrics in a ScanReport before persistence.
  * Sanitizes finding metrics, rawStats.slowQueries, and rawStats.expensivePatterns.
+ *
+ * When privacyPreserving mode is active (or configured via environment), raw query text is
+ * completely discarded and replaced with normalized query skeletons and SHA-256 fingerprints.
  */
-export function sanitizeReportForStorage(report: ScanReport): ScanReport {
+export function sanitizeReportForStorage(
+  report: ScanReport,
+  options?: { privacyPreserving?: boolean }
+): ScanReport {
   try {
     const cloned: ScanReport = JSON.parse(JSON.stringify(report));
+    const zeroRawQueries = options?.privacyPreserving ?? isPrivacyPreservingMode();
+
+    const processQuery = (rawText: string): { processed: string; fingerprint: string } => {
+      const fp = fingerprintQuery(rawText);
+      if (zeroRawQueries) {
+        const pattern = normalizeQueryPattern(rawText);
+        return {
+          processed: `/* [ZERO_RAW_QUERY_MODE - FINGERPRINT: ${fp}] */ ${pattern}`,
+          fingerprint: fp,
+        };
+      }
+      return {
+        processed: maskQueryPii(rawText),
+        fingerprint: fp,
+      };
+    };
 
     // 1. Mask Findings Metrics
     if (Array.isArray(cloned.findings)) {
@@ -73,7 +163,11 @@ export function sanitizeReportForStorage(report: ScanReport): ScanReport {
                 lowerKey.includes('exception') ||
                 lowerKey.includes('sql')
               ) {
-                finding.metrics[key] = maskQueryPii(val);
+                const { processed, fingerprint } = processQuery(val);
+                finding.metrics[key] = processed;
+                if (!finding.metrics[`${key}Fingerprint`]) {
+                  finding.metrics[`${key}Fingerprint`] = fingerprint;
+                }
               }
             }
           }
@@ -88,10 +182,13 @@ export function sanitizeReportForStorage(report: ScanReport): ScanReport {
           if (!item || typeof item !== 'object') return item;
           const sanitized = { ...item };
           if (typeof sanitized.query === 'string') {
-            sanitized.query = maskQueryPii(sanitized.query);
+            const { processed, fingerprint } = processQuery(sanitized.query);
+            sanitized.query = processed;
+            sanitized.query_fingerprint = fingerprint;
           }
           if (typeof sanitized.formatted_query === 'string') {
-            sanitized.formatted_query = maskQueryPii(sanitized.formatted_query);
+            const { processed } = processQuery(sanitized.formatted_query);
+            sanitized.formatted_query = processed;
           }
           return sanitized;
         });
@@ -102,10 +199,13 @@ export function sanitizeReportForStorage(report: ScanReport): ScanReport {
           if (!item || typeof item !== 'object') return item;
           const sanitized = { ...item };
           if (typeof sanitized.query === 'string') {
-            sanitized.query = maskQueryPii(sanitized.query);
+            const { processed, fingerprint } = processQuery(sanitized.query);
+            sanitized.query = processed;
+            sanitized.query_fingerprint = fingerprint;
           }
           if (typeof sanitized.formatted_query === 'string') {
-            sanitized.formatted_query = maskQueryPii(sanitized.formatted_query);
+            const { processed } = processQuery(sanitized.formatted_query);
+            sanitized.formatted_query = processed;
           }
           return sanitized;
         });
@@ -172,10 +272,13 @@ export class ScanHistoryStore {
    * Serialized atomic asynchronous save:
    * Uses AsyncMutex to prevent lost updates from concurrent scans, writes to temp file and renames atomically.
    */
-  public static async saveScan(report: ScanReport): Promise<void> {
+  public static async saveScan(
+    report: ScanReport,
+    options?: { privacyPreserving?: boolean }
+  ): Promise<void> {
     return storageMutex.runExclusive(async () => {
       await this.ensureStorageDirAsync();
-      const sanitizedReport = sanitizeReportForStorage(report);
+      const sanitizedReport = sanitizeReportForStorage(report, options);
       const list = await this.readScansFromFile();
       // Keep last 50 scans
       const updated = [sanitizedReport, ...list.filter((s) => s.id !== sanitizedReport.id)].slice(0, 50);
