@@ -2,6 +2,8 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
   User,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as fbSignOut,
@@ -32,6 +34,7 @@ interface AuthContextType {
   isViewer: boolean;
   authError: string | null;
   signInWithGoogle: () => Promise<void>;
+  signInWithGoogleRedirect: () => Promise<void>;
   signInWithEmail: (email: string, pass: string) => Promise<void>;
   signUpWithEmail: (email: string, pass: string, name: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -166,8 +169,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await signInWithPopup(auth, googleProvider);
     } catch (err: any) {
       console.error('Google Sign-In Error:', err);
-      if (err.code === 'auth/popup-closed-by-user') {
-        setAuthError('Sign-in cancelled by user.');
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+      if (err.code === 'auth/unauthorized-domain') {
+        setAuthError(
+          `Domain "${currentHost}" is not authorized in Firebase. Please add "${currentHost}" to Firebase Console > Authentication > Settings > Authorized domains.`
+        );
+      } else if (err.code === 'auth/popup-blocked') {
+        setAuthError('Sign-in popup was blocked by your browser. Please allow popups for this site.');
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        setAuthError(
+          `Sign-in window closed before completion. If using domain "${currentHost}", ensure it is added to Authorized Domains in Firebase Console.`
+        );
+      } else if (err.code === 'auth/operation-not-allowed') {
+        setAuthError('Google Sign-In is not enabled in Firebase Console > Authentication > Sign-in method.');
       } else {
         setAuthError(err.message || 'Google sign-in failed. Please try again.');
       }
@@ -185,7 +199,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('Email Sign-In Error:', err);
       if (err.code === 'auth/operation-not-allowed') {
         setAuthError(
-          'Email/Password sign-in is not enabled on this Firebase project. Please use "Continue with Google" above to sign in directly.'
+          'Email/Password sign-in is not enabled in Firebase Console. Please enable it in Firebase Console > Authentication > Sign-in method > Email/Password.'
         );
       } else if (
         err.code === 'auth/invalid-credential' ||
@@ -224,7 +238,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('Email Sign-Up Error:', err);
       if (err.code === 'auth/operation-not-allowed') {
         setAuthError(
-          'Email/Password registration is not enabled on this Firebase project. Please use "Continue with Google" above to sign in directly.'
+          'Email/Password registration is not enabled in Firebase Console. Please enable it in Firebase Console > Authentication > Sign-in method > Email/Password.'
         );
       } else if (err.code === 'auth/email-already-in-use') {
         setAuthError('This email is already registered. Please sign in instead.');

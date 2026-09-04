@@ -29,6 +29,8 @@ app.use(
   helmet({
     contentSecurityPolicy: false, // Prevents iframe preview and Vite development HMR blocking
     crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false, // CRITICAL: Allows Firebase/Google Auth popups to communicate with window.opener
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' }, // Required for Google OAuth domain verification
   })
 );
 
@@ -72,15 +74,19 @@ app.use(express.json({ limit: '10mb' }));
 
 // Authentication Middleware (Protects ClickHouse and Scan History API routes)
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  const secretKey = (process.env.YACHIRU_API_KEY || process.env.API_SECRET_KEY || '').trim();
+  const secretKeyEnv = (process.env.YACHIRU_API_KEY || process.env.API_SECRET_KEY || '').trim();
+  const allowedKeys = secretKeyEnv
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean);
 
   // If no auth key is configured on the server
-  if (!secretKey) {
+  if (allowedKeys.length === 0) {
     // In strict mode (or if REQUIRE_API_KEY is enabled), reject requests when server key is missing
     if (process.env.REQUIRE_API_KEY === 'true' || process.env.STRICT_AUTH === 'true') {
       logger.error({ ip: req.ip, path: req.path }, 'Request blocked: REQUIRE_API_KEY is active but YACHIRU_API_KEY is not set');
       return res.status(500).json({
-        error: 'Server configuration error: YACHIRU_API_KEY is mandatory but not configured in server environment.',
+        error: 'Server configuration error: YACHIRU_API_KEY is mandatory but not configured in server environment (.env).',
       });
     }
 
@@ -91,11 +97,11 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
     return next();
   }
 
-  const headerKey = (req.headers['x-api-key'] as string) || '';
-  const authHeader = req.headers.authorization || '';
+  const headerKey = ((req.headers['x-api-key'] || req.headers['api-key']) as string)?.trim() || '';
+  const authHeader = req.headers.authorization?.trim() || '';
   const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
 
-  if (headerKey === secretKey || bearerToken === secretKey) {
+  if ((headerKey && allowedKeys.includes(headerKey)) || (bearerToken && allowedKeys.includes(bearerToken))) {
     return next();
   }
 

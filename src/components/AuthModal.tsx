@@ -3,7 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { Shield, Lock, Mail, Key, User, ArrowRight, AlertCircle, Sparkles, CheckCircle2, Eye, EyeOff } from 'lucide-react';
 
 export const AuthModal: React.FC = () => {
-  const { signInWithGoogle, signInWithEmail, signUpWithEmail, authError, clearError, loading } = useAuth();
+  const { signInWithGoogle, signInWithGoogleRedirect, signInWithEmail, signUpWithEmail, authError, clearError, loading } = useAuth();
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -32,6 +32,16 @@ export const AuthModal: React.FC = () => {
     clearError();
     try {
       await signInWithGoogle();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleGoogleRedirectSignIn = async () => {
+    setSubmitting(true);
+    clearError();
+    try {
+      await signInWithGoogleRedirect();
     } finally {
       setSubmitting(false);
     }
