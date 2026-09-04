@@ -1,5 +1,6 @@
 import { DEMO_CLUSTERS, MockClickHouseCluster } from './demoDatasets.js';
 import { ScanTarget } from '../../src/types/yachiru.js';
+import { assertSafeHost } from '../security/ssrfValidator.js';
 
 export interface RawClusterData {
   version: string;
@@ -129,6 +130,9 @@ export class ClickHouseScannerClient {
 
   private formatNetworkError(err: unknown, baseUrl: string, host: string, port: number): string {
     const error = err instanceof Error ? err : new Error(String(err));
+    if (error.message.startsWith('Refusing to connect to restricted')) {
+      return error.message;
+    }
     const cause = (err as any)?.cause;
     const causeMsg = cause?.message || '';
     const causeCode = cause?.code || (err as any)?.code || '';
@@ -177,6 +181,9 @@ export class ClickHouseScannerClient {
     const { baseUrl, host, port } = this.getCleanEndpoint();
 
     try {
+      // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
+      await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+
       const url = `${baseUrl}/?default_format=JSONEachRow`;
       const headers = this.getHeaders();
 
@@ -260,6 +267,10 @@ export class ClickHouseScannerClient {
     }
 
     const { baseUrl, host, port } = this.getCleanEndpoint();
+
+    // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
+    await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+
     const url = `${baseUrl}/?default_format=JSONEachRow`;
     
     // Strict Validation & Escaping of database identifier
