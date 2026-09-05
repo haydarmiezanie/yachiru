@@ -56,5 +56,12 @@ service cloud.firestore {
       allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
       allow update, delete: if isAdmin();
     }
+
+    // Scans History Collection
+    match /scans/{scanId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'));
+      allow update, delete: if isAdmin();
+    }
   }
 }

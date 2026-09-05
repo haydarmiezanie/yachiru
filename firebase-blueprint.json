@@ -30,6 +30,20 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "status"]
+    },
+    "scans": {
+      "title": "Scan Reports",
+      "description": "Historical ClickHouse audit scan reports containing health grades, dimension scores, and findings.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique scan ID" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "ISO timestamp of scan execution" },
+        "overallScore": { "type": "number", "description": "Overall cluster health score (0-100)" },
+        "overallGrade": { "type": "string", "description": "Overall grade (A, B, C, D, F)" },
+        "aiStatus": { "type": "string", "description": "AI analysis status (generated, disabled, failed)" },
+        "scanDurationMs": { "type": "number", "description": "Duration of scan in milliseconds" }
+      },
+      "required": ["id", "timestamp", "overallScore", "overallGrade"]
     }
   },
   "securityRules": {
@@ -42,6 +56,10 @@
       "create": "isAuthenticated() && request.auth.uid == request.resource.data.uid",
       "update": "isAdmin()",
       "delete": "isAdmin()"
+    },
+    "scans": {
+      "read": "isAuthenticated()",
+      "write": "isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'))"
     }
   }
 }

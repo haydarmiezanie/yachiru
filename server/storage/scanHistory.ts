@@ -3,9 +3,54 @@ import path from 'path';
 import crypto from 'crypto';
 import { ScanReport } from '../../src/types/yachiru.js';
 import { logger } from '../logger.js';
+import { getAdminFirestore } from '../auth/rbacMiddleware.js';
 
 const STORAGE_DIR = path.join(process.cwd(), 'data');
+const SCANS_DIR = path.join(STORAGE_DIR, 'scans');
+const INDEX_FILE = path.join(STORAGE_DIR, 'scan_index.json');
 const HISTORY_FILE = path.join(STORAGE_DIR, 'scan_history.json');
+const MAX_HISTORY_ITEMS = 50;
+
+export interface ScanSummaryItem {
+  id: string;
+  timestamp: string;
+  target: ScanReport['target'];
+  overallScore: number;
+  overallGrade: string;
+  findingsCount: number;
+  criticalCount: number;
+  warningCount: number;
+  aiStatus: string;
+  scanDurationMs?: number;
+}
+
+/**
+ * Extracts a lightweight metadata summary from a full scan report.
+ */
+export function extractScanSummary(report: ScanReport): ScanSummaryItem {
+  return {
+    id: report.id,
+    timestamp: report.timestamp,
+    target: report.target,
+    overallScore: report.overallScore,
+    overallGrade: report.overallGrade,
+    findingsCount: Array.isArray(report.findings) ? report.findings.length : 0,
+    criticalCount: Array.isArray(report.findings)
+      ? report.findings.filter((f) => f.severity === 'critical').length
+      : 0,
+    warningCount: Array.isArray(report.findings)
+      ? report.findings.filter((f) => f.severity === 'warning').length
+      : 0,
+    aiStatus: report.aiStatus || 'disabled',
+    scanDurationMs: report.scanDurationMs,
+  };
+}
+
+function isFirestoreSyncEnabled(): boolean {
+  if (process.env.NODE_ENV === 'test') return false;
+  if (process.env.USE_FIRESTORE_HISTORY === 'true') return true;
+  return false;
+}
 
 /**
  * Checks whether high-privacy / zero-raw-query mode is active.
@@ -222,10 +267,35 @@ export class ScanHistoryStore {
   private static async ensureStorageDirAsync(): Promise<void> {
     try {
       await fs.promises.mkdir(STORAGE_DIR, { recursive: true });
+      await fs.promises.mkdir(SCANS_DIR, { recursive: true });
+
+      // Check if scan_index.json exists
       try {
-        await fs.promises.access(HISTORY_FILE, fs.constants.F_OK);
+        await fs.promises.access(INDEX_FILE, fs.constants.F_OK);
       } catch {
-        await fs.promises.writeFile(HISTORY_FILE, JSON.stringify([]), 'utf-8');
+        // If scan_index.json does not exist, check if legacy scan_history.json exists to migrate
+        let migrated = false;
+        try {
+          const legacyRaw = await fs.promises.readFile(HISTORY_FILE, 'utf-8');
+          const legacyList = JSON.parse(legacyRaw);
+          if (Array.isArray(legacyList) && legacyList.length > 0) {
+            const summaries: ScanSummaryItem[] = [];
+            for (const item of legacyList) {
+              if (item && item.id) {
+                const itemFile = path.join(SCANS_DIR, `${item.id}.json`);
+                await fs.promises.writeFile(itemFile, JSON.stringify(item, null, 2), 'utf-8');
+                summaries.push(extractScanSummary(item));
+              }
+            }
+            await fs.promises.writeFile(INDEX_FILE, JSON.stringify(summaries, null, 2), 'utf-8');
+            migrated = true;
+          }
+        } catch {
+          // No legacy data or unreadable
+        }
+        if (!migrated) {
+          await fs.promises.writeFile(INDEX_FILE, JSON.stringify([]), 'utf-8');
+        }
       }
     } catch (err) {
       logger.error({ err }, 'Failed to ensure storage directory');
@@ -236,41 +306,118 @@ export class ScanHistoryStore {
     if (!fs.existsSync(STORAGE_DIR)) {
       fs.mkdirSync(STORAGE_DIR, { recursive: true });
     }
-    if (!fs.existsSync(HISTORY_FILE)) {
-      fs.writeFileSync(HISTORY_FILE, JSON.stringify([]), 'utf-8');
+    if (!fs.existsSync(SCANS_DIR)) {
+      fs.mkdirSync(SCANS_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(INDEX_FILE)) {
+      fs.writeFileSync(INDEX_FILE, JSON.stringify([]), 'utf-8');
     }
   }
 
   /**
-   * Reads raw scan list directly from disk without locking (for internal reads inside mutex).
+   * Reads lightweight scan index from disk.
    */
-  private static async readScansFromFile(): Promise<ScanReport[]> {
+  private static async readIndexFromFile(): Promise<ScanSummaryItem[]> {
     await this.ensureStorageDirAsync();
     try {
-      const data = await fs.promises.readFile(HISTORY_FILE, 'utf-8');
+      const data = await fs.promises.readFile(INDEX_FILE, 'utf-8');
       const list = JSON.parse(data);
       return Array.isArray(list) ? list : [];
     } catch (e) {
-      logger.warn({ err: e }, 'Error reading scan history file');
+      logger.warn({ err: e }, 'Error reading scan index file');
       return [];
     }
   }
 
   /**
-   * Asynchronously reads all stored scans.
+   * Legacy helper to read legacy monolithic scan_history.json if present.
    */
-  public static async getAllScans(): Promise<ScanReport[]> {
-    return this.readScansFromFile();
-  }
-
-  public static async getScanById(id: string): Promise<ScanReport | null> {
-    const list = await this.getAllScans();
-    return list.find((s) => s.id === id) || null;
+  private static async readScansFromFile(): Promise<ScanReport[]> {
+    await this.ensureStorageDirAsync();
+    try {
+      if (!fs.existsSync(HISTORY_FILE)) return [];
+      const data = await fs.promises.readFile(HISTORY_FILE, 'utf-8');
+      const list = JSON.parse(data);
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      logger.warn({ err: e }, 'Error reading legacy scan history file');
+      return [];
+    }
   }
 
   /**
-   * Serialized atomic asynchronous save:
-   * Uses AsyncMutex to prevent lost updates from concurrent scans, writes to temp file and renames atomically.
+   * Returns lightweight metadata summaries for all scans (O(1) payload size, avoids loading full reports).
+   */
+  public static async getScanSummaries(): Promise<ScanSummaryItem[]> {
+    return this.readIndexFromFile();
+  }
+
+  /**
+   * Asynchronously reads all stored scans. Reads documents concurrently based on the index.
+   */
+  public static async getAllScans(): Promise<ScanReport[]> {
+    await this.ensureStorageDirAsync();
+    const summaries = await this.readIndexFromFile();
+    if (summaries.length === 0) {
+      return this.readScansFromFile();
+    }
+
+    const docPromises = summaries.map(async (sum) => {
+      const docPath = path.join(SCANS_DIR, `${sum.id}.json`);
+      try {
+        const raw = await fs.promises.readFile(docPath, 'utf-8');
+        return JSON.parse(raw) as ScanReport;
+      } catch {
+        return null;
+      }
+    });
+
+    const reports = await Promise.all(docPromises);
+    return reports.filter((r): r is ScanReport => r !== null);
+  }
+
+  /**
+   * Direct document retrieval by ID: O(1) single-file lookup without parsing other reports.
+   * Checks local document store first, then legacy file, then Firestore cloud document.
+   */
+  public static async getScanById(id: string): Promise<ScanReport | null> {
+    await this.ensureStorageDirAsync();
+    // 1. Direct document file lookup: O(1)
+    const docPath = path.join(SCANS_DIR, `${id}.json`);
+    try {
+      const raw = await fs.promises.readFile(docPath, 'utf-8');
+      return JSON.parse(raw) as ScanReport;
+    } catch {
+      // 2. Legacy fallback
+      const legacy = await this.readScansFromFile();
+      const match = legacy.find((s) => s.id === id);
+      if (match) return match;
+
+      // 3. Optional Firestore cloud document lookup (if cloud history enabled)
+      if (isFirestoreSyncEnabled()) {
+        try {
+          const adminDb = getAdminFirestore();
+          if (adminDb) {
+            const docSnap = await adminDb.collection('scans').doc(id).get();
+            if (docSnap.exists) {
+              return docSnap.data() as ScanReport;
+            }
+          }
+        } catch (cloudErr) {
+          logger.debug({ err: cloudErr }, 'Firestore scan lookup skipped');
+        }
+      }
+
+      return null;
+    }
+  }
+
+  /**
+   * Incremental document save:
+   * 1. Writes ONLY the single new/updated report document file (O(1) regarding historical scans).
+   * 2. Updates the lightweight scan index (~5-10 KB, not megabytes).
+   * 3. Prunes expired files beyond MAX_HISTORY_ITEMS.
+   * 4. Syncs document to Firestore (incremental doc write) if configured.
    */
   public static async saveScan(
     report: ScanReport,
@@ -279,25 +426,82 @@ export class ScanHistoryStore {
     return storageMutex.runExclusive(async () => {
       await this.ensureStorageDirAsync();
       const sanitizedReport = sanitizeReportForStorage(report, options);
-      const list = await this.readScansFromFile();
-      // Keep last 50 scans
-      const updated = [sanitizedReport, ...list.filter((s) => s.id !== sanitizedReport.id)].slice(0, 50);
+      const scanId = sanitizedReport.id;
 
-      const tempFile = path.join(
-        STORAGE_DIR,
-        `scan_history.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+      // 1. Incremental single document save (O(1) write)
+      const docPath = path.join(SCANS_DIR, `${scanId}.json`);
+      const tempDocPath = path.join(
+        SCANS_DIR,
+        `${scanId}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
       );
-      await fs.promises.writeFile(tempFile, JSON.stringify(updated, null, 2), 'utf-8');
-      await fs.promises.rename(tempFile, HISTORY_FILE);
+      await fs.promises.writeFile(tempDocPath, JSON.stringify(sanitizedReport, null, 2), 'utf-8');
+      await fs.promises.rename(tempDocPath, docPath);
+
+      // 2. Update lightweight index (~5-10 KB)
+      const summaries = await this.readIndexFromFile();
+      const newSummary = extractScanSummary(sanitizedReport);
+      const updated = [newSummary, ...summaries.filter((s) => s.id !== scanId)];
+
+      const toKeep = updated.slice(0, MAX_HISTORY_ITEMS);
+      const toPrune = updated.slice(MAX_HISTORY_ITEMS);
+
+      // Prune old report documents from disk
+      for (const pruned of toPrune) {
+        const prunedPath = path.join(SCANS_DIR, `${pruned.id}.json`);
+        fs.promises.unlink(prunedPath).catch(() => {});
+      }
+
+      const tempIndexPath = path.join(
+        STORAGE_DIR,
+        `scan_index.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+      );
+      await fs.promises.writeFile(tempIndexPath, JSON.stringify(toKeep, null, 2), 'utf-8');
+      await fs.promises.rename(tempIndexPath, INDEX_FILE);
+
+      // 3. Optional Firestore Cloud Document Sync (Incremental single-doc set)
+      if (isFirestoreSyncEnabled()) {
+        try {
+          const adminDb = getAdminFirestore();
+          if (adminDb) {
+            await adminDb.collection('scans').doc(scanId).set(sanitizedReport, { merge: true });
+          }
+        } catch (cloudErr) {
+          logger.debug({ err: cloudErr }, 'Firestore cloud scan sync skipped or unavailable');
+        }
+      }
     });
   }
 
+  /**
+   * Clears scan history: resets index, unlinks all individual report documents.
+   */
   public static async clearHistory(): Promise<void> {
     return storageMutex.runExclusive(async () => {
       await this.ensureStorageDirAsync();
-      const tempFile = path.join(STORAGE_DIR, `scan_history.clear.${Date.now()}.tmp`);
-      await fs.promises.writeFile(tempFile, JSON.stringify([], null, 2), 'utf-8');
-      await fs.promises.rename(tempFile, HISTORY_FILE);
+
+      // Clear scan_index.json
+      const tempIndexPath = path.join(STORAGE_DIR, `scan_index.clear.${Date.now()}.tmp`);
+      await fs.promises.writeFile(tempIndexPath, JSON.stringify([], null, 2), 'utf-8');
+      await fs.promises.rename(tempIndexPath, INDEX_FILE);
+
+      // Clear legacy scan_history.json if present
+      try {
+        if (fs.existsSync(HISTORY_FILE)) {
+          await fs.promises.writeFile(HISTORY_FILE, JSON.stringify([], null, 2), 'utf-8');
+        }
+      } catch {}
+
+      // Delete all stored report documents from SCANS_DIR
+      try {
+        const files = await fs.promises.readdir(SCANS_DIR);
+        await Promise.all(
+          files
+            .filter((f) => f.endsWith('.json'))
+            .map((f) => fs.promises.unlink(path.join(SCANS_DIR, f)).catch(() => {}))
+        );
+      } catch (err) {
+        logger.warn({ err }, 'Error cleaning scans directory during clearHistory');
+      }
     });
   }
 
@@ -305,9 +509,26 @@ export class ScanHistoryStore {
   public static getAllScansSync(): ScanReport[] {
     this.ensureStorageDirSync();
     try {
-      const data = fs.readFileSync(HISTORY_FILE, 'utf-8');
-      const list = JSON.parse(data);
-      return Array.isArray(list) ? list : [];
+      if (fs.existsSync(INDEX_FILE)) {
+        const indexRaw = fs.readFileSync(INDEX_FILE, 'utf-8');
+        const summaries = JSON.parse(indexRaw) as ScanSummaryItem[];
+        const results: ScanReport[] = [];
+        for (const sum of summaries) {
+          const docPath = path.join(SCANS_DIR, `${sum.id}.json`);
+          if (fs.existsSync(docPath)) {
+            try {
+              results.push(JSON.parse(fs.readFileSync(docPath, 'utf-8')));
+            } catch {}
+          }
+        }
+        return results;
+      }
+      if (fs.existsSync(HISTORY_FILE)) {
+        const data = fs.readFileSync(HISTORY_FILE, 'utf-8');
+        const list = JSON.parse(data);
+        return Array.isArray(list) ? list : [];
+      }
+      return [];
     } catch (e) {
       logger.warn({ err: e }, 'Error reading scan history sync');
       return [];

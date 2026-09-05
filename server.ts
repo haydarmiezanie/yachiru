@@ -325,19 +325,8 @@ app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Reques
 
 // History Endpoints (Protected: Viewer role for reading, Admin role for deletion)
 app.get('/api/history', requireViewer, async (req: Request, res: Response) => {
-  const scans = await ScanHistoryStore.getAllScans();
-  const list = scans.map((s) => ({
-    id: s.id,
-    timestamp: s.timestamp,
-    target: s.target,
-    overallScore: s.overallScore,
-    overallGrade: s.overallGrade,
-    findingsCount: s.findings.length,
-    criticalCount: s.findings.filter((f) => f.severity === 'critical').length,
-    warningCount: s.findings.filter((f) => f.severity === 'warning').length,
-    aiStatus: s.aiStatus,
-  }));
-  res.json(list);
+  const summaries = await ScanHistoryStore.getScanSummaries();
+  res.json(summaries);
 });
 
 app.get('/api/history/:id', requireViewer, async (req: Request, res: Response) => {

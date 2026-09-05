@@ -76,6 +76,18 @@ const ROLE_RANK: Record<UserRole, number> = {
   admin: 2,
 };
 
+/**
+ * Returns the Firestore instance initialized under Firebase Admin, or null if unconfigured.
+ */
+export function getAdminFirestore(): ReturnType<typeof getFirestore> | null {
+  try {
+    if (!adminApp) return null;
+    return firestoreDatabaseId ? getFirestore(adminApp, firestoreDatabaseId) : getFirestore(adminApp);
+  } catch {
+    return null;
+  }
+}
+
 // In-memory profile cache with 30-second TTL to avoid database hammering
 interface CachedProfile {
   user: AuthenticatedUser;
