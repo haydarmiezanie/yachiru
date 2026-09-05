@@ -50,7 +50,7 @@ export function resolveAllowedOrigins(env = process.env): string[] {
   return configured;
 }
 
-const app = express();
+export const app = express();
 const PORT = 3000;
 
 // Trust reverse proxy (Cloud Run, Nginx, load balancers)
@@ -379,4 +379,9 @@ async function startServer() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
+if (!isTestEnv) {
+  startServer();
+}
+
+export { startServer };
