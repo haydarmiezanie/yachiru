@@ -1,4 +1,5 @@
 import { DimensionId } from '../../../src/types/yachiru.js';
+import { ClickHouseTableRow, ClickHouseColumnRow } from '../clickhouseClient.js';
 
 export const DIMENSION_METADATA: Record<DimensionId, { name: string; description: string }> = {
   table_engines_partitioning: {
@@ -62,7 +63,7 @@ export function createIdGenerator(dimCode: string, startSeq = 1) {
 /**
  * Inspects table columns to derive actual sorting columns or generate an explicit placeholder comment.
  */
-export function deriveSortingKeyOrPlaceholder(table: any, allColumns: any[]): { keySql: string; isPlaceholder: boolean } {
+export function deriveSortingKeyOrPlaceholder(table: ClickHouseTableRow, allColumns: ClickHouseColumnRow[]): { keySql: string; isPlaceholder: boolean } {
   // If table has sorting_key or primary_key defined, use it
   if (table.sorting_key && table.sorting_key.trim()) {
     return { keySql: table.sorting_key.trim(), isPlaceholder: false };
@@ -116,7 +117,7 @@ export function deriveSortingKeyOrPlaceholder(table: any, allColumns: any[]): { 
 /**
  * Inspects table columns to derive date/time partition column or generate explicit placeholder.
  */
-export function derivePartitionKeyOrPlaceholder(table: any, allColumns: any[]): { partSql: string; isPlaceholder: boolean } {
+export function derivePartitionKeyOrPlaceholder(table: ClickHouseTableRow, allColumns: ClickHouseColumnRow[]): { partSql: string; isPlaceholder: boolean } {
   const tableCols = allColumns.filter((c) => c.table === table.name);
   const dateCols = tableCols.filter((c) =>
     c.type.includes('Date') ||
@@ -139,7 +140,7 @@ export function derivePartitionKeyOrPlaceholder(table: any, allColumns: any[]): 
 /**
  * Inspects table columns to derive TTL date column or generate explicit placeholder.
  */
-export function deriveTtlColumnOrPlaceholder(table: any, allColumns: any[]): { colName: string; isPlaceholder: boolean } {
+export function deriveTtlColumnOrPlaceholder(table: ClickHouseTableRow, allColumns: ClickHouseColumnRow[]): { colName: string; isPlaceholder: boolean } {
   const tableCols = allColumns.filter((c) => c.table === table.name);
   const dateCols = tableCols.filter((c) =>
     c.type.includes('Date') ||

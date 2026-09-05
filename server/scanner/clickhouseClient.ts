@@ -2,17 +2,104 @@ import { DEMO_CLUSTERS, MockClickHouseCluster } from './demoDatasets.js';
 import { ScanTarget } from '../../src/types/yachiru.js';
 import { assertSafeHost } from '../security/ssrfValidator.js';
 
+export interface ClickHouseTableRow {
+  database: string;
+  name: string;
+  engine: string;
+  partition_key?: string;
+  sorting_key?: string;
+  primary_key?: string;
+  sampling_key?: string;
+  total_rows: number;
+  total_bytes: number;
+  comment?: string;
+  parts_count?: number;
+  active_partitions?: number;
+  ttl_expression?: string;
+}
+
+export interface ClickHouseColumnRow {
+  database: string;
+  table: string;
+  name: string;
+  type: string;
+  default_type?: string;
+  default_expression?: string;
+  data_compressed_bytes: number;
+  data_uncompressed_bytes: number;
+  compression_codec?: string;
+  cardinality_approx?: number;
+  is_nullable?: boolean | number;
+}
+
+export interface ClickHousePartRow {
+  database: string;
+  table: string;
+  partition?: string;
+  name: string;
+  part_type?: string;
+  active: number;
+  rows: number;
+  bytes_on_disk: number;
+  modification_time?: string;
+}
+
+export interface ClickHouseMergeRow {
+  database: string;
+  table: string;
+  elapsed: number;
+  progress: number;
+  num_parts: number;
+  total_size_bytes_compressed: number;
+  memory_usage: number;
+  is_mutation: number;
+}
+
+export interface ClickHouseQueryLogRow {
+  query_id: string;
+  event_time?: string;
+  query_duration_ms: number;
+  query: string;
+  tables: string[];
+  columns: string[];
+  read_rows: number;
+  read_bytes: number;
+  result_rows: number;
+  result_bytes: number;
+  memory_usage: number;
+  exception_code?: number;
+  exception?: string;
+  user?: string;
+  read_rows_after_pk?: number;
+  used_aggregate_functions?: boolean;
+  frequency_per_hour?: number;
+}
+
+export interface ClickHouseSettingRow {
+  name: string;
+  value: string;
+  changed?: number | boolean;
+  description?: string;
+  type?: string;
+}
+
+export interface ClickHouseVersionRow {
+  version?: string;
+  uptime?: number;
+  user?: string;
+}
+
 export interface RawClusterData {
   version: string;
   clusterName: string;
   database?: string;
   targetDatabase?: string;
-  tables: any[];
-  columns: any[];
-  parts: any[];
-  merges: any[];
-  queryLog: any[];
-  settings: any[];
+  tables: ClickHouseTableRow[];
+  columns: ClickHouseColumnRow[];
+  parts: ClickHousePartRow[];
+  merges: ClickHouseMergeRow[];
+  queryLog: ClickHouseQueryLogRow[];
+  settings: ClickHouseSettingRow[];
   totalDatabases: number;
   uptimeSeconds: number;
 }
@@ -97,28 +184,28 @@ export class ClickHouseScannerClient {
     return headers;
   }
 
-  public parseClickHouseOutput(text: string): any[] {
+  public parseClickHouseOutput<T = Record<string, any>>(text: string): T[] {
     const trimmed = text.trim();
     if (!trimmed) return [];
 
     // 1. Try parsing as standard JSON
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return parsed;
-      if (parsed && Array.isArray(parsed.data)) return parsed.data;
-      if (typeof parsed === 'object' && parsed !== null) return [parsed];
+      if (Array.isArray(parsed)) return parsed as T[];
+      if (parsed && Array.isArray(parsed.data)) return parsed.data as T[];
+      if (typeof parsed === 'object' && parsed !== null) return [parsed as T];
     } catch {
       // Not a single JSON document, fall through to newline-delimited JSON (JSONEachRow)
     }
 
     // 2. Parse Newline-Delimited JSON (JSONEachRow format)
     const lines = trimmed.split('\n').map((l) => l.trim()).filter(Boolean);
-    const rows: any[] = [];
+    const rows: T[] = [];
     for (const line of lines) {
       try {
         const item = JSON.parse(line);
         if (item !== null && item !== undefined) {
-          rows.push(item);
+          rows.push(item as T);
         }
       } catch {
         // Skip unparseable lines (e.g. comment or trailing status text)
@@ -209,7 +296,7 @@ export class ClickHouseScannerClient {
       }
 
       const text = await resp.text();
-      const rows = this.parseClickHouseOutput(text);
+      const rows = this.parseClickHouseOutput<ClickHouseVersionRow>(text);
       const row = rows[0] || {};
 
       // Fetch accessible databases
@@ -228,8 +315,8 @@ export class ClickHouseScannerClient {
 
         if (dbResp.ok) {
           const dbText = await dbResp.text();
-          const dbRows = this.parseClickHouseOutput(dbText);
-          dbs = dbRows.map((d: any) => d.name || Object.values(d)[0]).filter(Boolean);
+          const dbRows = this.parseClickHouseOutput<{ name?: string } & Record<string, any>>(dbText);
+          dbs = dbRows.map((d) => d.name || Object.values(d)[0]).filter(Boolean);
         }
       } catch {
         // Non-critical, database list is optional for test connection
@@ -312,7 +399,11 @@ export class ClickHouseScannerClient {
 
     const defaultTimeoutMs = Number(process.env.CLICKHOUSE_QUERY_TIMEOUT_MS) || 10000;
 
-    const runQuery = async (query: string, fallback: any[] = [], timeoutMs = defaultTimeoutMs): Promise<any[]> => {
+    const runQuery = async <T = Record<string, any>>(
+      query: string,
+      fallback: T[] = [],
+      timeoutMs = defaultTimeoutMs
+    ): Promise<T[]> => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -329,7 +420,7 @@ export class ClickHouseScannerClient {
           return fallback;
         }
         const text = await resp.text();
-        return this.parseClickHouseOutput(text);
+        return this.parseClickHouseOutput<T>(text);
       } catch (err: any) {
         if (err?.name === 'AbortError' || controller.signal.aborted) {
           console.warn(`[ClickHouse Scanner] Query timed out after ${timeoutMs}ms: ${query.slice(0, 80)}`);
@@ -347,10 +438,10 @@ export class ClickHouseScannerClient {
     // eliminating latency accumulation across slow queries such as system.query_log.
     const [versionRes, tables, columns, parts, merges, queryLog, settings] = await Promise.all([
       // 1. Fetch Version & Uptime
-      runQuery('SELECT version() AS version, uptime() AS uptime'),
+      runQuery<ClickHouseVersionRow>('SELECT version() AS version, uptime() AS uptime'),
 
       // 2. Fetch Tables in target database (Safe escaped parameter)
-      runQuery(`
+      runQuery<ClickHouseTableRow>(`
         SELECT 
           database,
           name,
@@ -367,7 +458,7 @@ export class ClickHouseScannerClient {
       `),
 
       // 3. Fetch Columns (Safe escaped parameter)
-      runQuery(`
+      runQuery<ClickHouseColumnRow>(`
         SELECT 
           database,
           table,
@@ -383,7 +474,7 @@ export class ClickHouseScannerClient {
       `),
 
       // 4. Fetch Parts status (Safe escaped parameter)
-      runQuery(`
+      runQuery<ClickHousePartRow>(`
         SELECT 
           database,
           table,
@@ -401,7 +492,7 @@ export class ClickHouseScannerClient {
       `),
 
       // 5. Fetch Active Merges
-      runQuery(`
+      runQuery<ClickHouseMergeRow>(`
         SELECT 
           database,
           table,
@@ -415,7 +506,7 @@ export class ClickHouseScannerClient {
       `),
 
       // 6. Fetch Query Log (Safe lookback integer and escaped database parameter)
-      runQuery(`
+      runQuery<ClickHouseQueryLogRow>(`
         SELECT 
           query_id,
           event_time,
@@ -441,7 +532,7 @@ export class ClickHouseScannerClient {
       `),
 
       // 7. Fetch System Settings
-      runQuery(`
+      runQuery<ClickHouseSettingRow>(`
         SELECT name, value, changed, description, type 
         FROM system.settings 
         WHERE name IN (

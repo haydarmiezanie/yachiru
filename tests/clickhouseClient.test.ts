@@ -3,6 +3,7 @@ import {
   isValidClickHouseIdentifier,
   escapeClickHouseString,
   ClickHouseScannerClient,
+  ClickHouseTableRow,
 } from '../server/scanner/clickhouseClient.js';
 
 describe('ClickHouse Scanner Client Security & Parsing', () => {
@@ -93,6 +94,22 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
       expect(parsed).toHaveLength(2);
       expect(parsed[0].name).toBe('table_a');
       expect(parsed[1].rows).toBe(200);
+    });
+
+    it('supports generic type parameters for strict row type safety', () => {
+      const json = JSON.stringify([
+        {
+          database: 'analytics',
+          name: 'events',
+          engine: 'ReplacingMergeTree',
+          total_rows: 500000,
+          total_bytes: 10485760,
+        },
+      ]);
+      const typedRows = client.parseClickHouseOutput<ClickHouseTableRow>(json);
+      expect(typedRows).toHaveLength(1);
+      expect(typedRows[0].engine).toBe('ReplacingMergeTree');
+      expect(typedRows[0].total_rows).toBe(500000);
     });
 
     it('handles empty or blank output gracefully', () => {
