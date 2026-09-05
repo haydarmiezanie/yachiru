@@ -310,12 +310,18 @@ export class ClickHouseScannerClient {
       throw new Error(this.formatNetworkError(err, baseUrl, host, port));
     }
 
-    const runQuery = async (query: string, fallback: any[] = []): Promise<any[]> => {
+    const defaultTimeoutMs = Number(process.env.CLICKHOUSE_QUERY_TIMEOUT_MS) || 10000;
+
+    const runQuery = async (query: string, fallback: any[] = [], timeoutMs = defaultTimeoutMs): Promise<any[]> => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
       try {
         const resp = await fetch(url, {
           method: 'POST',
           headers,
           body: query,
+          signal: controller.signal,
         });
         if (!resp.ok) {
           const errBody = await resp.text();
@@ -324,9 +330,15 @@ export class ClickHouseScannerClient {
         }
         const text = await resp.text();
         return this.parseClickHouseOutput(text);
-      } catch (err) {
-        console.warn(`[ClickHouse Scanner] Non-fatal query error:`, (err as any)?.message || err);
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || controller.signal.aborted) {
+          console.warn(`[ClickHouse Scanner] Query timed out after ${timeoutMs}ms: ${query.slice(0, 80)}`);
+        } else {
+          console.warn(`[ClickHouse Scanner] Non-fatal query error:`, err?.message || err);
+        }
         return fallback;
+      } finally {
+        clearTimeout(timeoutId);
       }
     };
 

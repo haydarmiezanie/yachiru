@@ -165,5 +165,62 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
 
       fetchSpy.mockRestore();
     });
+
+    it('aborts hanging queries via AbortController timeout and returns fallback without blocking the scan', async () => {
+      const originalTimeout = process.env.CLICKHOUSE_QUERY_TIMEOUT_MS;
+      process.env.CLICKHOUSE_QUERY_TIMEOUT_MS = '50';
+
+      const client = new ClickHouseScannerClient({
+        host: '93.184.216.34',
+        port: 8123,
+        database: 'analytics',
+        user: 'default',
+        lookbackDays: 7,
+      });
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        const body = (init?.body as string) || '';
+        const signal = init?.signal;
+
+        if (body.includes('SELECT version()')) {
+          return new Response(JSON.stringify([{ version: '24.3.1.2672', uptime: 3600 }]), { status: 200 });
+        }
+        if (body.includes('FROM system.tables')) {
+          return new Response(JSON.stringify([{ database: 'analytics', name: 'events' }]), { status: 200 });
+        }
+        // Simulate a slowloris / hanging connection on system.query_log
+        if (body.includes('FROM system.query_log')) {
+          return new Promise((_resolve, reject) => {
+            if (signal) {
+              signal.addEventListener('abort', () => {
+                const abortErr = new Error('The operation was aborted.');
+                abortErr.name = 'AbortError';
+                reject(abortErr);
+              });
+            }
+          });
+        }
+
+        return new Response(JSON.stringify([]), { status: 200 });
+      });
+
+      const startTime = Date.now();
+      const data = await client.fetchClusterData();
+      const elapsed = Date.now() - startTime;
+
+      // Scan should complete swiftly without hanging indefinitely
+      expect(elapsed).toBeLessThan(1000);
+      // Hanging query returns fallback empty array
+      expect(data.queryLog).toEqual([]);
+      // Other concurrent queries succeed
+      expect(data.tables).toHaveLength(1);
+
+      if (originalTimeout !== undefined) {
+        process.env.CLICKHOUSE_QUERY_TIMEOUT_MS = originalTimeout;
+      } else {
+        delete process.env.CLICKHOUSE_QUERY_TIMEOUT_MS;
+      }
+      fetchSpy.mockRestore();
+    });
   });
 });

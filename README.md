@@ -162,6 +162,7 @@ Configure these settings in your `.env` file or environment:
 | `ALLOWED_ORIGINS` | Comma-separated whitelist of allowed CORS origins (fail-closed in production) | Prod only | *(APP_URL / Whitelist)* |
 | `STORE_RAW_QUERIES` | Whether to store raw (heuristic-masked) SQL in history. Set to `false` for zero-raw-query mode | No | `true` |
 | `PRIVACY_PRESERVING_HISTORY` | Alias for zero-raw-query mode. Discards all raw SQL; stores only fingerprints and patterns | No | `false` |
+| `CLICKHOUSE_QUERY_TIMEOUT_MS` | Timeout in ms for scanner queries before aborting (prevents hanging connection exhaustion / DoS) | No | `10000` |
 | `LOG_LEVEL` | Structured logging level (`fatal`, `error`, `warn`, `info`, `debug`) | No | `info` |
 
 ---
