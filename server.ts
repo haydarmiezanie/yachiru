@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
-import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { DEMO_CLUSTERS } from './server/scanner/demoDatasets.js';
@@ -14,6 +13,7 @@ import { ScanReport } from './src/types/yachiru.js';
 import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validation/scanSchemas.js';
 import { logger } from './server/logger.js';
 import { requireRole, isRequireApiKey, isStrictAuth, safeCompare, matchesAllowedApiKey } from './server/auth/rbacMiddleware.js';
+import { apiLimiter, scanLimiter } from './server/rateLimiter.js';
 export { safeCompare, matchesAllowedApiKey };
 
 export function resolveAllowedOrigins(env = process.env): string[] {
@@ -94,26 +94,6 @@ app.use(
     credentials: true,
   })
 );
-
-// General Rate Limiter for API endpoints
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 120, // 120 requests per minute
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: false,
-  message: { error: 'Too many requests, please slow down.' },
-});
-
-// Dedicated Scan Rate Limiter to prevent DOS / resource exhaustion
-const scanLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 30, // 30 scans per minute
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: false,
-  message: { error: 'Scan request limit exceeded. Please wait a moment before initiating another cluster scan.' },
-});
 
 app.use('/api', apiLimiter);
 app.use(express.json({ limit: '10mb' }));

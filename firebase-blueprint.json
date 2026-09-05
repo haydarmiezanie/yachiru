@@ -44,6 +44,23 @@
         "scanDurationMs": { "type": "number", "description": "Duration of scan in milliseconds" }
       },
       "required": ["id", "timestamp", "overallScore", "overallGrade"]
+    },
+    "scan_summaries": {
+      "title": "Scan Summaries Index",
+      "description": "Lightweight metadata summaries for multi-instance dashboard rendering without loading heavy raw report bodies.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique scan ID" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "ISO timestamp" },
+        "overallScore": { "type": "number" },
+        "overallGrade": { "type": "string" },
+        "findingsCount": { "type": "number" },
+        "criticalCount": { "type": "number" },
+        "warningCount": { "type": "number" },
+        "aiStatus": { "type": "string" },
+        "scanDurationMs": { "type": "number" }
+      },
+      "required": ["id", "timestamp", "overallScore", "overallGrade"]
     }
   },
   "securityRules": {
@@ -58,6 +75,10 @@
       "delete": "isAdmin()"
     },
     "scans": {
+      "read": "isAuthenticated()",
+      "write": "isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'))"
+    },
+    "scan_summaries": {
       "read": "isAuthenticated()",
       "write": "isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'))"
     }

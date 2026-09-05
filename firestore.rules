@@ -63,5 +63,12 @@ service cloud.firestore {
       allow create: if isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'));
       allow update, delete: if isAdmin();
     }
+
+    // Scan Summaries Index Collection (Lightweight summaries for fast multi-instance listing)
+    match /scan_summaries/{scanId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'));
+      allow update, delete: if isAdmin();
+    }
   }
 }

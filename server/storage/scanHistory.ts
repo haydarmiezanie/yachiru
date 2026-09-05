@@ -46,10 +46,23 @@ export function extractScanSummary(report: ScanReport): ScanSummaryItem {
   };
 }
 
-function isFirestoreSyncEnabled(): boolean {
-  if (process.env.NODE_ENV === 'test') return false;
-  if (process.env.USE_FIRESTORE_HISTORY === 'true') return true;
-  return false;
+let firestoreWriteBlocked = false;
+
+export function isFirestoreStorageEnabled(): boolean {
+  if (firestoreWriteBlocked) {
+    return false;
+  }
+
+  // Always disable Firestore network calls during automated test suites unless explicitly forced
+  if (
+    (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST) || Boolean(process.env.CI)) &&
+    process.env.FORCE_FIRESTORE_TEST !== 'true'
+  ) {
+    return false;
+  }
+
+  // Explicit opt-in via environment flag
+  return process.env.USE_FIRESTORE_HISTORY === 'true';
 }
 
 /**
@@ -347,15 +360,58 @@ export class ScanHistoryStore {
 
   /**
    * Returns lightweight metadata summaries for all scans (O(1) payload size, avoids loading full reports).
+   * Queries Cloud Firestore first for cross-instance consistency when available, with fallback to local index.
    */
   public static async getScanSummaries(): Promise<ScanSummaryItem[]> {
+    if (isFirestoreStorageEnabled()) {
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          const snap = await adminDb
+            .collection('scan_summaries')
+            .orderBy('timestamp', 'desc')
+            .limit(MAX_HISTORY_ITEMS)
+            .get();
+          if (!snap.empty) {
+            return snap.docs.map((d) => d.data() as ScanSummaryItem);
+          }
+        }
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED')) {
+          firestoreWriteBlocked = true;
+        }
+        logger.debug({ err }, 'Firestore scan summaries lookup skipped or unavailable, falling back to local');
+      }
+    }
     return this.readIndexFromFile();
   }
 
   /**
-   * Asynchronously reads all stored scans. Reads documents concurrently based on the index.
+   * Asynchronously reads all stored scans. Reads documents concurrently.
+   * Uses Cloud Firestore first for multi-instance deployments.
    */
   public static async getAllScans(): Promise<ScanReport[]> {
+    if (isFirestoreStorageEnabled()) {
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          const snap = await adminDb
+            .collection('scans')
+            .orderBy('timestamp', 'desc')
+            .limit(MAX_HISTORY_ITEMS)
+            .get();
+          if (!snap.empty) {
+            return snap.docs.map((d) => d.data() as ScanReport);
+          }
+        }
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED')) {
+          firestoreWriteBlocked = true;
+        }
+        logger.debug({ err }, 'Firestore getAllScans skipped or unavailable, falling back to local');
+      }
+    }
+
     await this.ensureStorageDirAsync();
     const summaries = await this.readIndexFromFile();
     if (summaries.length === 0) {
@@ -377,58 +433,106 @@ export class ScanHistoryStore {
   }
 
   /**
-   * Direct document retrieval by ID: O(1) single-file lookup without parsing other reports.
-   * Checks local document store first, then legacy file, then Firestore cloud document.
+   * Direct document retrieval by ID: O(1) lookup without parsing other reports.
+   * Checks Cloud Firestore first (multi-instance sync), then local document store, then legacy file.
    */
   public static async getScanById(id: string): Promise<ScanReport | null> {
+    // 1. Check Cloud Firestore first for cross-instance consistency
+    if (isFirestoreStorageEnabled()) {
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          const docSnap = await adminDb.collection('scans').doc(id).get();
+          if (docSnap.exists) {
+            return docSnap.data() as ScanReport;
+          }
+        }
+      } catch (cloudErr: any) {
+        if (cloudErr?.code === 7 || String(cloudErr?.message || '').includes('PERMISSION_DENIED')) {
+          firestoreWriteBlocked = true;
+        }
+        logger.debug({ err: cloudErr }, 'Firestore scan lookup skipped or unavailable');
+      }
+    }
+
     await this.ensureStorageDirAsync();
-    // 1. Direct document file lookup: O(1)
+    // 2. Direct document file lookup in local cache / fallback: O(1)
     const docPath = path.join(SCANS_DIR, `${id}.json`);
     try {
       const raw = await fs.promises.readFile(docPath, 'utf-8');
       return JSON.parse(raw) as ScanReport;
     } catch {
-      // 2. Legacy fallback
+      // 3. Legacy file fallback
       const legacy = await this.readScansFromFile();
       const match = legacy.find((s) => s.id === id);
       if (match) return match;
-
-      // 3. Optional Firestore cloud document lookup (if cloud history enabled)
-      if (isFirestoreSyncEnabled()) {
-        try {
-          const adminDb = getAdminFirestore();
-          if (adminDb) {
-            const docSnap = await adminDb.collection('scans').doc(id).get();
-            if (docSnap.exists) {
-              return docSnap.data() as ScanReport;
-            }
-          }
-        } catch (cloudErr) {
-          logger.debug({ err: cloudErr }, 'Firestore scan lookup skipped');
-        }
-      }
-
       return null;
     }
   }
 
   /**
    * Incremental document save:
-   * 1. Writes ONLY the single new/updated report document file (O(1) regarding historical scans).
-   * 2. Updates the lightweight scan index (~5-10 KB, not megabytes).
-   * 3. Prunes expired files beyond MAX_HISTORY_ITEMS.
-   * 4. Syncs document to Firestore (incremental doc write) if configured.
+   * 1. Saves to Cloud Firestore (cross-instance shared state for Cloud Run).
+   * 2. Writes isolated document file to local container disk as cache/fallback.
+   * 3. Updates the lightweight scan index (~5-10 KB).
+   * 4. Prunes expired records beyond MAX_HISTORY_ITEMS across both Firestore and disk.
    */
   public static async saveScan(
     report: ScanReport,
     options?: { privacyPreserving?: boolean }
   ): Promise<void> {
+    const sanitizedReport = sanitizeReportForStorage(report, options);
+    const scanId = sanitizedReport.id;
+    const summary = extractScanSummary(sanitizedReport);
+
+    // 1. Cloud Firestore persistence (Distributed, shared across all Cloud Run instances)
+    if (isFirestoreStorageEnabled()) {
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          await Promise.all([
+            adminDb.collection('scans').doc(scanId).set(sanitizedReport, { merge: true }),
+            adminDb.collection('scan_summaries').doc(scanId).set(summary, { merge: true }),
+          ]);
+
+          // Distributed Pruning: keep top MAX_HISTORY_ITEMS in Firestore
+          try {
+            const oldSummariesSnap = await adminDb
+              .collection('scan_summaries')
+              .orderBy('timestamp', 'desc')
+              .offset(MAX_HISTORY_ITEMS)
+              .get();
+
+            if (!oldSummariesSnap.empty) {
+              const batch = adminDb.batch();
+              for (const doc of oldSummariesSnap.docs) {
+                batch.delete(doc.ref);
+                batch.delete(adminDb.collection('scans').doc(doc.id));
+              }
+              await batch.commit();
+            }
+          } catch (pruneErr) {
+            logger.debug({ err: pruneErr }, 'Firestore history pruning skipped');
+          }
+        }
+      } catch (cloudErr: any) {
+        if (cloudErr?.code === 7 || String(cloudErr?.message || '').includes('PERMISSION_DENIED')) {
+          firestoreWriteBlocked = true;
+          logger.debug(
+            { err: cloudErr },
+            'Firestore lacks IAM write permissions in current container environment. Falling back to local document store.'
+          );
+        } else {
+          logger.debug({ err: cloudErr }, 'Firestore cloud scan sync skipped or unavailable, persisting locally');
+        }
+      }
+    }
+
+    // 2. Local container file persistence (Atomic document writes + Index update)
     return storageMutex.runExclusive(async () => {
       await this.ensureStorageDirAsync();
-      const sanitizedReport = sanitizeReportForStorage(report, options);
-      const scanId = sanitizedReport.id;
 
-      // 1. Incremental single document save (O(1) write)
+      // Incremental single document save (O(1) write)
       const docPath = path.join(SCANS_DIR, `${scanId}.json`);
       const tempDocPath = path.join(
         SCANS_DIR,
@@ -437,10 +541,9 @@ export class ScanHistoryStore {
       await fs.promises.writeFile(tempDocPath, JSON.stringify(sanitizedReport, null, 2), 'utf-8');
       await fs.promises.rename(tempDocPath, docPath);
 
-      // 2. Update lightweight index (~5-10 KB)
+      // Update lightweight index (~5-10 KB)
       const summaries = await this.readIndexFromFile();
-      const newSummary = extractScanSummary(sanitizedReport);
-      const updated = [newSummary, ...summaries.filter((s) => s.id !== scanId)];
+      const updated = [summary, ...summaries.filter((s) => s.id !== scanId)];
 
       const toKeep = updated.slice(0, MAX_HISTORY_ITEMS);
       const toPrune = updated.slice(MAX_HISTORY_ITEMS);
@@ -457,25 +560,32 @@ export class ScanHistoryStore {
       );
       await fs.promises.writeFile(tempIndexPath, JSON.stringify(toKeep, null, 2), 'utf-8');
       await fs.promises.rename(tempIndexPath, INDEX_FILE);
-
-      // 3. Optional Firestore Cloud Document Sync (Incremental single-doc set)
-      if (isFirestoreSyncEnabled()) {
-        try {
-          const adminDb = getAdminFirestore();
-          if (adminDb) {
-            await adminDb.collection('scans').doc(scanId).set(sanitizedReport, { merge: true });
-          }
-        } catch (cloudErr) {
-          logger.debug({ err: cloudErr }, 'Firestore cloud scan sync skipped or unavailable');
-        }
-      }
     });
   }
 
   /**
-   * Clears scan history: resets index, unlinks all individual report documents.
+   * Clears scan history: resets index, unlinks all individual report documents, and purges Firestore docs.
    */
   public static async clearHistory(): Promise<void> {
+    // Clear Cloud Firestore collections if enabled
+    if (isFirestoreStorageEnabled()) {
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          const [scansSnap, sumSnap] = await Promise.all([
+            adminDb.collection('scans').limit(100).get(),
+            adminDb.collection('scan_summaries').limit(100).get(),
+          ]);
+          const batch = adminDb.batch();
+          scansSnap.docs.forEach((d) => batch.delete(d.ref));
+          sumSnap.docs.forEach((d) => batch.delete(d.ref));
+          await batch.commit();
+        }
+      } catch (cloudErr) {
+        logger.debug({ err: cloudErr }, 'Firestore clear history skipped');
+      }
+    }
+
     return storageMutex.runExclusive(async () => {
       await this.ensureStorageDirAsync();
 
