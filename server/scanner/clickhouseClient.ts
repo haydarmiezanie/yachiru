@@ -330,113 +330,119 @@ export class ClickHouseScannerClient {
       }
     };
 
-    // 1. Fetch Version & Uptime
-    const versionRes = await runQuery('SELECT version() AS version, uptime() AS uptime');
+    // Execute all 7 independent system queries concurrently via Promise.all.
+    // This reduces the network latency overhead from sum(latency_1..7) to max(latency),
+    // eliminating latency accumulation across slow queries such as system.query_log.
+    const [versionRes, tables, columns, parts, merges, queryLog, settings] = await Promise.all([
+      // 1. Fetch Version & Uptime
+      runQuery('SELECT version() AS version, uptime() AS uptime'),
+
+      // 2. Fetch Tables in target database (Safe escaped parameter)
+      runQuery(`
+        SELECT 
+          database,
+          name,
+          engine,
+          partition_key,
+          sorting_key,
+          primary_key,
+          sampling_key,
+          total_rows,
+          total_bytes,
+          comment
+        FROM system.tables 
+        WHERE database = '${targetDb}' AND is_temporary = 0
+      `),
+
+      // 3. Fetch Columns (Safe escaped parameter)
+      runQuery(`
+        SELECT 
+          database,
+          table,
+          name,
+          type,
+          default_type,
+          default_expression,
+          data_compressed_bytes,
+          data_uncompressed_bytes,
+          compression_codec
+        FROM system.columns 
+        WHERE database = '${targetDb}'
+      `),
+
+      // 4. Fetch Parts status (Safe escaped parameter)
+      runQuery(`
+        SELECT 
+          database,
+          table,
+          partition,
+          name,
+          part_type,
+          active,
+          rows,
+          bytes_on_disk,
+          modification_time
+        FROM system.parts 
+        WHERE database = '${targetDb}' AND active = 1
+        ORDER BY modification_time DESC
+        LIMIT 1000
+      `),
+
+      // 5. Fetch Active Merges
+      runQuery(`
+        SELECT 
+          database,
+          table,
+          elapsed,
+          progress,
+          num_parts,
+          total_size_bytes_compressed,
+          memory_usage,
+          is_mutation
+        FROM system.merges
+      `),
+
+      // 6. Fetch Query Log (Safe lookback integer and escaped database parameter)
+      runQuery(`
+        SELECT 
+          query_id,
+          event_time,
+          query_duration_ms,
+          query,
+          tables,
+          columns,
+          read_rows,
+          read_bytes,
+          result_rows,
+          result_bytes,
+          memory_usage,
+          exception_code,
+          exception,
+          user
+        FROM system.query_log 
+        WHERE type IN ('QueryFinish', 'ExceptionWhileProcessing') 
+          AND event_date >= today() - ${lookback}
+          AND (current_database = '${targetDb}' OR has(databases, '${targetDb}'))
+          AND query NOT LIKE '%system.%'
+        ORDER BY query_duration_ms DESC
+        LIMIT 500
+      `),
+
+      // 7. Fetch System Settings
+      runQuery(`
+        SELECT name, value, changed, description, type 
+        FROM system.settings 
+        WHERE name IN (
+          'max_threads', 'background_pool_size', 'background_fetches_pool_size',
+          'max_memory_usage', 'max_bytes_before_external_group_by',
+          'optimize_trivial_approximate_count_query', 'join_use_nulls',
+          'max_execution_time', 'mark_cache_size', 'uncompressed_cache_size'
+        )
+      `),
+    ]);
+
     const version = versionRes[0]?.version || 'ClickHouse Server';
     const uptime = Number(versionRes[0]?.uptime) || 86400;
-
-    // 2. Fetch Tables in target database (Safe escaped parameter)
-    const tables = await runQuery(`
-      SELECT 
-        database,
-        name,
-        engine,
-        partition_key,
-        sorting_key,
-        primary_key,
-        sampling_key,
-        total_rows,
-        total_bytes,
-        comment
-      FROM system.tables 
-      WHERE database = '${targetDb}' AND is_temporary = 0
-    `);
-
-    // 3. Fetch Columns (Safe escaped parameter)
-    const columns = await runQuery(`
-      SELECT 
-        database,
-        table,
-        name,
-        type,
-        default_type,
-        default_expression,
-        data_compressed_bytes,
-        data_uncompressed_bytes,
-        compression_codec
-      FROM system.columns 
-      WHERE database = '${targetDb}'
-    `);
-
-    // 4. Fetch Parts status (Safe escaped parameter)
-    const parts = await runQuery(`
-      SELECT 
-        database,
-        table,
-        partition,
-        name,
-        part_type,
-        active,
-        rows,
-        bytes_on_disk,
-        modification_time
-      FROM system.parts 
-      WHERE database = '${targetDb}' AND active = 1
-      ORDER BY modification_time DESC
-      LIMIT 1000
-    `);
-
-    // 5. Fetch Active Merges
-    const merges = await runQuery(`
-      SELECT 
-        database,
-        table,
-        elapsed,
-        progress,
-        num_parts,
-        total_size_bytes_compressed,
-        memory_usage,
-        is_mutation
-      FROM system.merges
-    `);
-
-    // 6. Fetch Query Log (Safe lookback integer and escaped database parameter)
-    const queryLog = await runQuery(`
-      SELECT 
-        query_id,
-        event_time,
-        query_duration_ms,
-        query,
-        tables,
-        columns,
-        read_rows,
-        read_bytes,
-        result_rows,
-        result_bytes,
-        memory_usage,
-        exception_code,
-        exception,
-        user
-      FROM system.query_log 
-      WHERE type IN ('QueryFinish', 'ExceptionWhileProcessing') 
-        AND event_date >= today() - ${lookback}
-        AND (current_database = '${targetDb}' OR has(databases, '${targetDb}'))
-        AND query NOT LIKE '%system.%'
-      ORDER BY query_duration_ms DESC
-      LIMIT 500
-    `);
-
-    // 7. Fetch System Settings
-    const settings = await runQuery(`
-      SELECT name, value, changed, description, type 
-      FROM system.settings 
-      WHERE name IN (
-        'max_threads', 'background_pool_size', 'background_fetches_pool_size',
-        'max_memory_usage', 'max_bytes_before_external_group_by',
-        'optimize_trivial_approximate_count_query', 'join_use_nulls',
-        'max_execution_time', 'mark_cache_size', 'uncompressed_cache_size'
-      )
-    `);
 
     return {
       version,

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   isValidClickHouseIdentifier,
   escapeClickHouseString,
@@ -98,6 +98,72 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
     it('handles empty or blank output gracefully', () => {
       expect(client.parseClickHouseOutput('')).toEqual([]);
       expect(client.parseClickHouseOutput('   \n  ')).toEqual([]);
+    });
+  });
+
+  describe('fetchClusterData parallel execution', () => {
+    it('executes all 7 system queries concurrently in parallel using Promise.all', async () => {
+      const client = new ClickHouseScannerClient({
+        host: '93.184.216.34',
+        port: 8123,
+        database: 'analytics',
+        user: 'default',
+        lookbackDays: 7,
+      });
+
+      let inFlight = 0;
+      let maxConcurrent = 0;
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        inFlight++;
+        if (inFlight > maxConcurrent) {
+          maxConcurrent = inFlight;
+        }
+
+        const body = (init?.body as string) || '';
+
+        // Simulate network delay to verify overlapping concurrency
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        inFlight--;
+
+        if (body.includes('SELECT version()')) {
+          return new Response(JSON.stringify([{ version: '24.3.1.2672', uptime: 3600 }]), { status: 200 });
+        }
+        if (body.includes('FROM system.tables')) {
+          return new Response(JSON.stringify([{ database: 'analytics', name: 'events', total_rows: 1000 }]), { status: 200 });
+        }
+        if (body.includes('FROM system.columns')) {
+          return new Response(JSON.stringify([{ database: 'analytics', table: 'events', name: 'id', type: 'UInt64' }]), { status: 200 });
+        }
+        if (body.includes('FROM system.parts')) {
+          return new Response(JSON.stringify([{ database: 'analytics', table: 'events', active: 1, rows: 1000 }]), { status: 200 });
+        }
+        if (body.includes('FROM system.merges')) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (body.includes('FROM system.query_log')) {
+          return new Response(JSON.stringify([{ query_id: 'q1', query_duration_ms: 150 }]), { status: 200 });
+        }
+        if (body.includes('FROM system.settings')) {
+          return new Response(JSON.stringify([{ name: 'max_threads', value: '16' }]), { status: 200 });
+        }
+
+        return new Response(JSON.stringify([]), { status: 200 });
+      });
+
+      const data = await client.fetchClusterData();
+
+      // Probe is sequential (1 request), then all 7 diagnostic queries run concurrently in parallel
+      expect(maxConcurrent).toBe(7);
+      expect(data.version).toBe('24.3.1.2672');
+      expect(data.database).toBe('analytics');
+      expect(data.tables).toHaveLength(1);
+      expect(data.columns).toHaveLength(1);
+      expect(data.parts).toHaveLength(1);
+      expect(data.queryLog).toHaveLength(1);
+      expect(data.settings).toHaveLength(1);
+
+      fetchSpy.mockRestore();
     });
   });
 });
