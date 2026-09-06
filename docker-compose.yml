@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile
       network: host
-ainer_name: yachiru-advisor
+    container_name: yachiru-advisor
     restart: unless-stopped
     ports:
       - "3000:3000"
