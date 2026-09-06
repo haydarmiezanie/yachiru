@@ -6,7 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: yachiru-advisor
+    cont      network: host
+ainer_name: yachiru-advisor
     restart: unless-stopped
     ports:
       - "3000:3000"
