@@ -28,26 +28,36 @@ declare global {
   }
 }
 
+const DEFAULT_FIREBASE_CONFIG = {
+  projectId: 'nifty-art-czp2g',
+  firestoreDatabaseId: 'ai-studio-yachiruclickhous-d2e31be2-2e73-49b5-a7b3-25ca7280abb7',
+  authDomain: 'nifty-art-czp2g.firebaseapp.com',
+};
+
 // Read Firebase applet configuration
 let firebaseConfig: {
   projectId?: string;
   firestoreDatabaseId?: string;
   [key: string]: any;
-} = {};
+} = { ...DEFAULT_FIREBASE_CONFIG };
 
 try {
   const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
   if (fs.existsSync(configPath)) {
-    firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const loaded = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    firebaseConfig = { ...firebaseConfig, ...loaded };
   }
 } catch (err) {
-  logger.warn({ err }, 'Could not load firebase-applet-config.json');
+  logger.warn({ err }, 'Could not load firebase-applet-config.json, using embedded fallback');
 }
 
-const projectId = firebaseConfig.projectId || process.env.FIREBASE_PROJECT_ID || 'nifty-art-czp2g';
-const firestoreDatabaseId = firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== '(default)'
-  ? firebaseConfig.firestoreDatabaseId
-  : undefined;
+const projectId = firebaseConfig.projectId || process.env.FIREBASE_PROJECT_ID || DEFAULT_FIREBASE_CONFIG.projectId;
+const firestoreDatabaseId =
+  (firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== '(default)'
+    ? firebaseConfig.firestoreDatabaseId
+    : process.env.FIRESTORE_DATABASE_ID && process.env.FIRESTORE_DATABASE_ID !== '(default)'
+    ? process.env.FIRESTORE_DATABASE_ID
+    : DEFAULT_FIREBASE_CONFIG.firestoreDatabaseId);
 
 // Designated Super Admin Email (always full Admin + Approved)
 const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'idarstore24@gmail.com').toLowerCase().trim();

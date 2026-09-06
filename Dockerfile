@@ -33,6 +33,7 @@ RUN npm install --omit=dev && npm cache clean --force
 
 # Copy compiled artifacts from builder stage
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/firebase-applet-config.json ./firebase-applet-config.json
 
 # Create persistent data directory for scan histories
 RUN mkdir -p /app/data && chown -R node:node /app

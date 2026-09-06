@@ -6,7 +6,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      network: host
     container_name: yachiru-advisor
     restart: unless-stopped
     ports:
@@ -21,6 +20,8 @@ services:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
       - STORE_RAW_QUERIES=${STORE_RAW_QUERIES:-true}
       - PRIVACY_PRESERVING_HISTORY=${PRIVACY_PRESERVING_HISTORY:-false}
+      - FIRESTORE_DATABASE_ID=${FIRESTORE_DATABASE_ID:-ai-studio-yachiruclickhous-d2e31be2-2e73-49b5-a7b3-25ca7280abb7}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-nifty-art-czp2g}
     env_file:
       - .env
     volumes:
