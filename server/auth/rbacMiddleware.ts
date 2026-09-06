@@ -8,7 +8,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { logger } from '../logger.js';
 
 export type UserRole = 'admin' | 'auditor' | 'viewer';
-export type UserStatus = 'approved' | 'pending' | 'rejected';
+export type UserStatus = 'approved' | 'pending' | 'revoked' | 'rejected';
 
 export interface AuthenticatedUser {
   uid: string;
@@ -167,7 +167,9 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
           displayName: data.displayName || undefined,
           authMethod: 'firebase_token',
         };
-        profileCache.set(uid, { user, expiresAt: Date.now() + CACHE_TTL_MS });
+        if (user.status === 'approved') {
+          profileCache.set(uid, { user, expiresAt: Date.now() + CACHE_TTL_MS });
+        }
         return user;
       }
     } catch (adminErr: any) {
@@ -180,42 +182,243 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
     }
   }
 
-  // 2. Fallback to Firestore REST API with the user's verified ID token
+  // 2. Comprehensive Firestore REST API resolution with user's verified ID token
+  const dbSegment = firestoreDatabaseId ? firestoreDatabaseId : '(default)';
+  const candidateProfiles: AuthenticatedUser[] = [];
+
+  const parseUserDoc = (fields: any, fallbackUid: string): AuthenticatedUser | null => {
+    if (!fields) return null;
+    const parsed = parseFirestoreFields(fields);
+    if (!parsed || Object.keys(parsed).length === 0) return null;
+    return {
+      uid,
+      email: (parsed.email || normalizedEmail).toLowerCase().trim(),
+      role: (parsed.role as UserRole) || 'viewer',
+      status: (parsed.status as UserStatus) || 'pending',
+      displayName: parsed.displayName || undefined,
+      authMethod: 'firebase_token',
+    };
+  };
+
+  // 2a. Direct doc lookup by UID
   try {
-    const dbSegment = firestoreDatabaseId ? firestoreDatabaseId : '(default)';
-    const firestoreUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/${uid}`;
-
+    const userDocUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/${uid}`;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
-
-    const resp = await fetch(firestoreUrl, {
-      headers: {
-        Authorization: `Bearer ${idToken}`,
-        Accept: 'application/json',
-      },
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
+    const resp = await fetch(userDocUrl, {
+      headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
 
     if (resp.ok) {
       const json = await resp.json();
-      const fields = parseFirestoreFields(json.fields || {});
-      const user: AuthenticatedUser = {
-        uid,
-        email: (fields.email || normalizedEmail).toLowerCase().trim(),
-        role: (fields.role as UserRole) || 'viewer',
-        status: (fields.status as UserStatus) || 'pending',
-        displayName: fields.displayName || undefined,
-        authMethod: 'firebase_token',
-      };
-      profileCache.set(uid, { user, expiresAt: Date.now() + CACHE_TTL_MS });
-      return user;
+      const prof = parseUserDoc(json.fields, uid);
+      if (prof) candidateProfiles.push(prof);
+    } else {
+      logger.debug({ status: resp.status, uid }, 'Direct UID user document lookup status');
     }
-  } catch (restErr: any) {
-    logger.warn({ err: restErr.message, uid }, 'Firestore REST API fallback request failed');
+  } catch (err: any) {
+    logger.debug({ err: err.message, uid }, 'Direct UID user document lookup error');
   }
 
-  // Default fallback for newly registered or unprovisioned user: viewer + pending
+  // 2b. Direct doc lookup by invite ID (derived from pre-whitelisted email)
+  if (normalizedEmail) {
+    try {
+      const cleanEmailKey = normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_');
+      const inviteDocUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/invite_${cleanEmailKey}`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const resp = await fetch(inviteDocUrl, {
+        headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (resp.ok) {
+        const json = await resp.json();
+        const prof = parseUserDoc(json.fields, uid);
+        if (prof) {
+          logger.info({ email: normalizedEmail, role: prof.role, status: prof.status }, 'Found pre-whitelisted invite document');
+          candidateProfiles.push(prof);
+        }
+      }
+    } catch (err: any) {
+      logger.debug({ err: err.message, email: normalizedEmail }, 'Invite document lookup error');
+    }
+  }
+
+  // 2c. Structured query across users collection by email (catches any documents associated with this email)
+  if (normalizedEmail && !candidateProfiles.some((p) => p.status === 'approved')) {
+    try {
+      const queryUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents:runQuery`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const queryResp = await fetch(queryUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: 'users' }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: 'email' },
+                op: 'EQUAL',
+                value: { stringValue: normalizedEmail },
+              },
+            },
+            limit: 5,
+          },
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (queryResp.ok) {
+        const results = await queryResp.json();
+        if (Array.isArray(results)) {
+          for (const item of results) {
+            if (item.document?.fields) {
+              const prof = parseUserDoc(item.document.fields, uid);
+              if (prof) candidateProfiles.push(prof);
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      logger.debug({ err: err.message, email: normalizedEmail }, 'Firestore runQuery by email error');
+    }
+  }
+
+  // 2d. Structured query on access_requests collection (detects if an admin approved an access request)
+  if (normalizedEmail && !candidateProfiles.some((p) => p.status === 'approved')) {
+    try {
+      const queryUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents:runQuery`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const queryResp = await fetch(queryUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: 'access_requests' }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: 'email' },
+                op: 'EQUAL',
+                value: { stringValue: normalizedEmail },
+              },
+            },
+            limit: 5,
+          },
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (queryResp.ok) {
+        const results = await queryResp.json();
+        if (Array.isArray(results)) {
+          for (const item of results) {
+            if (item.document?.fields) {
+              const fields = parseFirestoreFields(item.document.fields);
+              if (fields.status === 'approved') {
+                candidateProfiles.push({
+                  uid,
+                  email: normalizedEmail,
+                  role: 'auditor', // access requests grant auditor by default
+                  status: 'approved',
+                  displayName: fields.displayName || undefined,
+                  authMethod: 'firebase_token',
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      logger.debug({ err: err.message, email: normalizedEmail }, 'Firestore runQuery access_requests error');
+    }
+  }
+
+  // Evaluate final role and status across candidate profiles:
+  // If ANY record says approved, prioritize approved!
+  const approvedCandidate = candidateProfiles.find((p) => p.status === 'approved');
+  let finalUser: AuthenticatedUser;
+
+  if (approvedCandidate) {
+    // Determine highest role among approved candidates: admin > auditor > viewer
+    let highestRole: UserRole = 'viewer';
+    for (const c of candidateProfiles) {
+      if (c.status === 'approved') {
+        if (c.role === 'admin') {
+          highestRole = 'admin';
+          break;
+        } else if (c.role === 'auditor') {
+          highestRole = 'auditor';
+        }
+      }
+    }
+
+    finalUser = {
+      uid,
+      email: normalizedEmail,
+      role: highestRole,
+      status: 'approved',
+      displayName: approvedCandidate.displayName,
+      authMethod: 'firebase_token',
+    };
+
+    // Cache approved profiles for full TTL
+    profileCache.set(uid, { user: finalUser, expiresAt: Date.now() + CACHE_TTL_MS });
+
+    // Sync to users/{uid} in background so future reads are instantaneous
+    const syncUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/${uid}`;
+    fetch(syncUrl, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        fields: {
+          uid: { stringValue: uid },
+          email: { stringValue: normalizedEmail },
+          role: { stringValue: highestRole },
+          status: { stringValue: 'approved' },
+          displayName: { stringValue: finalUser.displayName || normalizedEmail.split('@')[0] },
+          lastLoginAt: { stringValue: new Date().toISOString() },
+        },
+      }),
+    }).catch(() => {});
+
+    return finalUser;
+  }
+
+  // Check if explicitly revoked
+  const revokedCandidate = candidateProfiles.find((p) => p.status === 'revoked');
+  if (revokedCandidate) {
+    finalUser = {
+      uid,
+      email: normalizedEmail,
+      role: 'viewer',
+      status: 'revoked',
+      displayName: revokedCandidate.displayName,
+      authMethod: 'firebase_token',
+    };
+    profileCache.set(uid, { user: finalUser, expiresAt: Date.now() + 5000 });
+    return finalUser;
+  }
+
+  // Default fallback for pending or unprovisioned user: viewer + pending (cache only for 3s to allow instant approval pickup)
   const defaultUser: AuthenticatedUser = {
     uid,
     email: normalizedEmail,
@@ -223,6 +426,7 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
     status: 'pending',
     authMethod: 'firebase_token',
   };
+  profileCache.set(uid, { user: defaultUser, expiresAt: Date.now() + 3000 });
   return defaultUser;
 }
 

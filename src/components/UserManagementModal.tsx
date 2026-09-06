@@ -84,6 +84,14 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
   const handleUpdateStatus = async (uid: string, status: UserStatus) => {
     try {
       await updateDoc(doc(db, 'users', uid), { status });
+      // If other docs exist for this email (e.g. invite doc vs actual uid), sync them too
+      const target = users.find((u) => u.uid === uid);
+      if (target?.email) {
+        const others = users.filter((u) => u.email.toLowerCase() === target.email.toLowerCase() && u.uid !== uid);
+        for (const other of others) {
+          await updateDoc(doc(db, 'users', other.uid), { status }).catch(() => {});
+        }
+      }
       setActionMsg({ type: 'success', text: `User status updated to ${status}` });
     } catch (e: any) {
       setActionMsg({ type: 'error', text: e.message || 'Failed to update user status' });
@@ -93,6 +101,14 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
   const handleUpdateRole = async (uid: string, role: UserRole) => {
     try {
       await updateDoc(doc(db, 'users', uid), { role });
+      // If other docs exist for this email (e.g. invite doc vs actual uid), sync them too
+      const target = users.find((u) => u.uid === uid);
+      if (target?.email) {
+        const others = users.filter((u) => u.email.toLowerCase() === target.email.toLowerCase() && u.uid !== uid);
+        for (const other of others) {
+          await updateDoc(doc(db, 'users', other.uid), { role }).catch(() => {});
+        }
+      }
       setActionMsg({ type: 'success', text: `User role updated to ${role}` });
     } catch (e: any) {
       setActionMsg({ type: 'error', text: e.message || 'Failed to update user role' });
@@ -155,6 +171,15 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
         notes: 'Pre-whitelisted by administrator',
       });
 
+      // If a real account already logged in with this email, approve and elevate it too
+      const existing = users.filter((u) => u.email.toLowerCase() === cleanEmail);
+      for (const ex of existing) {
+        await updateDoc(doc(db, 'users', ex.uid), {
+          role: newRole,
+          status: 'approved',
+        }).catch(() => {});
+      }
+
       setNewEmail('');
       setNewName('');
       setActionMsg({ type: 'success', text: `User ${cleanEmail} successfully added to whitelist (${newRole})!` });
@@ -166,7 +191,34 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
     }
   };
 
-  const filteredUsers = users.filter(
+  // Deduplicate and consolidate users by email (prioritize approved status and highest role)
+  const consolidatedUsers = React.useMemo(() => {
+    const map = new Map<string, UserProfile>();
+    for (const u of users) {
+      const emailKey = (u.email || '').toLowerCase().trim();
+      if (!emailKey) continue;
+      const existing = map.get(emailKey);
+      if (!existing) {
+        map.set(emailKey, u);
+      } else {
+        const isApproved = existing.status === 'approved' || u.status === 'approved';
+        const roleOrder: Record<UserRole, number> = { admin: 3, auditor: 2, viewer: 1 };
+        const highestRole = (roleOrder[existing.role] || 1) >= (roleOrder[u.role] || 1) ? existing.role : u.role;
+        const preferredUid = !u.uid.startsWith('invite_') ? u.uid : existing.uid;
+        map.set(emailKey, {
+          ...existing,
+          uid: preferredUid,
+          status: isApproved ? 'approved' : existing.status,
+          role: highestRole,
+          displayName: existing.displayName || u.displayName,
+          lastLoginAt: existing.lastLoginAt !== 'Never logged in' ? existing.lastLoginAt : u.lastLoginAt,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [users]);
+
+  const filteredUsers = consolidatedUsers.filter(
     (u) =>
       u.email.toLowerCase().includes(search.toLowerCase()) ||
       u.displayName.toLowerCase().includes(search.toLowerCase())

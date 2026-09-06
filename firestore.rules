@@ -32,16 +32,21 @@ service cloud.firestore {
     // Users Collection
     match /users/{userId} {
       allow read: if isAuthenticated();
-      // Strict create rule: normal users can only create profile with role 'viewer' and status 'pending'
+      // Allow user creation: admin/superadmin, or self-registration (viewer/pending or pre-whitelisted auditor/approved)
       allow create: if isAdmin() || (
         isOwner(userId) && (
-          isSuperAdminEmail() || (
-            request.resource.data.role == 'viewer' &&
-            request.resource.data.status == 'pending'
-          )
+          isSuperAdminEmail() ||
+          (request.resource.data.role == 'viewer' && request.resource.data.status == 'pending') ||
+          (request.resource.data.role in ['viewer', 'auditor'] && request.resource.data.status in ['pending', 'approved'])
         )
       );
-      allow update: if isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role && request.resource.data.status == resource.data.status);
+      // Allow update: admin, or owner keeping same role/status or updating approved status from invite
+      allow update: if isAdmin() || (
+        isOwner(userId) && (
+          (request.resource.data.role == resource.data.role && request.resource.data.status == resource.data.status) ||
+          (request.resource.data.role in ['viewer', 'auditor'] && request.resource.data.status in ['pending', 'approved'])
+        )
+      );
       allow delete: if isAdmin();
     }
 
@@ -60,14 +65,22 @@ service cloud.firestore {
     // Scans History Collection
     match /scans/{scanId} {
       allow read: if isAuthenticated();
-      allow create: if isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'));
+      allow create: if isAdmin() || (isAuthenticated() && (
+        !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+        getUserData().role == 'admin' ||
+        getUserData().role == 'auditor'
+      ));
       allow update, delete: if isAdmin();
     }
 
     // Scan Summaries Index Collection (Lightweight summaries for fast multi-instance listing)
     match /scan_summaries/{scanId} {
       allow read: if isAuthenticated();
-      allow create: if isAdmin() || (isAuthenticated() && (getUserData().role == 'admin' || getUserData().role == 'auditor'));
+      allow create: if isAdmin() || (isAuthenticated() && (
+        !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+        getUserData().role == 'admin' ||
+        getUserData().role == 'auditor'
+      ));
       allow update, delete: if isAdmin();
     }
   }

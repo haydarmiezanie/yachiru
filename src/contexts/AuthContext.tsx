@@ -117,7 +117,53 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const hasPendingWrites = snapshot.metadata?.hasPendingWrites;
           if (snapshot.exists()) {
             const remoteProfile = snapshot.data() as UserProfile;
-            setProfile(remoteProfile);
+            let effectiveProfile = remoteProfile;
+
+            // If the user profile is pending, check if an invite doc exists with approved status
+            if (remoteProfile.status === 'pending') {
+              try {
+                const cleanEmailKey = email.replace(/[^a-zA-Z0-9]/g, '_');
+                const inviteSnap = await getDoc(doc(db, 'users', `invite_${cleanEmailKey}`)).catch(() => null);
+                if (inviteSnap && inviteSnap.exists()) {
+                  const inviteData = inviteSnap.data() as UserProfile;
+                  if (inviteData.status === 'approved') {
+                    effectiveProfile = {
+                      ...remoteProfile,
+                      status: 'approved',
+                      role: inviteData.role || remoteProfile.role,
+                    };
+                    updateDoc(userRef, {
+                      status: 'approved',
+                      role: effectiveProfile.role,
+                    }).catch(() => {});
+                  }
+                } else {
+                  const usersByEmail = query(collection(db, 'users'), where('email', '==', email));
+                  const emailSnap = await getDocs(usersByEmail);
+                  for (const d of emailSnap.docs) {
+                    if (d.id !== userRef.id) {
+                      const otherData = d.data() as UserProfile;
+                      if (otherData.status === 'approved') {
+                        effectiveProfile = {
+                          ...remoteProfile,
+                          status: 'approved',
+                          role: otherData.role || remoteProfile.role,
+                        };
+                        updateDoc(userRef, {
+                          status: 'approved',
+                          role: effectiveProfile.role,
+                        }).catch(() => {});
+                        break;
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                console.warn('Could not check approved invite status:', e);
+              }
+            }
+
+            setProfile(effectiveProfile);
             setLoading(false);
 
             if (isSuperAdmin && (remoteProfile.role !== 'admin' || remoteProfile.status !== 'approved')) {
@@ -137,12 +183,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             let initialStatus: UserStatus = isSuperAdmin ? 'approved' : 'pending';
 
             try {
-              const usersByEmail = query(collection(db, 'users'), where('email', '==', email));
-              const emailSnap = await getDocs(usersByEmail);
-              if (!emailSnap.empty) {
-                const inviteDoc = emailSnap.docs[0].data() as UserProfile;
-                if (inviteDoc.role) initialRole = inviteDoc.role;
-                if (inviteDoc.status) initialStatus = inviteDoc.status;
+              const cleanEmailKey = email.replace(/[^a-zA-Z0-9]/g, '_');
+              const inviteSnap = await getDoc(doc(db, 'users', `invite_${cleanEmailKey}`)).catch(() => null);
+              if (inviteSnap && inviteSnap.exists()) {
+                const inviteData = inviteSnap.data() as UserProfile;
+                if (inviteData.role) initialRole = inviteData.role;
+                if (inviteData.status) initialStatus = inviteData.status;
+              } else {
+                const usersByEmail = query(collection(db, 'users'), where('email', '==', email));
+                const emailSnap = await getDocs(usersByEmail);
+                for (const d of emailSnap.docs) {
+                  const dData = d.data() as UserProfile;
+                  if (dData.status === 'approved') {
+                    initialStatus = 'approved';
+                    if (dData.role) initialRole = dData.role;
+                    break;
+                  }
+                }
               }
             } catch (e) {
               console.warn('Could not query email invites (using default role/status):', e);
