@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build": "npm run generate:openapi && vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "generate:openapi": "tsx server/openapi/generateOpenApi.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -34,6 +35,7 @@
     "react-dom": "^19.0.1",
     "tailwind-merge": "^3.6.0",
     "vite": "^6.2.3",
+    "yaml": "^2.9.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {

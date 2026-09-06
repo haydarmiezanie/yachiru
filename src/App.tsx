@@ -97,7 +97,17 @@ function AuditorApp() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || errData.message || `Scan failed with status ${res.status}`);
+        let message = errData.error || errData.message;
+        if (!message) {
+          if (res.status === 502) {
+            message = 'Gateway connection timeout or server restarting (502). Please retry your scan in a moment.';
+          } else if (res.status === 503) {
+            message = 'Service temporarily unavailable (503). Please try again shortly.';
+          } else {
+            message = `Scan failed with status ${res.status}`;
+          }
+        }
+        throw new Error(message);
       }
 
       const data: ScanReport = await res.json();

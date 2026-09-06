@@ -4,6 +4,11 @@ import { auth } from './firebase';
  * Helper to make API requests with appropriate auth headers attached:
  * - x-api-key: from localStorage ('yachiru_api_key') or import.meta.env.VITE_YACHIRU_API_KEY
  * - Authorization: Bearer <token> from Firebase Auth user session if signed in
+ *
+ * Resilience features:
+ * - Proactive ID token resolution from Firebase Auth
+ * - Automatic 401 interceptor: forces token refresh via getIdToken(true) and transparently retries request
+ * - Transient 502/503/504 retry: auto-recovers from container cold-starts or momentary proxy timeouts
  */
 export async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers || {});
@@ -31,8 +36,45 @@ export async function authenticatedFetch(input: RequestInfo | URL, init: Request
     }
   }
 
-  return fetch(input, {
+  let response = await fetch(input, {
     ...init,
     headers,
   });
+
+  // 3. Intercept 401 Unauthorized (Expired or Revoked Token Recovery)
+  // When an ID token expires or is invalidated (e.g. after switching accounts or >60m idle),
+  // force-refresh a brand-new token from Google and seamlessly retry once before throwing.
+  if (response.status === 401 && auth.currentUser) {
+    try {
+      const freshToken = await auth.currentUser.getIdToken(true);
+      if (freshToken) {
+        headers.set('Authorization', `Bearer ${freshToken}`);
+        response = await fetch(input, {
+          ...init,
+          headers,
+        });
+      }
+    } catch (refreshErr) {
+      console.warn('[Yachiru Auth] Automatic token refresh failed:', refreshErr);
+    }
+  }
+
+  // 4. Intercept Transient Gateway Errors (502 Bad Gateway / 503 Service Unavailable / 504 Timeout)
+  // Auto-retries once after a brief 1.2s delay to absorb container cold-starts or proxy renegotiation
+  if ((response.status === 502 || response.status === 503 || response.status === 504)) {
+    const isSafeToRetry = !init.method || ['GET', 'POST'].includes(init.method.toUpperCase());
+    if (isSafeToRetry) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      try {
+        response = await fetch(input, {
+          ...init,
+          headers,
+        });
+      } catch (retryErr) {
+        console.warn('[Yachiru API] Transient gateway error retry failed:', retryErr);
+      }
+    }
+  }
+
+  return response;
 }

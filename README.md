@@ -21,18 +21,18 @@ A developer-grade, zero-mutation audit and optimization platform for ClickHouse.
   - Deep architectural summaries powered by **Google Gemini** (`gemini-3.7-flash`, etc.) and **OpenAI** (`gpt-4o`, `gpt-4o-mini`).
   - Token-minimized prompt payloads with deterministic offline fallbacks when AI is disabled.
 
-- **🔐 Team Access Control & RBAC (Firebase Auth + Firestore)**:
-  - **Google OAuth & Email/Password**: Single-click sign-in and user onboarding.
-  - **Role-Based Access Control (RBAC)**:
-    - **Super Admin** (`idarstore24@gmail.com`): Unrestricted access, user approval management, and role promotion/revocation.
-    - **Admin**: Manage member requests, adjust access levels, and configure audit parameters.
-    - **Auditor**: Execute live cluster scans, inspect raw telemetry, test credentials, and generate migration DDL.
-    - **Viewer**: Read-only access to health scorecards and historical audit trails.
-  - **Access Request Workflow**: Automatic pending state for new registrants with approval dashboard for administrators.
-  - **Strict Firestore Security Rules**: Profile creation locked to pending `viewer` role unless approved by an administrator.
+- **🔐 Authentication & Access Control (Firebase Auth + API Keys)**:
+  - **Google OAuth & Email/Password**: Single-click sign-in and user onboarding for team members.
+  - **Role-Based Access Hierarchy & UI Gating**:
+    - **Super Admin** (`idarstore24@gmail.com`): Master administrator with approval management and role elevation permissions.
+    - **Admin**: Review access requests, adjust member access levels, and clear history records.
+    - **Auditor**: Execute live cluster scans, inspect raw telemetry, test connection parameters, and export DDL.
+    - **Viewer**: Read-only access to scorecards and historical audit reports.
+  - **Access Request Workflow**: Automatic pending state for new registrants awaiting administrator review.
+  - **API Middleware Verification**: Express route middleware (`requireRole`) checks token validity and role rank on protected endpoints.
 
-- **🛡️ Enterprise-Grade Security & Safety**:
-  - **Zero-Mutation**: Read-only queries against `system.*` tables.
+- **🛡️ Security & Operational Safety Guards**:
+  - **Zero-Mutation**: Read-only queries against ClickHouse `system.*` tables.
   - **SQL Injection Prevention**: Strict ClickHouse identifier validation and escaping.
   - **Server Hardening**: Helmet HTTP headers, CORS origin whitelisting, and multi-tier rate limiting.
   - **Data Privacy & Query Sanitization (Best-Effort Heuristic & Zero-Raw-Query Mode)**:
@@ -50,21 +50,42 @@ A developer-grade, zero-mutation audit and optimization platform for ClickHouse.
 
 ---
 
-## 🔒 Security Architecture: End-to-End Cryptographic RBAC
+## 🔒 Security Architecture & Access Control Boundaries
 
-Yachiru enforces strict, server-side Role-Based Access Control (RBAC) across both the web portal and backend API endpoints:
+Yachiru provides layered access control designed for internal platform engineering, SRE, and DBA teams:
 
-| Layer | Technology | Enforcement & Scope |
+| Layer | Technology | Scope & Operational Mechanism |
 |---|---|---|
-| **End-User Authentication** | Firebase Auth (`Authorization: Bearer <ID_Token>`) | Cryptographically verified on the Express server via `firebase-admin/auth` (`verifyIdToken`). Token validity, expiration, and project binding are strictly enforced. |
-| **Server-Side RBAC Enforcement** | `requireRole('viewer' \| 'auditor' \| 'admin')` | Queries user document from Firestore (via Admin SDK with REST fallback) to verify `status === 'approved'` and enforce the hierarchical role rank. |
-| **Machine Service Account** | `YACHIRU_API_KEY` (`x-api-key`) | Grants authorized automated scripts, CI/CD runners, and headless workers access without requiring an interactive browser session. |
+| **Interactive End-User Auth** | Firebase Auth (`Bearer <ID_Token>`) | Verified on the Express backend via `firebase-admin/auth` (`verifyIdToken`). Token validity, expiration, and user profile approval status are checked against Firestore. |
+| **API Role Enforcement** | `requireRole('viewer' \| 'auditor' \| 'admin')` | Express route middleware that verifies user approval status and checks hierarchical role rank before granting access to sensitive endpoints. |
+| **Machine Service Accounts** | `YACHIRU_API_KEY` (`x-api-key` / `Bearer`) | Allows CI/CD automation and headless monitoring scripts to access endpoints without interactive browser sessions. |
+| **UI-Level Feature Gating** | React Context (`useAuth`) | Controls client-side visibility of actionable buttons (e.g. Scan buttons, approval panels, history deletion) matching user role permissions. |
 
-### Role Hierarchy & Endpoint Permissions:
+### Role Permissions:
 - **`viewer` (Rank 0)**: Read-only access to health scorecards, scan history (`GET /api/history`), and report views (`GET /api/history/:id`). Direct API attempts by Viewers to trigger scans receive `403 Forbidden: Insufficient role`.
-- **`auditor` (Rank 1)**: Authorized to execute live cluster scans (`POST /api/clickhouse/scan`), test database connections (`POST /api/clickhouse/test-connection`), and inspect query workloads. Blocked from deleting history.
-- **`admin` (Rank 2)**: Full administrative control, including clearing historical audits (`DELETE /api/history`) and managing team access whitelist/approvals.
-- **Super Admin** (`idarstore24@gmail.com`): Master administrator with automatic approval, full role promotion authority, and complete system oversight.
+- **`auditor` (Rank 1)**: Authorized to execute live cluster scans (`POST /api/clickhouse/scan`), test database connections (`POST /api/clickhouse/test-connection`), and inspect query workloads.
+- **`admin` (Rank 2)**: Full administrative control, including clearing historical audits (`DELETE /api/history`) and managing team access requests.
+- **Super Admin** (`idarstore24@gmail.com`): Master administrator with automatic approval and full role promotion authority.
+
+---
+
+## ⚠️ Known Limitations & Operational Boundaries
+
+To ensure clear operational expectations, please review these documented architectural boundaries:
+
+1. **Internal Single-Tenant Scope (No Multi-Tenant Isolation)**:
+   - Yachiru is designed as an internal engineering diagnostic tool. It does **not** provide multi-tenant isolation, per-database access control lists (ACLs), or cryptographic tenant sandboxing. All users with the `auditor` role share the ability to scan any network-accessible ClickHouse cluster permitted by the server's network configuration.
+2. **Production Fail-Closed Configuration Requirements**:
+   - In local development mode (`NODE_ENV=development`), unauthenticated requests are granted local `viewer` privileges to simplify developer onboarding when no auth keys are configured.
+   - For production deployments, fail-closed security **must** be enforced by setting `REQUIRE_API_KEY=true` and `STRICT_AUTH=true`, and providing a strong `YACHIRU_API_KEY` or configuring Firebase Admin service account credentials.
+3. **Storage & Multi-Instance Horizontal Scaling**:
+   - By default, audit history is stored in local container files (`data/scans/`).
+   - If deploying multiple container instances (e.g. on Google Cloud Run or Kubernetes with horizontal pod autoscaling), you must enable `USE_FIRESTORE_HISTORY=true` and configure `REDIS_URL` for shared rate limiting. Alternatively, deploy with `minInstances = maxInstances = 1`.
+4. **Heuristic Masking vs. Regulatory Privacy**:
+   - Default regex redaction (`maskQueryPii`) is a best-effort hygiene measure to strip obvious passwords, tokens, and numeric literals from query logs. It does **not** guarantee regulatory compliance under GDPR, HIPAA, or PCI-DSS.
+   - For strict data privacy guarantees, deploy with Zero-Raw-Query Mode (`STORE_RAW_QUERIES=false` or `PRIVACY_PRESERVING_HISTORY=true`).
+5. **Advisory Nature of AI Recommendations & DDL**:
+   - Diagnostic summaries and generated DDL migration scripts are advisory recommendations based on deterministic telemetry findings. All SQL scripts must be peer-reviewed and validated in non-production environments before being executed on production databases.
 
 ---
 
@@ -186,21 +207,39 @@ npm run lint
 # 5. Production build
 npm run build
 npm start
+
+# 6. Regenerate OpenAPI 3.1 specifications (JSON & YAML)
+npm run generate:openapi
 ```
+
+---
+
+## 📖 API Documentation & OpenAPI Specification
+
+Yachiru provides formal, machine-readable **OpenAPI 3.1.0** specifications derived from the Zod schemas and runtime endpoints:
+
+- **Interactive Swagger UI**: Explore and test API endpoints in your browser at [`/api/docs`](http://localhost:3000/api/docs).
+- **OpenAPI JSON Document**: Download the complete specification at [`/api/openapi.json`](http://localhost:3000/api/openapi.json) or inspect the committed [`openapi.json`](./openapi.json) file.
+- **OpenAPI YAML Document**: Download the specification at [`/api/openapi.yaml`](http://localhost:3000/api/openapi.yaml) or inspect the committed [`openapi.yaml`](./openapi.yaml) file.
+- **Third-Party Tooling & Code Generation**: Import `openapi.json` or `openapi.yaml` directly into Postman, Insomnia, or TypeScript SDK generators (`openapi-typescript`, `k6`, etc.) for seamless programmatic automation and breaking-change detection in CI/CD pipelines.
 
 ---
 
 ## 🔌 API Reference
 
-| Method | Endpoint | Description | Auth Required |
+| Method | Endpoint | Description | Access / Role Requirement |
 |---|---|---|---|
-| `GET` | `/api/health` | Service health and AI capability status | No |
-| `GET` | `/api/demo-clusters` | List available demo dataset profiles | No |
-| `POST` | `/api/clickhouse/test-connection` | Verify ClickHouse connectivity & permissions | If configured |
-| `POST` | `/api/clickhouse/scan` | Execute 9-dimension health scan & AI synthesis | If configured |
-| `GET` | `/api/history` | Retrieve historical scan summary list | If configured |
-| `GET` | `/api/history/:id` | Retrieve full scan report by ID | If configured |
-| `DELETE`| `/api/history` | Clear stored scan history | If configured |
+| `GET` | `/api/health` | Service health and AI capability status | Public (Open) |
+| `GET` | `/api/demo-clusters` | List available demo dataset profiles | Public (Open) |
+| `GET` | `/api/auth/me` | Current authenticated user & role profile | `viewer` role or `YACHIRU_API_KEY` |
+| `POST` | `/api/clickhouse/test-connection` | Verify ClickHouse connectivity & permissions | `auditor` role or `YACHIRU_API_KEY` |
+| `POST` | `/api/clickhouse/scan` | Execute 9-dimension health scan & AI synthesis | `auditor` role or `YACHIRU_API_KEY` |
+| `GET` | `/api/history` | Retrieve historical scan summary list | `viewer` role or `YACHIRU_API_KEY` *(dev fallback)* |
+| `GET` | `/api/history/:id` | Retrieve full scan report by ID | `viewer` role or `YACHIRU_API_KEY` *(dev fallback)* |
+| `DELETE`| `/api/history` | Clear stored scan history | `admin` role or `YACHIRU_API_KEY` |
+| `GET` | `/api/openapi.json` | Download OpenAPI 3.1 specification (JSON) | Public (Open) |
+| `GET` | `/api/openapi.yaml` | Download OpenAPI 3.1 specification (YAML) | Public (Open) |
+| `GET` | `/api/docs` | Interactive Swagger UI API documentation | Public (Open) |
 
 ---
 

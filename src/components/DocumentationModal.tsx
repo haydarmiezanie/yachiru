@@ -21,7 +21,6 @@ export const DocumentationModal: React.FC<DocumentationModalProps> = ({ isOpen, 
   const [copiedApiHistory, setCopiedApiHistory] = useState(false);
   const [copiedApiDatabases, setCopiedApiDatabases] = useState(false);
   const [copiedApiHealth, setCopiedApiHealth] = useState(false);
-  const [copiedEnvSnippet, setCopiedEnvSnippet] = useState(false);
   const [apiSnippetLang, setApiSnippetLang] = useState<'curl' | 'node' | 'python'>('curl');
   const [aiScanTab, setAiScanTab] = useState<'gemini' | 'openai' | 'headers' | 'offline'>('gemini');
   const [customAiKey, setCustomAiKey] = useState('');
@@ -53,22 +52,6 @@ export const DocumentationModal: React.FC<DocumentationModalProps> = ({ isOpen, 
   };
 
   const activeKey = clientApiKey.trim() || 'your_strong_secret_api_key_here';
-
-  const vmEnvSnippet = `
-# On your VM: nano .env
-# 1. Define your strong secret API key
-YACHIRU_API_KEY="your_strong_secret_api_key_here"
-
-# 2. Enforce API key authentication for all requests
-REQUIRE_API_KEY=true
-
-# 3. Optional: AI Provider Keys
-GEMINI_API_KEY=your_gemini_key_here
-OPENAI_API_KEY=your_openai_key_here
-
-# 4. Data Privacy (Zero Raw Query Mode for GDPR / strict compliance)
-STORE_RAW_QUERIES=false # Discards raw SQL; stores only fingerprints & normalized patterns
-`.trim();
 
   const grantSql = `
 -- Create read-only auditing user for Yachiru
@@ -490,42 +473,36 @@ docker compose up -d
 
               {/* Authentication & Headers */}
               <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 space-y-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 font-bold text-amber-300">
                     <Key className="h-4 w-4" />
-                    <span>Authentication & VM .env Setup</span>
+                    <span>API Authentication & Request Headers</span>
                   </div>
-                  <button
-                    onClick={() => handleCopy(vmEnvSnippet, setCopiedEnvSnippet)}
-                    className="flex items-center gap-1 rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/30 transition-colors cursor-pointer"
-                  >
-                    {copiedEnvSnippet ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                    <span>{copiedEnvSnippet ? 'Copied' : 'Copy .env Config'}</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <a
+                      href="/api/docs"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 rounded bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors"
+                    >
+                      <Globe className="h-3 w-3" />
+                      <span>Interactive Swagger UI</span>
+                    </a>
+                    <a
+                      href="/api/openapi.json"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-[11px] font-semibold text-slate-300 hover:bg-slate-700 transition-colors"
+                    >
+                      <Code className="h-3 w-3" />
+                      <span>OpenAPI Spec</span>
+                    </a>
+                  </div>
                 </div>
 
-                <div className="space-y-2 text-[11px] text-slate-300">
-                  <p>
-                    Configure your VM server's <code className="text-amber-300 font-mono">.env</code> file with both gateway security and your preferred AI provider keys:
-                  </p>
-                  <pre className="p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-[11px] text-amber-200 overflow-x-auto">
-                    <code>{vmEnvSnippet}</code>
-                  </pre>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[10px]">
-                    <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
-                      <strong className="text-amber-300">1. Gateway Security (YACHIRU_API_KEY):</strong>
-                      <p className="text-slate-400 mt-0.5">Enforces mandatory authentication. When active, requests lacking <code className="text-amber-400">x-api-key</code> are rejected with 401.</p>
-                    </div>
-                    <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
-                      <strong className="text-emerald-300">2. AI Synthesis (GEMINI & OPENAI):</strong>
-                      <p className="text-slate-400 mt-0.5">Set once in <code className="text-emerald-400">.env</code> so your scripts/cURLs don't need to include AI keys, OR pass dynamically via <code className="text-emerald-400">aiApiKey</code>.</p>
-                    </div>
-                    <div className="p-2 rounded bg-slate-900/90 border border-slate-800">
-                      <strong className="text-sky-300">3. Privacy Compliance (Zero Raw Query):</strong>
-                      <p className="text-slate-400 mt-0.5">Set <code className="text-sky-400">STORE_RAW_QUERIES=false</code> for strict GDPR compliance. Raw queries are completely discarded and replaced with SHA-256 fingerprints.</p>
-                    </div>
-                  </div>
-                </div>
+                <p className="text-[12px] text-slate-300 leading-relaxed">
+                  Every programmatic request to Yachiru endpoints is verified on the server. You can authenticate either with an end-user session token or with a machine service account API key:
+                </p>
 
                 {/* Headers required & RBAC Matrix */}
                 <div className="space-y-2 pt-2 border-t border-slate-800/80">

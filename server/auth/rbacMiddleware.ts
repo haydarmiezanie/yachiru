@@ -114,13 +114,15 @@ function parseFirestoreFields(fields: Record<string, any> = {}): Record<string, 
   return result;
 }
 
+let firestoreAdminAvailable: boolean | null = null;
+
 /**
  * Retrieves the user profile, role, and approval status from Firestore.
  * Supports:
  * 1. Super Admin instant override
  * 2. In-memory TTL cache
- * 3. Firestore Admin SDK (when service account / ADC has IAM permissions)
- * 4. Firestore REST API fallback (authenticated via the user's verified ID token)
+ * 3. Firestore Admin SDK (with circuit breaker to prevent repeated 2s+ gRPC timeouts when IAM credentials are not present)
+ * 4. Firestore REST API fallback (authenticated via the user's verified ID token with strict timeout)
  */
 export async function fetchUserProfile(uid: string, idToken: string, email: string): Promise<AuthenticatedUser> {
   const normalizedEmail = (email || '').toLowerCase().trim();
@@ -143,27 +145,39 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
     return cached.user;
   }
 
-  // 1. Try Firestore Admin SDK
-  try {
-    const adminDb = firestoreDatabaseId ? getFirestore(adminApp, firestoreDatabaseId) : getFirestore(adminApp);
-    const docSnap = await adminDb.collection('users').doc(uid).get();
+  // 1. Try Firestore Admin SDK (if circuit breaker has not marked it unavailable)
+  if (firestoreAdminAvailable !== false) {
+    try {
+      const adminDb = firestoreDatabaseId ? getFirestore(adminApp, firestoreDatabaseId) : getFirestore(adminApp);
+      const docPromise = adminDb.collection('users').doc(uid).get();
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Firestore Admin SDK timed out')), 1500)
+      );
 
-    if (docSnap.exists) {
-      const data = docSnap.data() as any;
-      const user: AuthenticatedUser = {
-        uid,
-        email: (data.email || normalizedEmail).toLowerCase().trim(),
-        role: (data.role as UserRole) || 'viewer',
-        status: (data.status as UserStatus) || 'pending',
-        displayName: data.displayName || undefined,
-        authMethod: 'firebase_token',
-      };
-      profileCache.set(uid, { user, expiresAt: Date.now() + CACHE_TTL_MS });
-      return user;
+      const docSnap = await Promise.race([docPromise, timeoutPromise]);
+
+      if (docSnap && docSnap.exists) {
+        firestoreAdminAvailable = true;
+        const data = docSnap.data() as any;
+        const user: AuthenticatedUser = {
+          uid,
+          email: (data.email || normalizedEmail).toLowerCase().trim(),
+          role: (data.role as UserRole) || 'viewer',
+          status: (data.status as UserStatus) || 'pending',
+          displayName: data.displayName || undefined,
+          authMethod: 'firebase_token',
+        };
+        profileCache.set(uid, { user, expiresAt: Date.now() + CACHE_TTL_MS });
+        return user;
+      }
+    } catch (adminErr: any) {
+      if (adminErr?.code === 7 || String(adminErr?.message || '').includes('PERMISSION_DENIED')) {
+        firestoreAdminAvailable = false;
+        logger.debug({ uid }, 'Firestore Admin SDK lacks IAM permissions, disabling Admin SDK and using REST API with ID token');
+      } else {
+        logger.debug({ err: adminErr.message, uid }, 'Firestore Admin SDK read bypassed, using REST API with ID token');
+      }
     }
-  } catch (adminErr: any) {
-    // Expected in container environments where service account IAM does not grant direct Firestore access
-    logger.debug({ err: adminErr.message, uid }, 'Firestore Admin SDK read bypassed, using REST API with ID token');
   }
 
   // 2. Fallback to Firestore REST API with the user's verified ID token
@@ -171,12 +185,17 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
     const dbSegment = firestoreDatabaseId ? firestoreDatabaseId : '(default)';
     const firestoreUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/${uid}`;
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
     const resp = await fetch(firestoreUrl, {
       headers: {
         Authorization: `Bearer ${idToken}`,
         Accept: 'application/json',
       },
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (resp.ok) {
       const json = await resp.json();
@@ -277,50 +296,9 @@ export function requireRole(minRole: UserRole = 'viewer') {
 
     // 1. Prioritize Firebase ID Token Verification (End-User Session)
     if (bearerToken && bearerToken.split('.').length === 3) {
+      let decoded: any;
       try {
-        const decoded = await getAuth(adminApp).verifyIdToken(bearerToken);
-        const profile = await fetchUserProfile(decoded.uid, bearerToken, decoded.email || '');
-
-        // Strict Status Check: user must be 'approved'
-        if (profile.status !== 'approved') {
-          logger.warn(
-            { uid: decoded.uid, email: decoded.email, status: profile.status, path: req.path },
-            'Access denied: User account is not approved'
-          );
-          return res.status(403).json({
-            error: `Access denied: Your account status is "${profile.status}". An administrator must approve your access before performing this action.`,
-            code: 'ACCOUNT_NOT_APPROVED',
-            status: profile.status,
-          });
-        }
-
-        // Strict Role Rank Check: user's role must meet or exceed minRole
-        const userRank = ROLE_RANK[profile.role] ?? -1;
-        const requiredRank = ROLE_RANK[minRole] ?? 99;
-
-        if (userRank < requiredRank) {
-          logger.warn(
-            {
-              uid: decoded.uid,
-              email: decoded.email,
-              userRole: profile.role,
-              requiredRole: minRole,
-              path: req.path,
-              method: req.method,
-            },
-            'Access denied: Insufficient role'
-          );
-          return res.status(403).json({
-            error: `Insufficient permissions: Endpoint requires "${minRole}" role, but your account role is "${profile.role}".`,
-            code: 'INSUFFICIENT_ROLE',
-            requiredRole: minRole,
-            userRole: profile.role,
-          });
-        }
-
-        // Attach authenticated user to request context
-        req.user = profile;
-        return next();
+        decoded = await getAuth(adminApp).verifyIdToken(bearerToken);
       } catch (tokenErr: any) {
         logger.warn({ err: tokenErr.message, path: req.path }, 'Firebase ID token verification failed');
         return res.status(401).json({
@@ -329,6 +307,62 @@ export function requireRole(minRole: UserRole = 'viewer') {
           details: tokenErr.message,
         });
       }
+
+      let profile: AuthenticatedUser;
+      try {
+        profile = await fetchUserProfile(decoded.uid, bearerToken, decoded.email || '');
+      } catch (profileErr: any) {
+        logger.error({ err: profileErr.message, uid: decoded.uid }, 'Error fetching user profile from database');
+        // Graceful fallback: do not fail authentication, treat as viewer pending
+        profile = {
+          uid: decoded.uid,
+          email: (decoded.email || '').toLowerCase().trim(),
+          role: 'viewer',
+          status: 'pending',
+          authMethod: 'firebase_token',
+        };
+      }
+
+      // Strict Status Check: user must be 'approved'
+      if (profile.status !== 'approved') {
+        logger.warn(
+          { uid: decoded.uid, email: decoded.email, status: profile.status, path: req.path },
+          'Access denied: User account is not approved'
+        );
+        return res.status(403).json({
+          error: `Access denied: Your account status is "${profile.status}". An administrator must approve your access before performing this action.`,
+          code: 'ACCOUNT_NOT_APPROVED',
+          status: profile.status,
+        });
+      }
+
+      // Strict Role Rank Check: user's role must meet or exceed minRole
+      const userRank = ROLE_RANK[profile.role] ?? -1;
+      const requiredRank = ROLE_RANK[minRole] ?? 99;
+
+      if (userRank < requiredRank) {
+        logger.warn(
+          {
+            uid: decoded.uid,
+            email: decoded.email,
+            userRole: profile.role,
+            requiredRole: minRole,
+            path: req.path,
+            method: req.method,
+          },
+          'Access denied: Insufficient role'
+        );
+        return res.status(403).json({
+          error: `Insufficient permissions: Endpoint requires "${minRole}" role, but your account role is "${profile.role}".`,
+          code: 'INSUFFICIENT_ROLE',
+          requiredRole: minRole,
+          userRole: profile.role,
+        });
+      }
+
+      // Attach authenticated user to request context
+      req.user = profile;
+      return next();
     }
 
     // 2. Fallback: Machine Service Account API Key (For automated scripts & CI/CD pipelines)

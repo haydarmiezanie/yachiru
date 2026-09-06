@@ -14,7 +14,35 @@ import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validat
 import { logger } from './server/logger.js';
 import { requireRole, isRequireApiKey, isStrictAuth, safeCompare, matchesAllowedApiKey } from './server/auth/rbacMiddleware.js';
 import { apiLimiter, scanLimiter } from './server/rateLimiter.js';
+import YAML from 'yaml';
+import { buildOpenApiSpec } from './server/openapi/openApiSpec.js';
 export { safeCompare, matchesAllowedApiKey };
+
+// Process-Level Resilience: prevent unhandled promise rejections or uncaught exceptions from abruptly exiting process (which causes 502 Bad Gateway)
+process.on('unhandledRejection', (reason: any) => {
+  logger.error({ err: reason instanceof Error ? reason.message : reason, stack: reason?.stack }, 'Unhandled Promise Rejection caught at process level');
+});
+
+process.on('uncaughtException', (err: Error) => {
+  logger.error({ err: err.message, stack: err.stack }, 'Uncaught Exception caught at process level');
+});
+
+let cachedOpenApiSpec: Record<string, any> | null = null;
+let cachedOpenApiYaml: string | null = null;
+
+function getOpenApiSpec(): Record<string, any> {
+  if (!cachedOpenApiSpec) {
+    cachedOpenApiSpec = buildOpenApiSpec();
+  }
+  return cachedOpenApiSpec;
+}
+
+function getOpenApiYaml(): string {
+  if (!cachedOpenApiYaml) {
+    cachedOpenApiYaml = YAML.stringify(getOpenApiSpec(), { indent: 2 });
+  }
+  return cachedOpenApiYaml;
+}
 
 export function resolveAllowedOrigins(env = process.env): string[] {
   const configured = (env.ALLOWED_ORIGINS || '')
@@ -144,6 +172,61 @@ app.get('/api/demo-clusters', (req: Request, res: Response) => {
     ].filter(Boolean),
   }));
   res.json(list);
+});
+
+// OpenAPI 3.1 Specification Endpoints (Open)
+app.get('/api/openapi.json', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.json(getOpenApiSpec());
+});
+
+app.get('/api/openapi.yaml', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/yaml; charset=utf-8');
+  return res.send(getOpenApiYaml());
+});
+
+// Interactive Swagger UI Documentation (Open)
+app.get('/api/docs', (req: Request, res: Response) => {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Yachiru API Documentation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css" />
+  <style>
+    body { margin: 0; padding: 0; background: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .topbar { display: none !important; }
+    .swagger-ui .info .title { color: #f8fafc !important; }
+    .swagger-ui .info p, .swagger-ui .info li { color: #94a3b8 !important; }
+    .swagger-ui { max-width: 1280px; margin: 0 auto; padding: 24px 16px; background: #0f172a; }
+    .swagger-ui .scheme-container { background: #1e293b !important; box-shadow: none !important; border-radius: 8px; border: 1px solid #334155; }
+    .swagger-ui select { background: #0f172a !important; color: #f8fafc !important; border: 1px solid #475569 !important; }
+    .swagger-ui .opblock { border-radius: 8px !important; box-shadow: none !important; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = () => {
+      window.ui = SwaggerUIBundle({
+        url: '/api/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        layout: "StandaloneLayout"
+      });
+    };
+  </script>
+</body>
+</html>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.send(html);
 });
 
 // Test Connection (Protected: Auditor role required + Zod Runtime Validation)
@@ -289,7 +372,11 @@ app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Reques
     };
 
     // 5. Save Report to History Store (Asynchronously & Atomically with PII masking)
-    await ScanHistoryStore.saveScan(report);
+    try {
+      await ScanHistoryStore.saveScan(report);
+    } catch (saveErr) {
+      logger.warn({ err: saveErr }, 'Failed to persist scan to history store, proceeding with report delivery');
+    }
 
     logger.info(
       { scanId, durationMs, overallScore: report.overallScore, grade: report.overallGrade },

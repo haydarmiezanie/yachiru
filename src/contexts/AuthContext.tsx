@@ -107,7 +107,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         createdAt: new Date().toISOString(),
         lastLoginAt: new Date().toISOString(),
       };
-      setProfile((prev) => prev || defaultProfile);
+      // Ensure we never keep a previous account's profile when switching users
+      setProfile((prev) => (prev && prev.uid === firebaseUser.uid ? prev : defaultProfile));
 
       // Real-time listener for profile changes (handles both offline cache and live server updates seamlessly)
       unsubscribeProfile = onSnapshot(
