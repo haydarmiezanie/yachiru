@@ -2,8 +2,12 @@ import { auth } from './firebase';
 
 /**
  * Helper to make API requests with appropriate auth headers attached:
- * - x-api-key: from localStorage ('yachiru_api_key') or import.meta.env.VITE_YACHIRU_API_KEY
  * - Authorization: Bearer <token> from Firebase Auth user session if signed in
+ * - x-api-key: only if explicitly built into environment (VITE_YACHIRU_API_KEY)
+ *
+ * Security Note:
+ * Client browsers do NOT store machine API keys in localStorage.
+ * Machine API keys are governed exclusively by administrators for CI/CD runners.
  *
  * Resilience features:
  * - Proactive ID token resolution from Firebase Auth
@@ -13,15 +17,17 @@ import { auth } from './firebase';
 export async function authenticatedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers || {});
 
-  // 1. Attach configured API key if present
-  const metaEnv = (import.meta as unknown as { env?: Record<string, string> }).env;
-  const storedApiKey =
-    (typeof window !== 'undefined' ? localStorage.getItem('yachiru_api_key') : null) ||
-    metaEnv?.VITE_YACHIRU_API_KEY ||
-    '';
+  // Remove any legacy insecure localStorage API keys if present
+  if (typeof window !== 'undefined' && localStorage.getItem('yachiru_api_key')) {
+    localStorage.removeItem('yachiru_api_key');
+  }
 
-  if (storedApiKey && !headers.has('x-api-key')) {
-    headers.set('x-api-key', storedApiKey.trim());
+  // 1. Attach configured machine environment API key if explicitly defined at build time
+  const metaEnv = (import.meta as unknown as { env?: Record<string, string> }).env;
+  const envApiKey = metaEnv?.VITE_YACHIRU_API_KEY || '';
+
+  if (envApiKey && !headers.has('x-api-key')) {
+    headers.set('x-api-key', envApiKey.trim());
   }
 
   // 2. Attach Firebase ID token if user is signed in

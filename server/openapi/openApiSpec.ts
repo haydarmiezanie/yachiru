@@ -416,6 +416,45 @@ export function buildOpenApiSpec(): Record<string, any> {
           },
         },
       },
+      '/api/clickhouse/databases': {
+        post: {
+          tags: ['Scanner'],
+          summary: 'Discover Accessible Databases on Cluster',
+          description: 'Connects to the ClickHouse target and executes SHOW DATABASES to retrieve all databases accessible by the specified user credentials. Requires `auditor` role or API Key.',
+          operationId: 'discoverClickHouseDatabases',
+          security: [{ BearerAuth: [] }, { ApiKeyAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/TestConnectionInput' },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'Accessible databases list',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean', example: true },
+                      databases: { type: 'array', items: { type: 'string' }, example: ['default', 'analytics', 'system'] },
+                      total: { type: 'number', example: 3 },
+                      version: { type: 'string', example: '24.3.2.10' },
+                      message: { type: 'string', example: 'Connected successfully' },
+                    },
+                  },
+                },
+              },
+            },
+            '400': { description: 'Connection failed or invalid parameters' },
+            '401': { description: 'Unauthorized' },
+            '403': { description: 'Forbidden - Insufficient role' },
+          },
+        },
+      },
       '/api/clickhouse/scan': {
         post: {
           tags: ['Scanner'],

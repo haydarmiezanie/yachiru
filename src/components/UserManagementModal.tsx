@@ -49,12 +49,31 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
   useEffect(() => {
     if (!isOpen) return;
 
-    // Listen to users collection
-    const usersQuery = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
+    // Listen to users collection without orderBy so documents without createdAt are not omitted by Firestore
+    const usersQuery = collection(db, 'users');
     const unsubUsers = onSnapshot(usersQuery, (snapshot) => {
       const uList: UserProfile[] = [];
       snapshot.forEach((d) => {
-        uList.push(d.data() as UserProfile);
+        const data = d.data();
+        // If a document was marked as revoked, permanently delete it from Firestore!
+        if (data.status === 'revoked') {
+          deleteDoc(doc(db, 'users', d.id)).catch(() => {});
+          return;
+        }
+        const uid = data.uid || d.id;
+        const rawEmail = (data.email || (d.id.startsWith('invite_') ? d.id.replace('invite_', '') : '')).toLowerCase().trim();
+        uList.push({
+          ...data,
+          uid,
+          id: d.id,
+          email: rawEmail,
+          displayName: data.displayName || (rawEmail ? rawEmail.split('@')[0] : uid.slice(0, 8)),
+          role: (data.role as UserRole) || 'viewer',
+          status: (data.status as UserStatus) || 'pending',
+          createdAt: data.createdAt || '',
+          lastLoginAt: data.lastLoginAt || 'Never logged in',
+          notes: data.notes || '',
+        } as UserProfile);
       });
       setUsers(uList);
     }, (err) => {
@@ -62,11 +81,17 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
     });
 
     // Listen to access requests
-    const reqQuery = query(collection(db, 'access_requests'), orderBy('createdAt', 'desc'));
+    const reqQuery = collection(db, 'access_requests');
     const unsubReqs = onSnapshot(reqQuery, (snapshot) => {
       const rList: AccessRequest[] = [];
       snapshot.forEach((d) => {
         rList.push({ id: d.id, ...d.data() } as AccessRequest);
+      });
+      // Sort requests descending by creation time in memory
+      rList.sort((a, b) => {
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeB - timeA;
       });
       setRequests(rList);
     }, (err) => {
@@ -79,38 +104,108 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
     };
   }, [isOpen]);
 
-  // Deduplicate and consolidate users by email (prioritize approved status and highest role)
+  // Consolidate users by email / unique ID (prioritizes real auth UID over invite docs)
   const consolidatedUsers = React.useMemo(() => {
     const map = new Map<string, UserProfile>();
     for (const u of users) {
-      const emailKey = (u.email || '').toLowerCase().trim();
-      if (!emailKey) continue;
-      const existing = map.get(emailKey);
+      if (u.status === 'revoked') continue;
+      // Key by normalized email if present, otherwise by uid so no user is ever skipped
+      const key = (u.email || u.uid || u.id).toLowerCase().trim();
+      if (!key) continue;
+      const existing = map.get(key);
       if (!existing) {
-        map.set(emailKey, u);
+        map.set(key, u);
       } else {
-        const isApproved = existing.status === 'approved' || u.status === 'approved';
+        const isRealU = !u.uid.startsWith('invite_');
+        const primary = isRealU ? u : existing;
+        const secondary = isRealU ? existing : u;
+
+        // Clean up redundant invite doc from Firestore if a real authenticated account exists
+        if (secondary.uid.startsWith('invite_')) {
+          deleteDoc(doc(db, 'users', secondary.id || secondary.uid)).catch(() => {});
+        }
+
         const roleOrder: Record<UserRole, number> = { admin: 3, auditor: 2, viewer: 1 };
-        const highestRole = (roleOrder[existing.role] || 1) >= (roleOrder[u.role] || 1) ? existing.role : u.role;
-        const preferredUid = !u.uid.startsWith('invite_') ? u.uid : existing.uid;
-        map.set(emailKey, {
-          ...existing,
-          uid: preferredUid,
-          status: isApproved ? 'approved' : existing.status,
+        const highestRole = (roleOrder[primary.role] || 1) >= (roleOrder[secondary.role] || 1) ? primary.role : secondary.role;
+        const isApproved = primary.status === 'approved' || secondary.status === 'approved';
+
+        map.set(key, {
+          ...primary,
+          status: isApproved ? 'approved' : primary.status,
           role: highestRole,
-          displayName: existing.displayName || u.displayName,
-          lastLoginAt: existing.lastLoginAt !== 'Never logged in' ? existing.lastLoginAt : u.lastLoginAt,
+          displayName: primary.displayName || secondary.displayName,
+          lastLoginAt: primary.lastLoginAt !== 'Never logged in' ? primary.lastLoginAt : secondary.lastLoginAt,
         });
       }
     }
-    return Array.from(map.values());
+    const result = Array.from(map.values());
+    result.sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeB - timeA;
+    });
+    return result;
   }, [users]);
 
+  const handlePermanentDeleteUser = async (targetUser: UserProfile) => {
+    const userLabel = targetUser.email || targetUser.displayName || targetUser.uid;
+    if (
+      !window.confirm(
+        `Are you sure you want to permanently delete user "${userLabel}"?\n\nThis will completely remove their account, whitelist entry, and access permissions from Firestore.`
+      )
+    ) {
+      return;
+    }
+    try {
+      // 1. Delete user document from users collection
+      await deleteDoc(doc(db, 'users', targetUser.uid)).catch(() => {});
+      if (targetUser.id && targetUser.id !== targetUser.uid) {
+        await deleteDoc(doc(db, 'users', targetUser.id)).catch(() => {});
+      }
+
+      // 2. Delete any invite document associated with this email
+      if (targetUser.email) {
+        const cleanEmailKey = targetUser.email.toLowerCase().trim().replace(/[^a-zA-Z0-9]/g, '_');
+        await deleteDoc(doc(db, 'users', `invite_${cleanEmailKey}`)).catch(() => {});
+      }
+
+      // 3. Delete any access_request document associated with this uid
+      await deleteDoc(doc(db, 'access_requests', targetUser.uid)).catch(() => {});
+
+      // 4. Delete any matching duplicate documents by email
+      if (targetUser.email) {
+        const emailLower = targetUser.email.toLowerCase().trim();
+        const duplicates = users.filter((u) => u.email?.toLowerCase().trim() === emailLower && u.uid !== targetUser.uid);
+        for (const dup of duplicates) {
+          await deleteDoc(doc(db, 'users', dup.uid)).catch(() => {});
+          if (dup.id && dup.id !== dup.uid) {
+            await deleteDoc(doc(db, 'users', dup.id)).catch(() => {});
+          }
+        }
+      }
+
+      // Optimistically update local state
+      setUsers((prev) =>
+        prev.filter((u) => u.uid !== targetUser.uid && (!targetUser.email || u.email?.toLowerCase().trim() !== targetUser.email.toLowerCase().trim()))
+      );
+      setActionMsg({ type: 'success', text: `User ${userLabel} permanently deleted.` });
+    } catch (e: any) {
+      setActionMsg({ type: 'error', text: e.message || 'Failed to permanently delete user.' });
+    }
+  };
+
   const handleUpdateStatus = async (uid: string, status: UserStatus) => {
+    const target = users.find((u) => u.uid === uid);
+    if (status === 'revoked') {
+      if (target) {
+        await handlePermanentDeleteUser(target);
+      } else {
+        await deleteDoc(doc(db, 'users', uid)).catch(() => {});
+      }
+      return;
+    }
     try {
       await updateDoc(doc(db, 'users', uid), { status });
-      // If other docs exist for this email (e.g. invite doc vs actual uid), sync them too
-      const target = users.find((u) => u.uid === uid);
       if (target?.email) {
         const others = users.filter((u) => u.email.toLowerCase() === target.email.toLowerCase() && u.uid !== uid);
         for (const other of others) {
@@ -126,7 +221,6 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
   const handleUpdateRole = async (uid: string, role: UserRole) => {
     try {
       await updateDoc(doc(db, 'users', uid), { role });
-      // If other docs exist for this email (e.g. invite doc vs actual uid), sync them too
       const target = users.find((u) => u.uid === uid);
       if (target?.email) {
         const others = users.filter((u) => u.email.toLowerCase() === target.email.toLowerCase() && u.uid !== uid);
@@ -170,8 +264,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
 
   const handleRejectRequest = async (reqId: string) => {
     try {
-      await updateDoc(doc(db, 'access_requests', reqId), { status: 'rejected' });
-      setActionMsg({ type: 'success', text: 'Access request rejected' });
+      await deleteDoc(doc(db, 'access_requests', reqId));
+      setActionMsg({ type: 'success', text: 'Access request permanently rejected & removed' });
     } catch (e: any) {
       setActionMsg({ type: 'error', text: e.message || 'Failed to reject access request' });
     }
@@ -346,7 +440,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
                     >
                       <div className="flex items-center gap-3">
                         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-800 font-mono text-xs font-bold text-amber-400 border border-slate-700">
-                          {u.displayName ? u.displayName.slice(0, 2).toUpperCase() : u.email.slice(0, 2).toUpperCase()}
+                          {u.displayName ? u.displayName.slice(0, 2).toUpperCase() : (u.email || u.uid).slice(0, 2).toUpperCase()}
                         </div>
                         <div>
                           <div className="flex items-center gap-2">
@@ -357,7 +451,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
                               </span>
                             )}
                           </div>
-                          <span className="font-mono text-xs text-slate-400">{u.email}</span>
+                          <span className="font-mono text-xs text-slate-400">{u.email || u.uid}</span>
                           <div className="mt-0.5 text-[11px] text-slate-500">
                             Last active: {u.lastLoginAt ? (u.lastLoginAt.includes('T') ? new Date(u.lastLoginAt).toLocaleString() : u.lastLoginAt) : 'Never'}
                           </div>
@@ -381,38 +475,36 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
                           </select>
                         </div>
 
-                        {/* Status Badge & Toggle */}
+                        {/* Status Badge & Actions */}
                         <div className="flex items-center gap-2">
                           <span
                             className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase ${
                               u.status === 'approved'
                                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                : u.status === 'pending'
-                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                                : 'bg-red-500/10 text-red-400 border border-red-500/20'
+                                : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                             }`}
                           >
                             {u.status}
                           </span>
 
-                          {u.status === 'approved' ? (
-                            <button
-                              disabled={isCurrent}
-                              onClick={() => handleUpdateStatus(u.uid, 'revoked')}
-                              title="Revoke Access"
-                              className="rounded-lg p-1.5 text-slate-400 hover:bg-red-950 hover:text-red-400 transition-colors disabled:opacity-30 cursor-pointer"
-                            >
-                              <Ban className="h-4 w-4" />
-                            </button>
-                          ) : (
+                          {u.status === 'pending' && (
                             <button
                               onClick={() => handleUpdateStatus(u.uid, 'approved')}
                               title="Approve Access"
-                              className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-950 hover:text-emerald-400 transition-colors cursor-pointer"
+                              className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-950/80 hover:text-emerald-400 transition-colors cursor-pointer"
                             >
                               <Check className="h-4 w-4" />
                             </button>
                           )}
+
+                          <button
+                            disabled={isCurrent}
+                            onClick={() => handlePermanentDeleteUser(u)}
+                            title={isCurrent ? 'You cannot delete your own admin account' : 'Permanently Delete User from Database'}
+                            className="rounded-lg p-1.5 text-slate-400 hover:bg-red-950/80 hover:text-red-400 transition-colors disabled:opacity-20 cursor-pointer"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -471,8 +563,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
                           onClick={() => handleRejectRequest(r.id)}
                           className="flex items-center gap-1 rounded-lg bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors cursor-pointer"
                         >
-                          <Ban className="h-3.5 w-3.5" />
-                          <span>Reject</span>
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Reject & Delete</span>
                         </button>
                       </div>
                     )}

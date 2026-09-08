@@ -242,11 +242,25 @@ export class ClickHouseScannerClient {
       fullText.includes('ECONNREFUSED') ||
       fullText.includes('Connection refused');
 
+    const isReset =
+      causeCode === 'ECONNRESET' ||
+      fullText.includes('ECONNRESET') ||
+      fullText.includes('disconnected before secure TLS') ||
+      fullText.includes('SSL_ERROR_SYSCALL') ||
+      fullText.includes('socket disconnected');
+
     const isNotFound =
       causeCode === 'ENOTFOUND' ||
       causeCode === 'EAI_AGAIN' ||
       fullText.includes('ENOTFOUND') ||
       fullText.includes('EAI_AGAIN');
+
+    if (isReset) {
+      if (host.toLowerCase().includes('clickhouse.cloud')) {
+        return `Connection to ClickHouse Cloud at ${baseUrl} was abruptly closed during TLS negotiation (SSL_ERROR_SYSCALL / ECONNRESET). ClickHouse Cloud drops connections from unwhitelisted IP addresses. In your ClickHouse Cloud Console, navigate to Cluster > Settings > IP Access List, and ensure your IP is added (or temporarily allow 0.0.0.0/0 for testing).`;
+      }
+      return `Connection to ${baseUrl} was reset by the server (ECONNRESET). Verify network firewall and TLS certificate settings.`;
+    }
 
     if (isTimeout) {
       if (host.toLowerCase().includes('clickhouse.cloud')) {

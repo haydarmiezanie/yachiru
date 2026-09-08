@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, ShieldCheck, BookOpen, Layers, Check, Copy, Container, Terminal, Code, Globe, Key, ArrowRight, Database, History, RefreshCw, Sparkles, Bot, Cpu, CheckCircle2 } from 'lucide-react';
+import { X, Shield, ShieldCheck, BookOpen, Layers, Check, Copy, Container, Terminal, Code, Globe, Key, ArrowRight, Database, History, RefreshCw, Sparkles, Bot, Cpu, CheckCircle2 } from 'lucide-react';
 
 interface DocumentationModalProps {
   isOpen: boolean;
@@ -21,15 +21,15 @@ export const DocumentationModal: React.FC<DocumentationModalProps> = ({ isOpen, 
   const [copiedApiHistory, setCopiedApiHistory] = useState(false);
   const [copiedApiDatabases, setCopiedApiDatabases] = useState(false);
   const [copiedApiHealth, setCopiedApiHealth] = useState(false);
-  const [apiSnippetLang, setApiSnippetLang] = useState<'curl' | 'node' | 'python'>('curl');
+  const [apiSnippetLang, setApiSnippetLang] = useState<'curl' | 'powershell' | 'node' | 'python'>('curl');
   const [aiScanTab, setAiScanTab] = useState<'gemini' | 'openai' | 'headers' | 'offline'>('gemini');
   const [customAiKey, setCustomAiKey] = useState('');
-  const [clientApiKey, setClientApiKey] = useState(() => {
-    return (typeof window !== 'undefined' ? localStorage.getItem('yachiru_api_key') : '') || '';
-  });
-  const [apiKeySaved, setApiKeySaved] = useState(false);
 
   useEffect(() => {
+    // Purge legacy client localStorage API key if present
+    if (typeof window !== 'undefined' && localStorage.getItem('yachiru_api_key')) {
+      localStorage.removeItem('yachiru_api_key');
+    }
     if (isOpen && initialTab) {
       setModalTab(initialTab);
     }
@@ -37,21 +37,8 @@ export const DocumentationModal: React.FC<DocumentationModalProps> = ({ isOpen, 
 
   if (!isOpen) return null;
 
-  const handleSaveClientApiKey = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (typeof window !== 'undefined') {
-      const trimmed = clientApiKey.trim();
-      if (trimmed) {
-        localStorage.setItem('yachiru_api_key', trimmed);
-      } else {
-        localStorage.removeItem('yachiru_api_key');
-      }
-      setApiKeySaved(true);
-      setTimeout(() => setApiKeySaved(false), 2500);
-    }
-  };
-
-  const activeKey = clientApiKey.trim() || 'your_strong_secret_api_key_here';
+  const apiBaseUrl = typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '${apiBaseUrl}';
+  const activeKey = '<ADMIN_PROVIDED_YACHIRU_API_KEY>';
 
   const grantSql = `
 -- Create read-only auditing user for Yachiru
@@ -72,7 +59,7 @@ GRANT SELECT ON target_db.* TO yachiru_readonly;
 
   const apiTestCurl = `
 # 1. Test connection to a live ClickHouse instance
-curl -X POST https://yachiru.id/api/clickhouse/test-connection \\
+curl -X POST ${apiBaseUrl}/api/clickhouse/test-connection \\
   -H "Content-Type: application/json" \\
   -H "x-api-key: ${activeKey}" \\
   -d '{
@@ -87,7 +74,7 @@ curl -X POST https://yachiru.id/api/clickhouse/test-connection \\
 
   const apiTestDemoCurl = `
 # 2. Test connection with built-in Mock Demo Cluster
-curl -X POST https://yachiru.id/api/clickhouse/test-connection \\
+curl -X POST ${apiBaseUrl}/api/clickhouse/test-connection \\
   -H "Content-Type: application/json" \\
   -H "x-api-key: ${activeKey}" \\
   -d '{
@@ -98,7 +85,7 @@ curl -X POST https://yachiru.id/api/clickhouse/test-connection \\
 
   const apiScanGeminiCurl = `
 # 3A. Run Full Audit with Google Gemini 3.7 Flash Agentic Synthesis
-curl -X POST https://yachiru.id/api/clickhouse/scan \\
+curl -X POST ${apiBaseUrl}/api/clickhouse/scan \\
   -H "Content-Type: application/json" \\
   -H "x-api-key: ${activeKey}" \\
   -d '{
@@ -120,7 +107,7 @@ curl -X POST https://yachiru.id/api/clickhouse/scan \\
 
   const apiScanOpenAiCurl = `
 # 3B. Run Full Audit with OpenAI GPT-4o Agentic Synthesis
-curl -X POST https://yachiru.id/api/clickhouse/scan \\
+curl -X POST ${apiBaseUrl}/api/clickhouse/scan \\
   -H "Content-Type: application/json" \\
   -H "x-api-key: ${activeKey}" \\
   -d '{
@@ -142,7 +129,7 @@ curl -X POST https://yachiru.id/api/clickhouse/scan \\
 
   const apiScanHeadersCurl = `
 # 3C. Configure AI Agent Brain & Keys via HTTP Headers
-curl -X POST https://yachiru.id/api/clickhouse/scan \\
+curl -X POST ${apiBaseUrl}/api/clickhouse/scan \\
   -H "Content-Type: application/json" \\
   -H "x-api-key: ${activeKey}" \\
   -H "x-ai-provider: openai" \\
@@ -163,7 +150,7 @@ curl -X POST https://yachiru.id/api/clickhouse/scan \\
 
   const apiScanOfflineCurl = `
 # 3D. 100% Deterministic Engine Only (Offline / Zero AI Keys Needed)
-curl -X POST https://yachiru.id/api/clickhouse/scan \\
+curl -X POST ${apiBaseUrl}/api/clickhouse/scan \\
   -H "Content-Type: application/json" \\
   -H "x-api-key: ${activeKey}" \\
   -d '{
@@ -181,7 +168,7 @@ curl -X POST https://yachiru.id/api/clickhouse/scan \\
 
   const apiDatabasesCurl = `
 # 4. Discover databases on a ClickHouse cluster
-curl -X POST https://yachiru.id/api/clickhouse/databases \\
+curl -X POST ${apiBaseUrl}/api/clickhouse/databases \\
   -H "Content-Type: application/json" \\
   -H "x-api-key: ${activeKey}" \\
   -d '{
@@ -195,19 +182,19 @@ curl -X POST https://yachiru.id/api/clickhouse/databases \\
 
   const apiHistoryCurl = `
 # 5. Retrieve saved audit scan history
-curl -X GET https://yachiru.id/api/history \\
+curl -X GET ${apiBaseUrl}/api/history \\
   -H "x-api-key: ${activeKey}"
 `.trim();
 
   const apiHealthCurl = `
 # 6. Service Health Check endpoint (Public, probe)
-curl -X GET https://yachiru.id/api/health
+curl -X GET ${apiBaseUrl}/api/health
 `.trim();
 
   const apiNodeSnippet = `
 // Node.js (v18+) Triggering ClickHouse Audit with OpenAI / Gemini Agentic Synthesis
 const runAuditScan = async () => {
-  const response = await fetch('https://yachiru.id/api/clickhouse/scan', {
+  const response = await fetch('${apiBaseUrl}/api/clickhouse/scan', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -244,7 +231,7 @@ runAuditScan();
 # Python (requests) ClickHouse Audit with OpenAI / Gemini Agentic Synthesis
 import requests
 
-url = "https://yachiru.id/api/clickhouse/scan"
+url = "${apiBaseUrl}/api/clickhouse/scan"
 headers = {
     "Content-Type": "application/json",
     "x-api-key": "${activeKey}"
@@ -272,6 +259,31 @@ report = response.json()
 print(f"Overall Grade: {report.get('overallGrade')} ({report.get('overallScore')}/100)")
 print("Executive Summary:", report.get("executiveSummary", {}).get("summary"))
 print("AI Findings Count:", len(report.get("findings", [])))
+`.trim();
+
+  const apiPowerShellSnippet = `
+# Windows PowerShell (Invoke-RestMethod) ClickHouse Audit
+$headers = @{
+  "Content-Type" = "application/json"
+  "x-api-key"    = "${activeKey}"
+}
+
+$body = @{
+  target = @{
+    host         = "clickhouse.internal.company.com"
+    port         = 8123
+    protocol     = "http"
+    user         = "yachiru_readonly"
+    password     = "StrongPassword123!"
+    database     = "analytics"
+    lookbackDays = 7
+  }
+  aiEnabled = $false
+} | ConvertTo-Json -Depth 5
+
+$response = Invoke-RestMethod -Uri "${apiBaseUrl}/api/clickhouse/scan" -Method Post -Headers $headers -Body $body
+Write-Host "Score: $($response.overallScore)/100 (Grade $($response.overallGrade))"
+Write-Host "Findings: $($response.findings.Count)"
 `.trim();
 
   const dockerRunCmd = `
@@ -527,36 +539,22 @@ docker compose up -d
                   </div>
                 </div>
 
-                {/* Browser Session API Key Manager */}
+                {/* Admin-Provisioned API Key Notice */}
                 <div className="pt-2 border-t border-slate-800/80 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-200">
-                      Client API Key (This Browser Session):
+                  <div className="flex items-center gap-2 text-slate-200">
+                    <Shield className="h-4 w-4 text-amber-400 shrink-0" />
+                    <span className="text-[11px] font-semibold">
+                      API Key Governance & Machine Authentication:
                     </span>
-                    {apiKeySaved && (
-                      <span className="text-[10px] text-emerald-400 flex items-center gap-1">
-                        <Check className="h-3 w-3" /> Saved to Browser
-                      </span>
-                    )}
                   </div>
-                  <form onSubmit={handleSaveClientApiKey} className="flex gap-2">
-                    <input
-                      type="password"
-                      placeholder="Enter your API key for this browser session..."
-                      value={clientApiKey}
-                      onChange={(e) => setClientApiKey(e.target.value)}
-                      className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:border-amber-500 focus:outline-none font-mono"
-                    />
-                    <button
-                      type="submit"
-                      className="rounded-lg bg-amber-500 hover:bg-amber-400 px-3 py-1.5 text-xs font-bold text-slate-950 transition-colors cursor-pointer"
-                    >
-                      Save Key
-                    </button>
-                  </form>
-                  <p className="text-[10px] text-slate-500">
-                    This key is stored locally in your browser's <code className="text-slate-400">localStorage</code> and will be sent automatically with each scan and connection test.
-                  </p>
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-[11px] text-slate-300 space-y-1.5">
+                    <p className="font-semibold text-amber-300">
+                      Machine API keys cannot be generated or stored by client browsers.
+                    </p>
+                    <p className="text-slate-400 leading-relaxed text-[11px]">
+                      To prevent unauthorized key exposure and maintain non-repudiation, API keys (<code className="text-amber-400">x-api-key</code>) are provisioned exclusively by System Administrators via server environment variables (<code className="text-amber-400">YACHIRU_API_KEY</code>). Client web sessions use signed-in Firebase Auth tokens with real-time Role-Based Access Control (RBAC).
+                    </p>
+                  </div>
                 </div>
               </div>
 
@@ -876,6 +874,14 @@ docker compose up -d
                       cURL
                     </button>
                     <button
+                      onClick={() => setApiSnippetLang('powershell')}
+                      className={`px-2 py-0.5 rounded font-medium transition-colors cursor-pointer ${
+                        apiSnippetLang === 'powershell' ? 'bg-amber-500/20 text-amber-300' : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      PowerShell
+                    </button>
+                    <button
                       onClick={() => setApiSnippetLang('node')}
                       className={`px-2 py-0.5 rounded font-medium transition-colors cursor-pointer ${
                         apiSnippetLang === 'node' ? 'bg-amber-500/20 text-amber-300' : 'text-slate-400 hover:text-slate-200'
@@ -894,10 +900,20 @@ docker compose up -d
                   </div>
                 </div>
 
+                {apiSnippetLang === 'curl' && (
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] text-slate-300 flex items-start gap-2">
+                    <span className="font-bold text-amber-400 shrink-0">Windows Note:</span>
+                    <span className="text-slate-400">
+                      In Windows CMD (<code className="text-amber-300">cmd.exe</code>), backslashes and single quotes cause <em className="text-amber-200">"The filename, directory name, or volume label syntax is incorrect"</em>. Use the <strong>PowerShell</strong> tab above or pass your JSON payload via <code className="text-amber-300">-d @body.json</code>.
+                    </span>
+                  </div>
+                )}
+
                 <div className="relative">
                   <pre className="p-4 rounded-xl bg-slate-950 font-mono text-[11px] text-amber-200 overflow-x-auto border border-slate-800">
                     <code>
                       {apiSnippetLang === 'curl' && apiTestCurl}
+                      {apiSnippetLang === 'powershell' && apiPowerShellSnippet}
                       {apiSnippetLang === 'node' && apiNodeSnippet}
                       {apiSnippetLang === 'python' && apiPythonSnippet}
                     </code>

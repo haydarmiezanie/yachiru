@@ -3,6 +3,7 @@ export type UserStatus = 'approved' | 'pending' | 'revoked' | 'rejected' | 'unkn
 
 export interface UserProfile {
   uid: string;
+  id?: string;
   email: string;
   displayName: string;
   photoURL?: string;

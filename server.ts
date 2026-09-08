@@ -126,6 +126,19 @@ app.use(
 app.use('/api', apiLimiter);
 app.use(express.json({ limit: '10mb' }));
 
+// Graceful JSON syntax error handler (catches malformed JSON payloads and returns structured JSON instead of HTML)
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  if (err instanceof SyntaxError && 'body' in err) {
+    logger.warn({ err: err.message, path: req.path, ip: req.ip }, 'Malformed JSON payload received');
+    return res.status(400).json({
+      error: 'Bad Request',
+      message: 'Invalid JSON payload. Ensure your request body is valid JSON with properly escaped quotes and matching braces.',
+      syntaxError: err.message,
+    });
+  }
+  next(err);
+});
+
 // Authentication Middleware (Enforces Firebase ID token & RBAC roles)
 // Roles: 'viewer' (read-only history), 'auditor' (scans & probes), 'admin' (destructive operations)
 const requireViewer = requireRole('viewer');
@@ -248,6 +261,37 @@ app.post('/api/clickhouse/test-connection', requireAuditor, async (req: Request,
     const error = err instanceof Error ? err : new Error(String(err));
     logger.error({ err: error }, 'Test connection failed');
     return res.status(500).json({ success: false, message: error.message || 'Connection test failed' });
+  }
+});
+
+// Discover Accessible Databases (Protected: Auditor role required + Zod Runtime Validation)
+app.post('/api/clickhouse/databases', requireAuditor, async (req: Request, res: Response) => {
+  const parsed = TestConnectionRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid connection parameters',
+      errors: parsed.error.format(),
+    });
+  }
+
+  try {
+    const client = new ClickHouseScannerClient(parsed.data);
+    const result = await client.testConnection();
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    return res.json({
+      success: true,
+      databases: result.databases || ['default'],
+      total: result.databases ? result.databases.length : 1,
+      version: result.version,
+      message: result.message,
+    });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error({ err: error }, 'Databases discovery failed');
+    return res.status(500).json({ success: false, message: error.message || 'Failed to retrieve databases' });
   }
 });
 
