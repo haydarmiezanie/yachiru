@@ -6,9 +6,10 @@ import { initializeApp, getApps, App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { logger } from '../logger.js';
+import { getRedisClient, isRedisConnected } from '../redisClient.js';
 
 export type UserRole = 'admin' | 'auditor' | 'viewer';
-export type UserStatus = 'approved' | 'pending' | 'revoked' | 'rejected';
+export type UserStatus = 'approved' | 'pending' | 'revoked' | 'rejected' | 'unknown';
 
 export interface AuthenticatedUser {
   uid: string;
@@ -98,13 +99,111 @@ export function getAdminFirestore(): ReturnType<typeof getFirestore> | null {
   }
 }
 
-// In-memory profile cache with 30-second TTL to avoid database hammering
+// Shared profile cache via Redis with local in-memory fallback
 interface CachedProfile {
   user: AuthenticatedUser;
   expiresAt: number;
 }
-const profileCache = new Map<string, CachedProfile>();
+const inMemoryProfileCache = new Map<string, CachedProfile>();
+const inMemoryStaleProfileCache = new Map<string, CachedProfile>();
 const CACHE_TTL_MS = 30 * 1000;
+const STALE_TTL_MS = 60 * 60 * 1000; // 1-hour grace fallback for transient Firestore timeouts
+
+/**
+ * Retrieves a cached user profile from Redis, falling back to local in-memory cache.
+ */
+export async function getCachedProfile(uid: string): Promise<AuthenticatedUser | null> {
+  if (isRedisConnected()) {
+    try {
+      const client = getRedisClient();
+      if (client) {
+        const raw = await client.get(`yachiru:profile:${uid}`);
+        if (raw) {
+          return JSON.parse(raw) as AuthenticatedUser;
+        }
+      }
+    } catch (err: any) {
+      logger.warn({ err: err?.message, uid }, 'Redis profile cache get failed, falling back to in-memory');
+    }
+  }
+
+  const cached = inMemoryProfileCache.get(uid);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.user;
+  }
+  return null;
+}
+
+/**
+ * Retrieves a stale cached profile to serve as grace fallback if Firestore is transiently unreachable.
+ */
+export async function getStaleGraceProfile(uid: string): Promise<AuthenticatedUser | null> {
+  if (isRedisConnected()) {
+    try {
+      const client = getRedisClient();
+      if (client) {
+        const raw = await client.get(`yachiru:profile:stale:${uid}`);
+        if (raw) {
+          const user = JSON.parse(raw) as AuthenticatedUser;
+          if (user && user.status === 'approved') {
+            return user;
+          }
+        }
+      }
+    } catch (err: any) {
+      logger.warn({ err: err?.message, uid }, 'Redis stale profile cache get failed');
+    }
+  }
+
+  const cached = inMemoryStaleProfileCache.get(uid);
+  if (cached && Date.now() < cached.expiresAt && cached.user.status === 'approved') {
+    return cached.user;
+  }
+  return null;
+}
+
+/**
+ * Stores a user profile in Redis cache (and in-memory fallback) with designated TTL.
+ */
+export async function setCachedProfile(uid: string, user: AuthenticatedUser, ttlMs: number): Promise<void> {
+  if (isRedisConnected()) {
+    try {
+      const client = getRedisClient();
+      if (client) {
+        await client.set(`yachiru:profile:${uid}`, JSON.stringify(user), 'PX', ttlMs);
+        if (user.status === 'approved') {
+          await client.set(`yachiru:profile:stale:${uid}`, JSON.stringify(user), 'PX', STALE_TTL_MS);
+        }
+      }
+    } catch (err: any) {
+      logger.warn({ err: err?.message, uid }, 'Redis profile cache set failed, falling back to in-memory');
+    }
+  }
+
+  inMemoryProfileCache.set(uid, { user, expiresAt: Date.now() + ttlMs });
+  if (user.status === 'approved') {
+    inMemoryStaleProfileCache.set(uid, { user, expiresAt: Date.now() + STALE_TTL_MS });
+  }
+}
+
+/**
+ * Helper to clear profile cache across Redis and local memory (primarily for unit tests).
+ */
+export async function clearProfileCache(): Promise<void> {
+  inMemoryProfileCache.clear();
+  inMemoryStaleProfileCache.clear();
+  if (isRedisConnected()) {
+    try {
+      const client = getRedisClient();
+      if (client) {
+        const keys = await client.keys('yachiru:profile:*');
+        if (keys.length > 0) {
+          await client.del(...keys);
+        }
+      }
+    } catch {}
+  }
+}
 
 /**
  * Helper to parse Firestore REST API response fields into a standard JavaScript object
@@ -130,9 +229,9 @@ let firestoreAdminAvailable: boolean | null = null;
  * Retrieves the user profile, role, and approval status from Firestore.
  * Supports:
  * 1. Super Admin instant override
- * 2. In-memory TTL cache
- * 3. Firestore Admin SDK (with circuit breaker to prevent repeated 2s+ gRPC timeouts when IAM credentials are not present)
- * 4. Firestore REST API fallback (authenticated via the user's verified ID token with strict timeout)
+ * 2. Distributed Redis / In-memory TTL cache with stale-grace fallback
+ * 3. Firestore Admin SDK (with circuit breaker)
+ * 4. High-performance parallel Firestore REST API resolution (2a-2d via Promise.allSettled)
  */
 export async function fetchUserProfile(uid: string, idToken: string, email: string): Promise<AuthenticatedUser> {
   const normalizedEmail = (email || '').toLowerCase().trim();
@@ -149,10 +248,10 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
     };
   }
 
-  // Check cache
-  const cached = profileCache.get(uid);
-  if (cached && Date.now() < cached.expiresAt) {
-    return cached.user;
+  // Check cache (Redis or in-memory)
+  const cached = await getCachedProfile(uid);
+  if (cached) {
+    return cached;
   }
 
   // 1. Try Firestore Admin SDK (if circuit breaker has not marked it unavailable)
@@ -178,7 +277,7 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
           authMethod: 'firebase_token',
         };
         if (user.status === 'approved') {
-          profileCache.set(uid, { user, expiresAt: Date.now() + CACHE_TTL_MS });
+          await setCachedProfile(uid, user, CACHE_TTL_MS);
         }
         return user;
       }
@@ -192,9 +291,8 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
     }
   }
 
-  // 2. Comprehensive Firestore REST API resolution with user's verified ID token
+  // 2. High-Performance Parallel Firestore REST API resolution with user's verified ID token
   const dbSegment = firestoreDatabaseId ? firestoreDatabaseId : '(default)';
-  const candidateProfiles: AuthenticatedUser[] = [];
 
   const parseUserDoc = (fields: any, fallbackUid: string): AuthenticatedUser | null => {
     if (!fields) return null;
@@ -211,59 +309,72 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
   };
 
   // 2a. Direct doc lookup by UID
-  try {
+  const lookupDirectUid = async (): Promise<AuthenticatedUser[]> => {
     const userDocUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/${uid}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3500);
-    const resp = await fetch(userDocUrl, {
-      headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (resp.ok) {
-      const json = await resp.json();
-      const prof = parseUserDoc(json.fields, uid);
-      if (prof) candidateProfiles.push(prof);
-    } else {
-      logger.debug({ status: resp.status, uid }, 'Direct UID user document lookup status');
+    try {
+      const resp = await fetch(userDocUrl, {
+        headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        const prof = parseUserDoc(json.fields, uid);
+        return prof ? [prof] : [];
+      }
+      if (resp.status === 404 || resp.status === 403) {
+        return [];
+      }
+      if (resp.status >= 500) {
+        throw new Error(`Direct UID lookup returned HTTP ${resp.status}`);
+      }
+      return [];
+    } finally {
+      clearTimeout(timeoutId);
     }
-  } catch (err: any) {
-    logger.debug({ err: err.message, uid }, 'Direct UID user document lookup error');
-  }
+  };
 
   // 2b. Direct doc lookup by invite ID (derived from pre-whitelisted email)
-  if (normalizedEmail) {
+  const lookupInviteDoc = async (): Promise<AuthenticatedUser[]> => {
+    if (!normalizedEmail) return [];
+    const cleanEmailKey = normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_');
+    const inviteDocUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/invite_${cleanEmailKey}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
     try {
-      const cleanEmailKey = normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_');
-      const inviteDocUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/invite_${cleanEmailKey}`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
       const resp = await fetch(inviteDocUrl, {
         headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
-
       if (resp.ok) {
         const json = await resp.json();
         const prof = parseUserDoc(json.fields, uid);
         if (prof) {
           logger.info({ email: normalizedEmail, role: prof.role, status: prof.status }, 'Found pre-whitelisted invite document');
-          candidateProfiles.push(prof);
+          return [prof];
         }
+        return [];
       }
-    } catch (err: any) {
-      logger.debug({ err: err.message, email: normalizedEmail }, 'Invite document lookup error');
+      if (resp.status === 404 || resp.status === 403) {
+        return [];
+      }
+      if (resp.status >= 500) {
+        throw new Error(`Invite doc lookup returned HTTP ${resp.status}`);
+      }
+      return [];
+    } finally {
+      clearTimeout(timeoutId);
     }
-  }
+  };
 
-  // 2c. Structured query across users collection by email (catches any documents associated with this email)
-  if (normalizedEmail && !candidateProfiles.some((p) => p.status === 'approved')) {
+  // 2c. Structured query across users collection by email
+  const lookupUsersByEmail = async (): Promise<AuthenticatedUser[]> => {
+    if (!normalizedEmail) return [];
+    const queryUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents:runQuery`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
     try {
-      const queryUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents:runQuery`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
       const queryResp = await fetch(queryUrl, {
         method: 'POST',
         headers: {
@@ -286,80 +397,97 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
         }),
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
-
       if (queryResp.ok) {
         const results = await queryResp.json();
+        const profiles: AuthenticatedUser[] = [];
         if (Array.isArray(results)) {
           for (const item of results) {
             if (item.document?.fields) {
               const prof = parseUserDoc(item.document.fields, uid);
-              if (prof) candidateProfiles.push(prof);
+              if (prof) profiles.push(prof);
             }
           }
         }
+        return profiles;
       }
-    } catch (err: any) {
-      logger.debug({ err: err.message, email: normalizedEmail }, 'Firestore runQuery by email error');
+      if (queryResp.status === 404 || queryResp.status === 403) {
+        return [];
+      }
+      if (queryResp.status >= 500) {
+        throw new Error(`Users query returned HTTP ${queryResp.status}`);
+      }
+      return [];
+    } finally {
+      clearTimeout(timeoutId);
     }
-  }
+  };
 
-  // 2d. Structured query on access_requests collection (detects if an admin approved an access request)
-  if (normalizedEmail && !candidateProfiles.some((p) => p.status === 'approved')) {
+  // 2d. Direct doc lookup on access_requests collection by UID
+  const lookupAccessRequests = async (): Promise<AuthenticatedUser[]> => {
+    const reqDocUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/access_requests/${uid}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
     try {
-      const queryUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents:runQuery`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-      const queryResp = await fetch(queryUrl, {
-        method: 'POST',
+      const resp = await fetch(reqDocUrl, {
         headers: {
           Authorization: `Bearer ${idToken}`,
-          'Content-Type': 'application/json',
           Accept: 'application/json',
         },
-        body: JSON.stringify({
-          structuredQuery: {
-            from: [{ collectionId: 'access_requests' }],
-            where: {
-              fieldFilter: {
-                field: { fieldPath: 'email' },
-                op: 'EQUAL',
-                value: { stringValue: normalizedEmail },
-              },
-            },
-            limit: 5,
-          },
-        }),
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
-
-      if (queryResp.ok) {
-        const results = await queryResp.json();
-        if (Array.isArray(results)) {
-          for (const item of results) {
-            if (item.document?.fields) {
-              const fields = parseFirestoreFields(item.document.fields);
-              if (fields.status === 'approved') {
-                candidateProfiles.push({
-                  uid,
-                  email: normalizedEmail,
-                  role: 'auditor', // access requests grant auditor by default
-                  status: 'approved',
-                  displayName: fields.displayName || undefined,
-                  authMethod: 'firebase_token',
-                });
-              }
-            }
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json?.fields) {
+          const fields = parseFirestoreFields(json.fields);
+          if (fields.status === 'approved') {
+            return [{
+              uid,
+              email: normalizedEmail,
+              role: 'auditor', // access requests grant auditor by default
+              status: 'approved',
+              displayName: fields.displayName || undefined,
+              authMethod: 'firebase_token',
+            }];
           }
         }
+        return [];
       }
-    } catch (err: any) {
-      logger.debug({ err: err.message, email: normalizedEmail }, 'Firestore runQuery access_requests error');
+      if (resp.status === 404 || resp.status === 403) {
+        return [];
+      }
+      if (resp.status >= 500) {
+        throw new Error(`Access requests lookup returned HTTP ${resp.status}`);
+      }
+      return [];
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  // Run all 4 lookups simultaneously in parallel via Promise.allSettled
+  const lookupResults = await Promise.allSettled([
+    lookupDirectUid(),
+    lookupInviteDoc(),
+    lookupUsersByEmail(),
+    lookupAccessRequests(),
+  ]);
+
+  const candidateProfiles: AuthenticatedUser[] = [];
+  let hasLookupFailure = false;
+
+  for (const res of lookupResults) {
+    if (res.status === 'fulfilled') {
+      candidateProfiles.push(...res.value);
+    } else {
+      hasLookupFailure = true;
+      logger.debug(
+        { err: res.reason?.message, uid, email: normalizedEmail },
+        'Firestore profile lookup step failed or timed out'
+      );
     }
   }
 
-  // Evaluate final role and status across candidate profiles:
+  // Evaluate candidate profiles:
   // If ANY record says approved, prioritize approved!
   const approvedCandidate = candidateProfiles.find((p) => p.status === 'approved');
   let finalUser: AuthenticatedUser;
@@ -387,8 +515,8 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
       authMethod: 'firebase_token',
     };
 
-    // Cache approved profiles for full TTL
-    profileCache.set(uid, { user: finalUser, expiresAt: Date.now() + CACHE_TTL_MS });
+    // Cache approved profile for full 30s TTL + 1-hour stale grace
+    await setCachedProfile(uid, finalUser, CACHE_TTL_MS);
 
     // Sync to users/{uid} in background so future reads are instantaneous
     const syncUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${dbSegment}/documents/users/${uid}`;
@@ -424,20 +552,44 @@ export async function fetchUserProfile(uid: string, idToken: string, email: stri
       displayName: revokedCandidate.displayName,
       authMethod: 'firebase_token',
     };
-    profileCache.set(uid, { user: finalUser, expiresAt: Date.now() + 5000 });
+    await setCachedProfile(uid, finalUser, 5000);
     return finalUser;
   }
 
-  // Default fallback for pending or unprovisioned user: viewer + pending (cache only for 3s to allow instant approval pickup)
-  const defaultUser: AuthenticatedUser = {
+  // If ALL lookups succeeded without error and no approved/revoked candidate was found:
+  // This account is genuinely confirmed as not approved (pending).
+  if (!hasLookupFailure) {
+    const defaultUser: AuthenticatedUser = {
+      uid,
+      email: normalizedEmail,
+      role: 'viewer',
+      status: 'pending',
+      authMethod: 'firebase_token',
+    };
+    await setCachedProfile(uid, defaultUser, 3000);
+    return defaultUser;
+  }
+
+  // If one or more lookups failed or timed out:
+  // Check if there is an existing stale cached approved profile to use as grace fallback
+  const staleGraceUser = await getStaleGraceProfile(uid);
+  if (staleGraceUser && staleGraceUser.status === 'approved') {
+    logger.info(
+      { uid, email: normalizedEmail },
+      'Transient Firestore lookup failure: using stale cached approved profile as grace fallback'
+    );
+    return staleGraceUser;
+  }
+
+  // No stale grace profile available and lookups were inconclusive due to timeout/error:
+  // Return 'unknown' status so requireRole produces 503 PROFILE_CHECK_TRANSIENT instead of 403 ACCOUNT_NOT_APPROVED
+  return {
     uid,
     email: normalizedEmail,
     role: 'viewer',
-    status: 'pending',
+    status: 'unknown',
     authMethod: 'firebase_token',
   };
-  profileCache.set(uid, { user: defaultUser, expiresAt: Date.now() + 3000 });
-  return defaultUser;
 }
 
 /**
@@ -498,6 +650,16 @@ export function matchesAllowedApiKey(candidate: string, allowedKeys: string[]): 
   return matched;
 }
 
+export const authVerifier = {
+  verifyIdToken: async (token: string) => {
+    return getAuth(adminApp).verifyIdToken(token);
+  },
+};
+
+export const profileFetcher = {
+  fetchUserProfile,
+};
+
 /**
  * Core RBAC Middleware enforcing minimum role ('viewer' | 'auditor' | 'admin')
  * and strict user approval status on the server.
@@ -512,7 +674,7 @@ export function requireRole(minRole: UserRole = 'viewer') {
     if (bearerToken && bearerToken.split('.').length === 3) {
       let decoded: any;
       try {
-        decoded = await getAuth(adminApp).verifyIdToken(bearerToken);
+        decoded = await authVerifier.verifyIdToken(bearerToken);
       } catch (tokenErr: any) {
         logger.warn({ err: tokenErr.message, path: req.path }, 'Firebase ID token verification failed');
         return res.status(401).json({
@@ -524,17 +686,25 @@ export function requireRole(minRole: UserRole = 'viewer') {
 
       let profile: AuthenticatedUser;
       try {
-        profile = await fetchUserProfile(decoded.uid, bearerToken, decoded.email || '');
+        profile = await profileFetcher.fetchUserProfile(decoded.uid, bearerToken, decoded.email || '');
       } catch (profileErr: any) {
         logger.error({ err: profileErr.message, uid: decoded.uid }, 'Error fetching user profile from database');
-        // Graceful fallback: do not fail authentication, treat as viewer pending
-        profile = {
-          uid: decoded.uid,
-          email: (decoded.email || '').toLowerCase().trim(),
-          role: 'viewer',
-          status: 'pending',
-          authMethod: 'firebase_token',
-        };
+        return res.status(503).json({
+          error: 'Could not verify account status due to temporary network/database outage, please retry.',
+          code: 'PROFILE_CHECK_TRANSIENT',
+        });
+      }
+
+      // Check if status could not be verified due to transient network/timeout issues
+      if (profile.status === 'unknown') {
+        logger.warn(
+          { uid: decoded.uid, email: decoded.email, path: req.path },
+          'Account status verification transiently inconclusive'
+        );
+        return res.status(503).json({
+          error: 'Could not verify account status due to temporary network/database outage, please retry.',
+          code: 'PROFILE_CHECK_TRANSIENT',
+        });
       }
 
       // Strict Status Check: user must be 'approved'

@@ -154,8 +154,14 @@ export class ClickHouseScannerClient {
       }
     }
 
-    // Auto-select https if port is 8443, 443, or 9440 unless explicitly http
-    if ((port === 8443 || port === 443 || port === 9440) && !this.target.protocol) {
+    // Auto-detect and upgrade ClickHouse Cloud clusters (*.clickhouse.cloud)
+    if (rawHost.toLowerCase().includes('.clickhouse.cloud')) {
+      protocol = 'https';
+      if (port === 8123 || !port) {
+        port = 8443;
+      }
+    } else if ((port === 8443 || port === 443 || port === 9440) && !this.target.protocol) {
+      // Auto-select https if port is 8443, 443, or 9440 unless explicitly http
       protocol = 'https';
     }
 
@@ -243,9 +249,15 @@ export class ClickHouseScannerClient {
       fullText.includes('EAI_AGAIN');
 
     if (isTimeout) {
+      if (host.toLowerCase().includes('clickhouse.cloud')) {
+        return `Connection to ClickHouse Cloud at ${baseUrl} timed out. Target is unreachable. If connecting from a self-hosted server (such as yachiru.id), please ensure your server's outbound public IP is added to the ClickHouse Cloud IP Access List in your Cloud Console.`;
+      }
       return `Connection to ClickHouse at ${baseUrl} timed out. Target is unreachable. If ClickHouse is behind a firewall/VPN, check network routing or use a Demo Cluster.`;
     }
     if (isRefused) {
+      if (host.toLowerCase().includes('clickhouse.cloud')) {
+        return `Connection refused at ${baseUrl}. ClickHouse Cloud requires HTTPS on port 8443 (HTTP on port 8123 is not supported). Please verify port 8443 with HTTPS is configured.`;
+      }
       return `Connection refused at ${baseUrl}. No ClickHouse server is responding at ${host}:${port}. If you don't have a live ClickHouse instance running locally, select one of the built-in Demo Clusters (e.g. Apex E-commerce or Nexus IoT) to explore.`;
     }
     if (isNotFound) {

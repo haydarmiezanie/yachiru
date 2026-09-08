@@ -57,8 +57,16 @@ service cloud.firestore {
 
     // Access Requests Collection
     match /access_requests/{requestId} {
-      allow read: if isAdmin() || (isAuthenticated() && resource.data.uid == request.auth.uid);
-      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow read: if isAdmin() || (isAuthenticated() && (
+        requestId == request.auth.uid ||
+        resource.data.uid == request.auth.uid ||
+        (request.auth.token.email != null && resource.data.email == request.auth.token.email)
+      ));
+      allow create: if isAuthenticated() && (
+        requestId == request.auth.uid ||
+        request.resource.data.uid == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.email == request.auth.token.email)
+      );
       allow update, delete: if isAdmin();
     }
 

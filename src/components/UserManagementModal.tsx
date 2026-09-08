@@ -79,7 +79,32 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
     };
   }, [isOpen]);
 
-  if (!isOpen) return null;
+  // Deduplicate and consolidate users by email (prioritize approved status and highest role)
+  const consolidatedUsers = React.useMemo(() => {
+    const map = new Map<string, UserProfile>();
+    for (const u of users) {
+      const emailKey = (u.email || '').toLowerCase().trim();
+      if (!emailKey) continue;
+      const existing = map.get(emailKey);
+      if (!existing) {
+        map.set(emailKey, u);
+      } else {
+        const isApproved = existing.status === 'approved' || u.status === 'approved';
+        const roleOrder: Record<UserRole, number> = { admin: 3, auditor: 2, viewer: 1 };
+        const highestRole = (roleOrder[existing.role] || 1) >= (roleOrder[u.role] || 1) ? existing.role : u.role;
+        const preferredUid = !u.uid.startsWith('invite_') ? u.uid : existing.uid;
+        map.set(emailKey, {
+          ...existing,
+          uid: preferredUid,
+          status: isApproved ? 'approved' : existing.status,
+          role: highestRole,
+          displayName: existing.displayName || u.displayName,
+          lastLoginAt: existing.lastLoginAt !== 'Never logged in' ? existing.lastLoginAt : u.lastLoginAt,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [users]);
 
   const handleUpdateStatus = async (uid: string, status: UserStatus) => {
     try {
@@ -191,32 +216,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({ isOpen
     }
   };
 
-  // Deduplicate and consolidate users by email (prioritize approved status and highest role)
-  const consolidatedUsers = React.useMemo(() => {
-    const map = new Map<string, UserProfile>();
-    for (const u of users) {
-      const emailKey = (u.email || '').toLowerCase().trim();
-      if (!emailKey) continue;
-      const existing = map.get(emailKey);
-      if (!existing) {
-        map.set(emailKey, u);
-      } else {
-        const isApproved = existing.status === 'approved' || u.status === 'approved';
-        const roleOrder: Record<UserRole, number> = { admin: 3, auditor: 2, viewer: 1 };
-        const highestRole = (roleOrder[existing.role] || 1) >= (roleOrder[u.role] || 1) ? existing.role : u.role;
-        const preferredUid = !u.uid.startsWith('invite_') ? u.uid : existing.uid;
-        map.set(emailKey, {
-          ...existing,
-          uid: preferredUid,
-          status: isApproved ? 'approved' : existing.status,
-          role: highestRole,
-          displayName: existing.displayName || u.displayName,
-          lastLoginAt: existing.lastLoginAt !== 'Never logged in' ? existing.lastLoginAt : u.lastLoginAt,
-        });
-      }
-    }
-    return Array.from(map.values());
-  }, [users]);
+  if (!isOpen) return null;
 
   const filteredUsers = consolidatedUsers.filter(
     (u) =>

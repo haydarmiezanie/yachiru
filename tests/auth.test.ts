@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
+import * as adminAuth from 'firebase-admin/auth';
 import { app } from '../server.js';
 import * as rbacModule from '../server/auth/rbacMiddleware.js';
 
@@ -158,7 +159,7 @@ describe('Auth Middleware & Protected API Endpoints Integration Tests', () => {
 
     it('denies access when authenticated user has pending or rejected status', async () => {
       // Mock fetchUserProfile to return an unapproved account
-      vi.spyOn(rbacModule, 'fetchUserProfile').mockResolvedValueOnce({
+      vi.spyOn(rbacModule.profileFetcher, 'fetchUserProfile').mockResolvedValueOnce({
         uid: 'pending-user-1',
         email: 'pending@example.com',
         role: 'auditor',
@@ -206,6 +207,124 @@ describe('Auth Middleware & Protected API Endpoints Integration Tests', () => {
         role: 'viewer',
         status: 'approved',
         authMethod: 'anonymous_dev',
+      });
+    });
+  });
+
+  describe('Profile Cache & Transient Failure Isolation (503 vs 403)', () => {
+    beforeEach(async () => {
+      await rbacModule.clearProfileCache();
+    });
+
+    it('stores and retrieves profiles from cache with designated TTL and stale-grace copy', async () => {
+      const mockUser: rbacModule.AuthenticatedUser = {
+        uid: 'user-cache-123',
+        email: 'cached@example.com',
+        role: 'auditor',
+        status: 'approved',
+        displayName: 'Cached Auditor',
+        authMethod: 'firebase_token',
+      };
+
+      await rbacModule.setCachedProfile('user-cache-123', mockUser, 10000);
+      const retrieved = await rbacModule.getCachedProfile('user-cache-123');
+      expect(retrieved).toEqual(mockUser);
+
+      const staleGrace = await rbacModule.getStaleGraceProfile('user-cache-123');
+      expect(staleGrace).toEqual(mockUser);
+
+      await rbacModule.clearProfileCache();
+      const afterClear = await rbacModule.getCachedProfile('user-cache-123');
+      expect(afterClear).toBeNull();
+    });
+
+    it('returns 503 PROFILE_CHECK_TRANSIENT when status verification is inconclusive (status: unknown)', async () => {
+      vi.spyOn(rbacModule.authVerifier, 'verifyIdToken').mockResolvedValueOnce({
+        uid: 'transient-user-1',
+        email: 'transient@example.com',
+      } as any);
+
+      vi.spyOn(rbacModule.profileFetcher, 'fetchUserProfile').mockResolvedValueOnce({
+        uid: 'transient-user-1',
+        email: 'transient@example.com',
+        role: 'viewer',
+        status: 'unknown',
+        authMethod: 'firebase_token',
+      });
+
+      const res = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', 'Bearer dummy.token.jwt');
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('PROFILE_CHECK_TRANSIENT');
+      expect(res.body.error).toContain('retry');
+    });
+
+    it('returns 503 PROFILE_CHECK_TRANSIENT when fetchUserProfile throws an unexpected exception', async () => {
+      vi.spyOn(rbacModule.authVerifier, 'verifyIdToken').mockResolvedValueOnce({
+        uid: 'error-user-1',
+        email: 'error@example.com',
+      } as any);
+
+      vi.spyOn(rbacModule.profileFetcher, 'fetchUserProfile').mockRejectedValueOnce(
+        new Error('Upstream database unreachable')
+      );
+
+      const res = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', 'Bearer dummy.token.jwt');
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('PROFILE_CHECK_TRANSIENT');
+    });
+
+    it('strictly preserves 403 ACCOUNT_NOT_APPROVED when user is confirmed pending or rejected', async () => {
+      vi.spyOn(rbacModule.authVerifier, 'verifyIdToken').mockResolvedValueOnce({
+        uid: 'pending-user-2',
+        email: 'pending@example.com',
+      } as any);
+
+      vi.spyOn(rbacModule.profileFetcher, 'fetchUserProfile').mockResolvedValueOnce({
+        uid: 'pending-user-2',
+        email: 'pending@example.com',
+        role: 'viewer',
+        status: 'pending',
+        authMethod: 'firebase_token',
+      });
+
+      const res = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', 'Bearer dummy.token.jwt');
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('ACCOUNT_NOT_APPROVED');
+      expect(res.body.status).toBe('pending');
+    });
+
+    it('grants approved users access to role-gated endpoints with correct profile', async () => {
+      vi.spyOn(rbacModule.authVerifier, 'verifyIdToken').mockResolvedValueOnce({
+        uid: 'approved-user-1',
+        email: 'approved@example.com',
+      } as any);
+
+      vi.spyOn(rbacModule.profileFetcher, 'fetchUserProfile').mockResolvedValueOnce({
+        uid: 'approved-user-1',
+        email: 'approved@example.com',
+        role: 'auditor',
+        status: 'approved',
+        authMethod: 'firebase_token',
+      });
+
+      const res = await request(app)
+        .get('/api/auth/me')
+        .set('Authorization', 'Bearer dummy.token.jwt');
+
+      expect(res.status).toBe(200);
+      expect(res.body.user).toMatchObject({
+        uid: 'approved-user-1',
+        role: 'auditor',
+        status: 'approved',
       });
     });
   });

@@ -248,7 +248,32 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
               <input
                 type="text"
                 value={target.host}
-                onChange={(e) => setTarget({ ...target, host: e.target.value.trim() })}
+                onChange={(e) => {
+                  let val = e.target.value.trim();
+                  let newProtocol = target.protocol;
+                  let newPort = target.port;
+
+                  if (val.startsWith('https://')) {
+                    newProtocol = 'https';
+                    val = val.replace(/^https:\/\//i, '');
+                  } else if (val.startsWith('http://')) {
+                    val = val.replace(/^http:\/\//i, '');
+                  }
+
+                  if (val.toLowerCase().includes('.clickhouse.cloud')) {
+                    newProtocol = 'https';
+                    if (newPort === 8123 || !newPort) {
+                      newPort = 8443;
+                    }
+                  }
+
+                  setTarget({
+                    ...target,
+                    host: val,
+                    protocol: newProtocol,
+                    port: newPort,
+                  });
+                }}
                 placeholder="e.g. 192.168.1.50 or db.mycompany.internal"
                 className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs text-slate-200 focus:border-amber-500 focus:outline-none font-mono"
               />

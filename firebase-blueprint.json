@@ -69,8 +69,8 @@
       "write": "isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.uid)"
     },
     "access_requests": {
-      "read": "isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.uid)",
-      "create": "isAuthenticated() && request.auth.uid == request.resource.data.uid",
+      "read": "isAdmin() || (isAuthenticated() && (request.auth.uid == requestId || request.auth.uid == resource.data.uid || request.auth.token.email == resource.data.email))",
+      "create": "isAuthenticated() && (request.auth.uid == requestId || request.auth.uid == request.resource.data.uid || request.auth.token.email == request.resource.data.email)",
       "update": "isAdmin()",
       "delete": "isAdmin()"
     },
