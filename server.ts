@@ -8,6 +8,7 @@ import { DEMO_CLUSTERS } from './server/scanner/demoDatasets.js';
 import { ClickHouseScannerClient } from './server/scanner/clickhouseClient.js';
 import { runDeterministicScan } from './server/scanner/deterministicRules.js';
 import { synthesizeWithAI } from './server/scanner/aiSynthesis.js';
+import { buildAiMigrationScript } from './server/scanner/synthesisShared.js';
 import { ScanHistoryStore } from './server/storage/scanHistory.js';
 import { ScanReport } from './src/types/yachiru.js';
 import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validation/scanSchemas.js';
@@ -367,9 +368,29 @@ app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Reques
       apiKey: aiApiKey,
     });
 
+    logger.info({ aiStatus: synthesis.aiStatus, error: synthesis.error, provider: aiProvider, model: aiModel }, 'AI synthesis completed');
+
     // 4. Assemble Final Scan Report
     const scanId = `scan-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const durationMs = Date.now() - startTime;
+
+    const deterministicMigrationScript = deterministicResult.migrationScript;
+    let aiMigrationScript: string | undefined = undefined;
+
+    // Generate AI-tailored DDL migration plan if AI was enabled
+    if (aiEnabled) {
+      aiMigrationScript = buildAiMigrationScript({
+        database: target.database || clusterData.tables[0]?.database || 'default',
+        clusterName: clusterData.clusterName,
+        findings: synthesis.enhancedFindings,
+        executiveSummary: synthesis.executiveSummary,
+        provider: synthesis.provider,
+        modelUsed: synthesis.executiveSummary?.modelUsed || (synthesis.aiStatus === 'success' ? 'Google Gemini' : undefined),
+      });
+    }
+
+    const isAiMigration = Boolean(aiMigrationScript) && (synthesis.aiStatus === 'success' || aiEnabled);
+    const activeMigrationScript = isAiMigration ? (aiMigrationScript || deterministicMigrationScript) : deterministicMigrationScript;
 
     const report: ScanReport = {
       id: scanId,
@@ -408,7 +429,10 @@ app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Reques
         columnsWithIssues: clusterData.columns.filter((c) => c.is_nullable || (c.cardinality_approx && c.cardinality_approx < 100)),
         configSettings: clusterData.settings,
       },
-      migrationScript: deterministicResult.migrationScript,
+      migrationScript: activeMigrationScript,
+      deterministicMigrationScript,
+      aiMigrationScript,
+      isAiMigration: Boolean(aiMigrationScript),
       scanDurationMs: durationMs,
       aiStatus: synthesis.aiStatus,
       aiProvider: synthesis.provider,

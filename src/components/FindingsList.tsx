@@ -28,8 +28,11 @@ export const FindingsList: React.FC<FindingsListProps> = ({
   onSelectDimension,
 }) => {
   const [severityFilter, setSeverityFilter] = useState<FindingSeverity | 'all'>('all');
+  const [onlyAiFilter, setOnlyAiFilter] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const aiAnalyzedCount = findings.filter((f) => Boolean(f.aiInsight)).length;
 
   const handleCopySql = (id: string, sql: string) => {
     navigator.clipboard.writeText(sql);
@@ -41,6 +44,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({
   const filteredFindings = findings.filter((f) => {
     if (selectedDimension !== 'all' && f.dimension !== selectedDimension) return false;
     if (severityFilter !== 'all' && f.severity !== severityFilter) return false;
+    if (onlyAiFilter && !f.aiInsight) return false;
     if (searchQuery.trim() !== '') {
       const q = searchQuery.toLowerCase();
       const matchTitle = f.title.toLowerCase().includes(q);
@@ -145,6 +149,22 @@ export const FindingsList: React.FC<FindingsListProps> = ({
               </button>
             );
           })}
+
+          {/* AI Insights Filter Toggle */}
+          {aiAnalyzedCount > 0 && (
+            <button
+              onClick={() => setOnlyAiFilter(!onlyAiFilter)}
+              className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 font-medium transition-all whitespace-nowrap ${
+                onlyAiFilter
+                  ? 'bg-purple-600 text-white font-bold shadow'
+                  : 'text-purple-300 hover:text-purple-100 bg-purple-950/40 border border-purple-500/30'
+              }`}
+              title="Filter findings analyzed with deep AI reasoning"
+            >
+              <Sparkles className="h-3 w-3 text-purple-400" />
+              <span>AI Enriched ({aiAnalyzedCount}/{findings.length})</span>
+            </button>
+          )}
         </div>
 
         {/* Dimension Filter Dropdown */}
@@ -197,6 +217,12 @@ export const FindingsList: React.FC<FindingsListProps> = ({
                       <span className="flex items-center gap-1 rounded bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 text-[11px] font-mono text-amber-300">
                         <Database className="h-3 w-3" />
                         {finding.tableName}
+                      </span>
+                    )}
+                    {finding.aiInsight && (
+                      <span className="flex items-center gap-1 rounded bg-purple-500/10 border border-purple-500/30 px-2 py-0.5 text-[11px] font-medium text-purple-300">
+                        <Sparkles className="h-3 w-3 text-purple-400" />
+                        AI Enhanced
                       </span>
                     )}
                   </div>

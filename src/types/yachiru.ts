@@ -116,6 +116,9 @@ export interface ScanReport {
     configSettings: any[];
   };
   migrationScript: string;
+  deterministicMigrationScript?: string;
+  aiMigrationScript?: string;
+  isAiMigration?: boolean;
   scanDurationMs: number;
   aiStatus: 'success' | 'fallback' | 'disabled';
   aiProvider?: 'gemini' | 'openai';

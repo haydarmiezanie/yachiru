@@ -65,9 +65,14 @@ Your job is to provide actionable, concrete, and deep technical ClickHouse optim
 Always reference specific table names, column types, settings, and safe SQL statements from the provided scan data.
 You MUST output valid JSON conforming strictly to the requested schema.`;
 
+  const findingIdsList = structuredPayload.findings.map((f) => f.id).join(', ');
+  const totalFindingsCount = structuredPayload.findings.length;
+
   const userPrompt = `Analyze the following deterministic ClickHouse health scan results for database "${databaseName}" on cluster "${clusterName}".
 
-Provide a comprehensive, high-value AI synthesis in valid JSON format:
+Provide a comprehensive, high-value AI synthesis in valid JSON format.
+CRITICAL REQUIREMENT: The "findingEnrichments" array MUST include an entry for EVERY SINGLE finding from the scan payload (exactly ${totalFindingsCount} items for IDs: ${findingIdsList}). DO NOT truncate, summarize, or omit any finding!
+
 {
   "executiveOverview": "2-3 structured paragraphs evaluating cluster health, calling out specific table names, partition health, and query patterns.",
   "topRisk": "The single most critical architectural or stability risk.",
@@ -75,7 +80,7 @@ Provide a comprehensive, high-value AI synthesis in valid JSON format:
   "strategicFixes": ["2-4 major structural upgrades like partition redesign, skip indexes, materialized views, or TTL tiering"],
   "findingEnrichments": [
     {
-      "id": "finding ID matching the payload",
+      "id": "finding ID matching the payload (e.g. ${structuredPayload.findings[0]?.id || 'FND-001'})",
       "rank": 1,
       "effort": "Low" | "Medium" | "High",
       "impact": "Low" | "Medium" | "High" | "Critical",

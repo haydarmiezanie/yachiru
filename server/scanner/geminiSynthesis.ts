@@ -72,6 +72,9 @@ export async function synthesizeWithGemini(
 
     const structuredPayload = createStructuredScanPayload(scanResult, databaseName, clusterName);
 
+    const findingIdsList = structuredPayload.findings.map((f) => f.id).join(', ');
+    const totalFindingsCount = structuredPayload.findings.length;
+
     const prompt = `You are Yachiru's senior ClickHouse Database Architect & Optimization Specialist.
 Analyze the following deterministic ClickHouse health scan results for database "${databaseName}" on cluster "${clusterName}".
 
@@ -80,13 +83,15 @@ Provide a comprehensive, high-value AI synthesis:
 2. topRisk: The single most critical architectural or stability risk.
 3. quickWins: 3-5 concrete, actionable low-effort remediation steps referencing specific tables/settings from the payload.
 4. strategicFixes: 2-4 major structural upgrades (e.g., partition redesign, secondary skip index, materialized view pipeline, or TTL tiering).
-5. findingEnrichments: For each finding ID in the payload, provide:
-   - aiInsight: In-depth architectural explanation of why this finding matters specifically for their schema and query patterns.
-   - aiSqlFix: Custom tailored, safe executable SQL/DDL fix for this finding.
+5. findingEnrichments: MANDATORY REQUIREMENT: You MUST provide an enrichment object for EVERY SINGLE finding in the payload (exactly ${totalFindingsCount} findings total: ${findingIdsList}).
+   DO NOT truncate, DO NOT pick only the top 5. Every single finding from the list above must have:
+   - id: The exact finding ID from the payload (e.g., "${structuredPayload.findings[0]?.id || 'FND-001'}")
+   - aiInsight: In-depth architectural explanation of why this finding matters specifically for their ClickHouse schema, parts lifecycle, or query engine.
+   - aiSqlFix: Custom tailored, production-safe executable SQL/DDL fix for this finding.
    - effort: Low, Medium, or High
    - impact: Low, Medium, High, or Critical
    - riskLevel: Low, Medium, High, or Critical
-   - rank: Priority order number
+   - rank: Priority order number (from 1 to ${totalFindingsCount})
 
 Scan Payload:
 ${JSON.stringify(structuredPayload, null, 2)}`;
@@ -157,37 +162,51 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       config.thinkingConfig = { thinkingBudget: 4096 };
     }
 
+    const candidateModels = [targetModel];
+    if (targetModel !== 'gemini-2.5-flash') {
+      candidateModels.push('gemini-2.5-flash');
+    }
+
     let response: any = null;
-    let attempts = 0;
-    const maxAttempts = 2;
+    let successfulModel = targetModel;
     let lastError: unknown = null;
 
-    while (attempts < maxAttempts) {
-      try {
-        attempts++;
-        response = await ai.models.generateContent({
-          model: targetModel,
-          contents: prompt,
-          config,
-        });
+    for (const modelToTry of candidateModels) {
+      let attempts = 0;
+      const maxAttempts = 2;
 
-        if (response && response.text) {
+      while (attempts < maxAttempts) {
+        try {
+          attempts++;
+          response = await ai.models.generateContent({
+            model: modelToTry,
+            contents: prompt,
+            config,
+          });
+
+          if (response && response.text) {
+            successfulModel = modelToTry;
+            break;
+          }
+        } catch (err: unknown) {
+          lastError = err;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const isTransient =
+            errMsg.includes('503') ||
+            errMsg.includes('high demand') ||
+            errMsg.includes('UNAVAILABLE') ||
+            errMsg.includes('429') ||
+            errMsg.includes('RESOURCE_EXHAUSTED');
+
+          if (isTransient && attempts < maxAttempts) {
+            await new Promise((res) => setTimeout(res, 800));
+            continue;
+          }
           break;
         }
-      } catch (err: unknown) {
-        lastError = err;
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const isTransient =
-          errMsg.includes('503') ||
-          errMsg.includes('high demand') ||
-          errMsg.includes('UNAVAILABLE') ||
-          errMsg.includes('429') ||
-          errMsg.includes('RESOURCE_EXHAUSTED');
+      }
 
-        if (isTransient && attempts < maxAttempts) {
-          await new Promise((res) => setTimeout(res, 750));
-          continue;
-        }
+      if (response && response.text) {
         break;
       }
     }
@@ -196,7 +215,9 @@ ${JSON.stringify(structuredPayload, null, 2)}`;
       throw lastError || new Error(`Unable to generate AI synthesis using model ${targetModel}.`);
     }
 
-    const modelDisplayName = isThinkingModel ? `${targetModel} (Thinking Mode)` : targetModel;
+    const modelDisplayName = successfulModel.includes('thinking') || isThinkingModel
+      ? `${successfulModel} (Thinking Mode)`
+      : successfulModel;
     const text = response.text.trim();
     const parsed = JSON.parse(text);
 
