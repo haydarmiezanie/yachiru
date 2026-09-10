@@ -81,5 +81,96 @@ describe('Zod API Request Validation Schemas', () => {
         expect(result.data.aiModel).toBe('gemini-3.7-flash');
       }
     });
+
+    it('validates target with password-based SSH tunnel configuration', () => {
+      const result = ScanRequestSchema.safeParse({
+        target: {
+          host: '10.0.1.50', // Private IP allowed because sshTunnel is enabled
+          port: 8123,
+          database: 'default',
+          sshTunnel: {
+            enabled: true,
+            host: 'bastion.example.com',
+            port: 22,
+            username: 'ec2-user',
+            authMethod: 'password',
+            password: 'secret-ssh-password',
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('validates target with privateKey-based SSH tunnel configuration', () => {
+      const result = ScanRequestSchema.safeParse({
+        target: {
+          host: 'clickhouse-internal.vpc',
+          port: 8123,
+          database: 'telemetry',
+          sshTunnel: {
+            enabled: true,
+            host: 'jump.example.com',
+            port: 2222,
+            username: 'admin',
+            authMethod: 'privateKey',
+            privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----',
+            passphrase: 'optional-passphrase',
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('rejects SSH tunnel when required authentication credentials are missing', () => {
+      // password auth without password
+      const missingPassword = ScanRequestSchema.safeParse({
+        target: {
+          host: '10.0.1.50',
+          port: 8123,
+          sshTunnel: {
+            enabled: true,
+            host: 'bastion.example.com',
+            port: 22,
+            username: 'user',
+            authMethod: 'password',
+          },
+        },
+      });
+      expect(missingPassword.success).toBe(false);
+
+      // privateKey auth without privateKey
+      const missingKey = ScanRequestSchema.safeParse({
+        target: {
+          host: '10.0.1.50',
+          port: 8123,
+          sshTunnel: {
+            enabled: true,
+            host: 'bastion.example.com',
+            port: 22,
+            username: 'user',
+            authMethod: 'privateKey',
+          },
+        },
+      });
+      expect(missingKey.success).toBe(false);
+    });
+
+    it('rejects invalid SSH ports', () => {
+      const badPort = ScanRequestSchema.safeParse({
+        target: {
+          host: '10.0.1.50',
+          port: 8123,
+          sshTunnel: {
+            enabled: true,
+            host: 'bastion.example.com',
+            port: 999999,
+            username: 'user',
+            authMethod: 'password',
+            password: 'pass',
+          },
+        },
+      });
+      expect(badPort.success).toBe(false);
+    });
   });
 });

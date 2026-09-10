@@ -11,7 +11,22 @@ import { synthesizeWithAI } from './server/scanner/aiSynthesis.js';
 import { buildAiMigrationScript } from './server/scanner/synthesisShared.js';
 import { ScanHistoryStore } from './server/storage/scanHistory.js';
 import { ScanReport } from './src/types/yachiru.js';
-import { ScanRequestSchema, TestConnectionRequestSchema } from './server/validation/scanSchemas.js';
+import {
+  ScanRequestSchema,
+  TestConnectionRequestSchema,
+  SavedConnectionCreateSchema,
+  SavedConnectionUpdateSchema,
+  RetrustHostKeySchema,
+} from './server/validation/scanSchemas.js';
+import {
+  saveConnection,
+  updateConnection,
+  listSavedConnections,
+  deleteConnection,
+  resolveConnectionForScan,
+} from './server/storage/connectionStore.js';
+import { retrustHostKey, getAllHostKeys } from './server/scanner/hostKeyStore.js';
+import { redactScanTarget } from './server/security/redaction.js';
 import { logger } from './server/logger.js';
 import { requireRole, isRequireApiKey, isStrictAuth, safeCompare, matchesAllowedApiKey } from './server/auth/rbacMiddleware.js';
 import { apiLimiter, scanLimiter } from './server/rateLimiter.js';
@@ -102,9 +117,9 @@ app.use(
 // CORS with strict origin whitelist enforcement (Defense-in-depth: No fail-open with credentials)
 const allowedOrigins = resolveAllowedOrigins();
 
-// Wajibkan konfigurasi eksplisit di production, jangan fail-open
+// Warn if not explicitly configured in production
 if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
-  throw new Error('ALLOWED_ORIGINS must be explicitly configured in production.');
+  logger.warn('ALLOWED_ORIGINS is not explicitly configured in production. Only same-origin requests will be accepted.');
 }
 
 app.use(
@@ -245,7 +260,16 @@ app.get('/api/docs', (req: Request, res: Response) => {
 
 // Test Connection (Protected: Auditor role required + Zod Runtime Validation)
 app.post('/api/clickhouse/test-connection', requireAuditor, async (req: Request, res: Response) => {
-  const parsed = TestConnectionRequestSchema.safeParse(req.body);
+  let targetData = req.body;
+  if (req.body?.connectionId) {
+    const resolved = await resolveConnectionForScan(req.body.connectionId);
+    if (!resolved) {
+      return res.status(404).json({ success: false, message: 'Saved cluster connection not found' });
+    }
+    targetData = { ...resolved, ...req.body };
+  }
+
+  const parsed = TestConnectionRequestSchema.safeParse(targetData);
   if (!parsed.success) {
     return res.status(400).json({
       success: false,
@@ -267,7 +291,16 @@ app.post('/api/clickhouse/test-connection', requireAuditor, async (req: Request,
 
 // Discover Accessible Databases (Protected: Auditor role required + Zod Runtime Validation)
 app.post('/api/clickhouse/databases', requireAuditor, async (req: Request, res: Response) => {
-  const parsed = TestConnectionRequestSchema.safeParse(req.body);
+  let targetData = req.body;
+  if (req.body?.connectionId) {
+    const resolved = await resolveConnectionForScan(req.body.connectionId);
+    if (!resolved) {
+      return res.status(404).json({ success: false, message: 'Saved cluster connection not found' });
+    }
+    targetData = { ...resolved, ...req.body };
+  }
+
+  const parsed = TestConnectionRequestSchema.safeParse(targetData);
   if (!parsed.success) {
     return res.status(400).json({
       success: false,
@@ -299,7 +332,7 @@ app.post('/api/clickhouse/databases', requireAuditor, async (req: Request, res: 
 // Execute Full 9-Dimension Scan (Protected: Auditor role required + Rate-limited + Zod Validation)
 app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Request, res: Response) => {
   // Support AI agentic options via JSON body or HTTP headers (with full alias support)
-  const rawPayload = {
+  let rawPayload = {
     ...req.body,
     aiProvider:
       req.body?.aiProvider ||
@@ -330,6 +363,17 @@ app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Reques
         req.headers['x-ai-key']) as string) ||
       undefined,
   };
+
+  if (req.body?.connectionId) {
+    const resolved = await resolveConnectionForScan(req.body.connectionId);
+    if (!resolved) {
+      return res.status(404).json({ error: 'Saved cluster connection not found' });
+    }
+    rawPayload = {
+      ...rawPayload,
+      target: { ...resolved, ...(req.body.target || {}) },
+    };
+  }
 
   const parsed = ScanRequestSchema.safeParse(rawPayload);
   if (!parsed.success) {
@@ -401,6 +445,15 @@ app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Reques
         database: target.database || clusterData.tables[0]?.database || 'default',
         isDemoCluster: Boolean(target.isDemoCluster),
         clusterName: clusterData.clusterName,
+        sshTunnel: target.sshTunnel
+          ? {
+              enabled: target.sshTunnel.enabled,
+              host: target.sshTunnel.host,
+              port: target.sshTunnel.port,
+              username: target.sshTunnel.username,
+              authMethod: target.sshTunnel.authMethod,
+            }
+          : undefined,
       },
       overallScore: deterministicResult.overallScore,
       overallGrade: deterministicResult.overallGrade,
@@ -475,6 +528,98 @@ app.get('/api/history/:id', requireViewer, async (req: Request, res: Response) =
 app.delete('/api/history', requireAdmin, async (req: Request, res: Response) => {
   await ScanHistoryStore.clearHistory();
   return res.json({ success: true, message: 'Scan history cleared' });
+});
+
+// -------------------------------------------------------------
+// Cluster Connection Management (RBAC: Viewer reads, Admin writes)
+// -------------------------------------------------------------
+app.get('/api/connections', requireViewer, async (req: Request, res: Response) => {
+  try {
+    const list = await listSavedConnections();
+    return res.json(list);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, 'Failed to list saved connections');
+    return res.status(500).json({ error: 'Failed to retrieve saved connections' });
+  }
+});
+
+app.post('/api/connections', requireAdmin, async (req: Request, res: Response) => {
+  const parsed = SavedConnectionCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid connection configuration', details: parsed.error.format() });
+  }
+
+  try {
+    const id = parsed.data.id || `conn-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const saved = await saveConnection(id, parsed.data.name, parsed.data.target, req.user?.uid);
+    logger.info({ id, name: parsed.data.name, user: req.user?.email }, 'Saved new cluster connection');
+    return res.status(201).json(saved);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, 'Failed to save cluster connection');
+    return res.status(500).json({ error: err?.message || 'Failed to save connection' });
+  }
+});
+
+app.put('/api/connections/:id', requireAdmin, async (req: Request, res: Response) => {
+  const parsed = SavedConnectionUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid update payload', details: parsed.error.format() });
+  }
+
+  try {
+    const updated = await updateConnection(req.params.id, parsed.data.name, parsed.data.target, req.user?.uid);
+    logger.info({ id: req.params.id, name: parsed.data.name, user: req.user?.email }, 'Updated cluster connection');
+    return res.json(updated);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, 'Failed to update cluster connection');
+    return res.status(500).json({ error: err?.message || 'Failed to update connection' });
+  }
+});
+
+app.delete('/api/connections/:id', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const success = await deleteConnection(req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: 'Connection not found' });
+    }
+    logger.info({ id: req.params.id, user: req.user?.email }, 'Deleted cluster connection');
+    return res.json({ success: true, message: 'Connection removed successfully' });
+  } catch (err: any) {
+    logger.error({ err: err?.message }, 'Failed to delete cluster connection');
+    return res.status(500).json({ error: 'Failed to delete connection' });
+  }
+});
+
+// -------------------------------------------------------------
+// SSH Known Host Keys Management (Admin only)
+// -------------------------------------------------------------
+app.get('/api/ssh/host-keys', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const keys = await getAllHostKeys();
+    return res.json(keys);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, 'Failed to retrieve SSH host keys');
+    return res.status(500).json({ error: 'Failed to retrieve SSH host keys' });
+  }
+});
+
+app.post('/api/ssh/retrust-host-key', requireAdmin, async (req: Request, res: Response) => {
+  const parsed = RetrustHostKeySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid request payload', details: parsed.error.format() });
+  }
+
+  try {
+    await retrustHostKey(parsed.data.host, parsed.data.port, parsed.data.newFingerprint);
+    logger.info({ host: parsed.data.host, port: parsed.data.port, user: req.user?.email }, 'SSH host key re-trusted');
+    return res.json({
+      success: true,
+      message: `Host key for ${parsed.data.host}:${parsed.data.port} re-trusted successfully.`,
+    });
+  } catch (err: any) {
+    logger.error({ err: err?.message }, 'Failed to re-trust SSH host key');
+    return res.status(500).json({ error: err?.message || 'Failed to re-trust host key' });
+  }
 });
 
 // -------------------------------------------------------------

@@ -12,9 +12,11 @@ import {
   Zap,
   HardDrive,
 } from 'lucide-react';
-import { ScanTarget } from '../types/yachiru';
+import { ScanTarget, SavedConnection } from '../types/yachiru';
 import { authenticatedFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { SshTunnelForm } from './SshTunnelForm';
+import { SavedConnectionsManager } from './SavedConnectionsManager';
 
 interface ClusterSelectorProps {
   target: ScanTarget;
@@ -82,6 +84,7 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
 }) => {
   const { isAuditor } = useAuth();
   const [activeMode, setActiveMode] = useState<'demo' | 'custom'>(target.isDemoCluster ? 'demo' : 'custom');
+  const [activeConnectionId, setActiveConnectionId] = useState<string | undefined>();
   const [testingConn, setTestingConn] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [showKeyInput, setShowKeyInput] = useState(false);
@@ -95,8 +98,19 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
     }
   };
 
+  const handleSelectSavedConnection = (saved: SavedConnection) => {
+    setActiveConnectionId(saved.id);
+    setActiveMode('custom');
+    setTestResult(null);
+    setTarget({
+      ...saved.target,
+      isDemoCluster: false,
+    });
+  };
+
   const selectDemoPreset = (preset: (typeof DEMO_PRESETS)[0]) => {
     setActiveMode('demo');
+    setActiveConnectionId(undefined);
     setTestResult(null);
     setTarget((prev) => ({
       ...prev,
@@ -225,6 +239,12 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
       {/* Mode 2: Live ClickHouse Connection Form */}
       {activeMode === 'custom' && (
         <div className="space-y-4">
+          <SavedConnectionsManager
+            currentTarget={target}
+            onSelectConnection={handleSelectSavedConnection}
+            activeConnectionId={activeConnectionId}
+          />
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
             <div>
               <label className="block text-xs font-medium text-slate-400 mb-1">Protocol</label>
@@ -274,7 +294,7 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
                     port: newPort,
                   });
                 }}
-                placeholder="e.g. 192.168.1.50 or db.mycompany.internal"
+                placeholder={target.sshTunnel?.enabled ? "e.g. 10.0.1.42 or clickhouse.vpc.internal" : "e.g. 192.168.1.50 or db.mycompany.internal"}
                 className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs text-slate-200 focus:border-amber-500 focus:outline-none font-mono"
               />
             </div>
@@ -319,6 +339,12 @@ export const ClusterSelector: React.FC<ClusterSelectorProps> = ({
               />
             </div>
           </div>
+
+          {/* SSH Tunnel Bastion Form */}
+          <SshTunnelForm
+            config={target.sshTunnel}
+            onChange={(cfg) => setTarget({ ...target, sshTunnel: cfg })}
+          />
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <button

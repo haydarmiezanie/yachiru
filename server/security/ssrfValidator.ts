@@ -70,26 +70,33 @@ export function isRestrictedIpAddress(addrStr: string): { isRestricted: boolean;
   }
 }
 
+export interface HostSafetyCheckResult {
+  safe: boolean;
+  cleanHost: string;
+  error?: string;
+}
+
 /**
- * Asserts that the provided target host does not resolve to loopback, private VPC,
- * link-local (e.g., GCP metadata 169.254.169.254), or reserved networks.
+ * Synchronously checks if a hostname or literal IP violates SSRF restrictions:
+ * - Empty host
+ * - Blocked cloud metadata hosts (metadata.google.internal, instance-data, etc.)
+ * - Local/internal host domains (.internal, .local, .localhost)
+ * - Private/loopback/link-local IP addresses (10.x, 172.16-31.x, 192.168.x, 127.x, 169.254.x, etc.)
  *
- * Throws an Error if connection is refused due to SSRF risk.
+ * Shared between Zod schema validation (scanSchemas.ts) and network pre-flight assertions.
  */
-export async function assertSafeHost(rawHost: string, isDemoCluster = false): Promise<void> {
-  // Demo clusters use in-memory synthetic datasets and never execute outbound HTTP requests
+export function checkStaticHostSafety(rawHost: string, isDemoCluster = false): HostSafetyCheckResult {
   if (isDemoCluster) {
-    return;
+    return { safe: true, cleanHost: extractCleanHost(rawHost) };
   }
 
-  // Explicit development override (only when explicitly enabled via env var)
   if (process.env.ALLOW_INTERNAL_CLUSTERS === 'true') {
-    return;
+    return { safe: true, cleanHost: extractCleanHost(rawHost) };
   }
 
   const cleanHost = extractCleanHost(rawHost);
   if (!cleanHost) {
-    throw new Error('Target host cannot be empty');
+    return { safe: false, cleanHost: '', error: 'Target host is required' };
   }
 
   const lowerHost = cleanHost.toLowerCase();
@@ -101,8 +108,44 @@ export async function assertSafeHost(rawHost: string, isDemoCluster = false): Pr
     lowerHost.endsWith('.local') ||
     lowerHost.endsWith('.localhost')
   ) {
-    throw new Error(`Refusing to connect to restricted host or domain: ${cleanHost}`);
+    return {
+      safe: false,
+      cleanHost,
+      error: `Connection to internal, loopback, or cloud-metadata host '${cleanHost}' is not permitted. Please specify a public ClickHouse cluster or select a Demo Cluster.`,
+    };
   }
+
+  // 2. Check literal IP address range
+  const { isRestricted, range } = isRestrictedIpAddress(cleanHost);
+  if (isRestricted) {
+    return {
+      safe: false,
+      cleanHost,
+      error: `Target IP '${cleanHost}' belongs to restricted network range (${range || 'private'}). Connecting to internal VPC, loopback, or metadata services is blocked for security.`,
+    };
+  }
+
+  return { safe: true, cleanHost };
+}
+
+/**
+ * Asserts that the provided target host does not resolve to loopback, private VPC,
+ * link-local (e.g., GCP metadata 169.254.169.254), or reserved networks.
+ *
+ * Performs static host safety check first, followed by full asynchronous DNS resolution.
+ * Throws an Error if connection is refused due to SSRF risk.
+ */
+export async function assertSafeHost(rawHost: string, isDemoCluster = false): Promise<void> {
+  const staticCheck = checkStaticHostSafety(rawHost, isDemoCluster);
+  if (!staticCheck.safe) {
+    throw new Error(staticCheck.error || `Refusing to connect to restricted host or domain: ${staticCheck.cleanHost}`);
+  }
+
+  if (isDemoCluster || process.env.ALLOW_INTERNAL_CLUSTERS === 'true') {
+    return;
+  }
+
+  const cleanHost = staticCheck.cleanHost;
 
   // 2. Resolve DNS addresses (or check literal IP)
   let addresses: string[] = [];

@@ -11,6 +11,17 @@ export type DimensionId =
 
 export type FindingSeverity = 'critical' | 'warning' | 'info' | 'optimal';
 
+export interface SshTunnelConfig {
+  enabled: boolean;
+  host: string;
+  port: number; // default 22
+  username: string;
+  authMethod: 'password' | 'privateKey';
+  password?: string; // required if authMethod = 'password'
+  privateKey?: string; // required if authMethod = 'privateKey'
+  passphrase?: string; // optional for encrypted private keys
+}
+
 export interface ScanTarget {
   host: string;
   port: number;
@@ -21,7 +32,36 @@ export interface ScanTarget {
   isDemoCluster?: boolean;
   demoClusterId?: string;
   lookbackDays?: number;
+  sshTunnel?: SshTunnelConfig;
 }
+
+export interface SavedClusterConnection {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  protocol?: 'http' | 'https';
+  lookbackDays?: number;
+  passwordConfigured?: boolean;
+  sshTunnel?: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    username: string;
+    authMethod: 'password' | 'privateKey';
+    passwordConfigured?: boolean;
+    privateKeyConfigured?: boolean;
+    passphraseConfigured?: boolean;
+  };
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  target: ScanTarget;
+}
+
+export type SavedConnection = SavedClusterConnection;
 
 export interface Finding {
   id: string;
@@ -99,6 +139,13 @@ export interface ScanReport {
     database: string;
     isDemoCluster: boolean;
     clusterName: string;
+    sshTunnel?: {
+      enabled: boolean;
+      host?: string;
+      port?: number;
+      username?: string;
+      authMethod?: 'password' | 'privateKey';
+    };
   };
   overallScore: number;
   overallGrade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';

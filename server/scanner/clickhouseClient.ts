@@ -1,6 +1,7 @@
 import { DEMO_CLUSTERS, MockClickHouseCluster } from './demoDatasets.js';
 import { ScanTarget } from '../../src/types/yachiru.js';
 import { assertSafeHost } from '../security/ssrfValidator.js';
+import { openSshTunnel, SshTunnelInstance } from './sshTunnel.js';
 
 export interface ClickHouseTableRow {
   database: string;
@@ -291,13 +292,21 @@ export class ClickHouseScannerClient {
       };
     }
 
-    const { baseUrl, host, port } = this.getCleanEndpoint();
+    const { baseUrl, host, port, protocol } = this.getCleanEndpoint();
+    let tunnel: SshTunnelInstance | null = null;
 
     try {
-      // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
-      await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+      let activeBaseUrl = baseUrl;
 
-      const url = `${baseUrl}/?default_format=JSONEachRow`;
+      if (this.target.sshTunnel?.enabled) {
+        tunnel = await openSshTunnel(this.target.sshTunnel, host, port);
+        activeBaseUrl = `${protocol}://${tunnel.localHost}:${tunnel.localPort}`;
+      } else {
+        // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
+        await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+      }
+
+      const url = `${activeBaseUrl}/?default_format=JSONEachRow`;
       const headers = this.getHeaders();
 
       const controller = new AbortController();
@@ -359,6 +368,10 @@ export class ClickHouseScannerClient {
         success: false,
         message: this.formatNetworkError(err, baseUrl, host, port),
       };
+    } finally {
+      if (tunnel) {
+        await tunnel.close();
+      }
     }
   }
 
@@ -379,12 +392,21 @@ export class ClickHouseScannerClient {
       };
     }
 
-    const { baseUrl, host, port } = this.getCleanEndpoint();
+    const { baseUrl, host, port, protocol } = this.getCleanEndpoint();
+    let tunnel: SshTunnelInstance | null = null;
 
-    // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
-    await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+    try {
+      let activeBaseUrl = baseUrl;
 
-    const url = `${baseUrl}/?default_format=JSONEachRow`;
+      if (this.target.sshTunnel?.enabled) {
+        tunnel = await openSshTunnel(this.target.sshTunnel, host, port);
+        activeBaseUrl = `${protocol}://${tunnel.localHost}:${tunnel.localPort}`;
+      } else {
+        // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
+        await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+      }
+
+      const url = `${activeBaseUrl}/?default_format=JSONEachRow`;
     
     // Strict Validation & Escaping of database identifier
     const rawDb = (this.target.database || 'default').trim();
@@ -573,19 +595,26 @@ export class ClickHouseScannerClient {
     const version = versionRes[0]?.version || 'ClickHouse Server';
     const uptime = Number(versionRes[0]?.uptime) || 86400;
 
-    return {
-      version,
-      clusterName: `${host}:${port} (${targetDb})`,
-      database: targetDb,
-      targetDatabase: targetDb,
-      tables,
-      columns,
-      parts,
-      merges,
-      queryLog,
-      settings,
-      totalDatabases: 1,
-      uptimeSeconds: uptime,
-    };
+      return {
+        version,
+        clusterName: this.target.sshTunnel?.enabled
+          ? `${host}:${port} (${targetDb}) via SSH [${this.target.sshTunnel.host}]`
+          : `${host}:${port} (${targetDb})`,
+        database: targetDb,
+        targetDatabase: targetDb,
+        tables,
+        columns,
+        parts,
+        merges,
+        queryLog,
+        settings,
+        totalDatabases: 1,
+        uptimeSeconds: uptime,
+      };
+    } finally {
+      if (tunnel) {
+        await tunnel.close();
+      }
+    }
   }
 }
