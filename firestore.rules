@@ -32,20 +32,25 @@ service cloud.firestore {
     // Users Collection
     match /users/{userId} {
       allow read: if isAuthenticated();
-      // Allow user creation: admin/superadmin, or self-registration (viewer/pending or pre-whitelisted auditor/approved)
+      // Allow user creation:
+      // - Admin or Super Admin
+      // - Self-registration strictly restricted to role == 'viewer' AND status == 'pending'
+      // - No user can self-assign auditor/admin role or approved status
       allow create: if isAdmin() || (
         isOwner(userId) && (
           isSuperAdminEmail() ||
-          (request.resource.data.role == 'viewer' && request.resource.data.status == 'pending') ||
-          (request.resource.data.role in ['viewer', 'auditor'] && request.resource.data.status in ['pending', 'approved'])
+          (request.resource.data.role == 'viewer' && request.resource.data.status == 'pending')
         )
       );
-      // Allow update: admin, or owner keeping same role/status or updating approved status from invite
+      // Allow update:
+      // - Admin or Super Admin
+      // - Owner can update non-privilege profile fields (e.g. displayName, photoURL),
+      //   but MUST preserve role and status identically.
+      // - NO self-approval or self-elevation to auditor/admin is ever permitted.
       allow update: if isAdmin() || (
-        isOwner(userId) && (
-          (request.resource.data.role == resource.data.role && request.resource.data.status == resource.data.status) ||
-          (request.resource.data.role in ['viewer', 'auditor'] && request.resource.data.status in ['pending', 'approved'])
-        )
+        isOwner(userId) &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.status == resource.data.status
       );
       allow delete: if isAdmin();
     }
@@ -62,11 +67,14 @@ service cloud.firestore {
         resource.data.uid == request.auth.uid ||
         (request.auth.token.email != null && resource.data.email == request.auth.token.email)
       ));
+      // Anyone authenticated can create an access request for themselves,
+      // but status MUST be 'pending'. Self-approval is strictly forbidden.
       allow create: if isAuthenticated() && (
         requestId == request.auth.uid ||
         request.resource.data.uid == request.auth.uid ||
         (request.auth.token.email != null && request.resource.data.email == request.auth.token.email)
-      );
+      ) && request.resource.data.status == 'pending';
+      // Only Admin can approve, revoke, or delete access requests
       allow update, delete: if isAdmin();
     }
 
@@ -81,7 +89,7 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
-    // Scan Summaries Index Collection (Lightweight summaries for fast multi-instance listing)
+    // Scan Summaries Index Collection
     match /scan_summaries/{scanId} {
       allow read: if isAuthenticated();
       allow create: if isAdmin() || (isAuthenticated() && (
@@ -90,6 +98,16 @@ service cloud.firestore {
         getUserData().role == 'auditor'
       ));
       allow update, delete: if isAdmin();
+    }
+
+    // SSH Host Keys TOFU Collection
+    match /ssh_host_keys/{hostKeyId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Saved Connections Collection
+    match /connections/{connectionId} {
+      allow read, write: if isAdmin();
     }
   }
 }

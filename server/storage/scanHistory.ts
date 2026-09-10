@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { ScanReport } from '../../src/types/yachiru.js';
 import { logger } from '../logger.js';
 import { getAdminFirestore } from '../auth/rbacMiddleware.js';
+import { isFirestoreEnabled, setFirestoreBlocked } from './firestoreGuard.js';
 
 const STORAGE_DIR = path.join(process.cwd(), 'data');
 const SCANS_DIR = path.join(STORAGE_DIR, 'scans');
@@ -46,23 +47,8 @@ export function extractScanSummary(report: ScanReport): ScanSummaryItem {
   };
 }
 
-let firestoreWriteBlocked = false;
-
 export function isFirestoreStorageEnabled(): boolean {
-  if (firestoreWriteBlocked) {
-    return false;
-  }
-
-  // Always disable Firestore network calls during automated test suites unless explicitly forced
-  if (
-    (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST) || Boolean(process.env.CI)) &&
-    process.env.FORCE_FIRESTORE_TEST !== 'true'
-  ) {
-    return false;
-  }
-
-  // Explicit opt-in via environment flag
-  return process.env.USE_FIRESTORE_HISTORY === 'true';
+  return isFirestoreEnabled('history');
 }
 
 /**
@@ -377,8 +363,8 @@ export class ScanHistoryStore {
           }
         }
       } catch (err: any) {
-        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED')) {
-          firestoreWriteBlocked = true;
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
         }
         logger.debug({ err }, 'Firestore scan summaries lookup skipped or unavailable, falling back to local');
       }
@@ -405,8 +391,8 @@ export class ScanHistoryStore {
           }
         }
       } catch (err: any) {
-        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED')) {
-          firestoreWriteBlocked = true;
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
         }
         logger.debug({ err }, 'Firestore getAllScans skipped or unavailable, falling back to local');
       }
@@ -448,8 +434,8 @@ export class ScanHistoryStore {
           }
         }
       } catch (cloudErr: any) {
-        if (cloudErr?.code === 7 || String(cloudErr?.message || '').includes('PERMISSION_DENIED')) {
-          firestoreWriteBlocked = true;
+        if (cloudErr?.code === 7 || String(cloudErr?.message || '').includes('PERMISSION_DENIED') || String(cloudErr?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
         }
         logger.debug({ err: cloudErr }, 'Firestore scan lookup skipped or unavailable');
       }
@@ -516,8 +502,8 @@ export class ScanHistoryStore {
           }
         }
       } catch (cloudErr: any) {
-        if (cloudErr?.code === 7 || String(cloudErr?.message || '').includes('PERMISSION_DENIED')) {
-          firestoreWriteBlocked = true;
+        if (cloudErr?.code === 7 || String(cloudErr?.message || '').includes('PERMISSION_DENIED') || String(cloudErr?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
           logger.debug(
             { err: cloudErr },
             'Firestore lacks IAM write permissions in current container environment. Falling back to local document store.'

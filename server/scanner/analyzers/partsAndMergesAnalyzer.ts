@@ -70,8 +70,12 @@ OPTIMIZE TABLE ${targetDb}.${tableName} PARTITION ID '${worstPartition}' FINAL;`
     }
   }
 
-  // 2.2 Stuck or excessively slow merges
+  // 2.2 Stuck or excessively slow merges (scoped strictly to target database)
+  const scopedDb = data.targetDatabase || data.database;
   for (const merge of data.merges) {
+    if (scopedDb && merge.database && merge.database !== scopedDb) {
+      continue;
+    }
     if (merge.elapsed > 300) {
       findings.push({
         id: nextId('MRG'),
@@ -86,7 +90,7 @@ OPTIMIZE TABLE ${targetDb}.${tableName} PARTITION ID '${worstPartition}' FINAL;`
         recommendationSummary: `Check background_pool_size settings and inspect disk I/O queue.`,
         recommendationSql: `-- Check active merges status
 SELECT database, table, elapsed, progress, num_parts, memory_usage
-FROM system.merges;`,
+FROM system.merges${scopedDb ? `\nWHERE database = '${scopedDb}'` : ''};`,
         estimatedImpact: {
           metric: 'Background Thread Utilization',
           magnitude: 'Eliminates merge bottlenecks',

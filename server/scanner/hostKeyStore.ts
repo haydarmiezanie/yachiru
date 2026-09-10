@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { getAdminFirestore } from '../auth/rbacMiddleware.js';
+import { isFirestoreEnabled, setFirestoreBlocked } from '../storage/firestoreGuard.js';
 import { logger } from '../logger.js';
 
 export interface SshHostKeyRecord {
@@ -73,19 +74,24 @@ export async function getHostKeyRecord(host: string, port: number): Promise<SshH
     return localCache.get(id) || null;
   }
 
-  // Check Firestore
-  const db = getAdminFirestore();
-  if (db) {
-    try {
-      const doc = await db.collection('ssh_host_keys').doc(id).get();
-      if (doc.exists) {
-        const data = doc.data() as SshHostKeyRecord;
-        localCache.set(id, data);
-        saveLocalFile();
-        return data;
+  // Check Firestore (only when explicitly enabled)
+  if (isFirestoreEnabled('host_keys')) {
+    const db = getAdminFirestore();
+    if (db) {
+      try {
+        const doc = await db.collection('ssh_host_keys').doc(id).get();
+        if (doc.exists) {
+          const data = doc.data() as SshHostKeyRecord;
+          localCache.set(id, data);
+          saveLocalFile();
+          return data;
+        }
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
+        }
+        logger.warn({ err: err?.message, host, port }, 'Failed to query Firestore for ssh_host_keys');
       }
-    } catch (err: any) {
-      logger.warn({ err: err?.message, host, port }, 'Failed to query Firestore for ssh_host_keys');
     }
   }
 
@@ -125,12 +131,17 @@ export async function verifyOrRecordHostKey(
     localCache.set(id, record);
     saveLocalFile();
 
-    const db = getAdminFirestore();
-    if (db) {
-      try {
-        await db.collection('ssh_host_keys').doc(id).set(record);
-      } catch (err: any) {
-        logger.warn({ err: err?.message, host, port }, 'Failed to persist ssh_host_key to Firestore');
+    if (isFirestoreEnabled('host_keys')) {
+      const db = getAdminFirestore();
+      if (db) {
+        try {
+          await db.collection('ssh_host_keys').doc(id).set(record);
+        } catch (err: any) {
+          if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+            setFirestoreBlocked(true);
+          }
+          logger.warn({ err: err?.message, host, port }, 'Failed to persist ssh_host_key to Firestore');
+        }
       }
     }
 
@@ -144,11 +155,13 @@ export async function verifyOrRecordHostKey(
     localCache.set(id, existing);
     saveLocalFile();
 
-    const db = getAdminFirestore();
-    if (db) {
-      try {
-        await db.collection('ssh_host_keys').doc(id).update({ lastSeenAt: now });
-      } catch {}
+    if (isFirestoreEnabled('host_keys')) {
+      const db = getAdminFirestore();
+      if (db) {
+        try {
+          await db.collection('ssh_host_keys').doc(id).update({ lastSeenAt: now });
+        } catch {}
+      }
     }
 
     return { action: 'matched' };
@@ -191,12 +204,17 @@ export async function retrustHostKey(host: string, port: number, newFingerprint?
     localCache.set(id, record);
     saveLocalFile();
 
-    const db = getAdminFirestore();
-    if (db) {
-      try {
-        await db.collection('ssh_host_keys').doc(id).set(record);
-      } catch (err: any) {
-        logger.warn({ err: err?.message, host, port }, 'Failed to persist re-trusted ssh_host_key to Firestore');
+    if (isFirestoreEnabled('host_keys')) {
+      const db = getAdminFirestore();
+      if (db) {
+        try {
+          await db.collection('ssh_host_keys').doc(id).set(record);
+        } catch (err: any) {
+          if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+            setFirestoreBlocked(true);
+          }
+          logger.warn({ err: err?.message, host, port }, 'Failed to persist re-trusted ssh_host_key to Firestore');
+        }
       }
     }
   } else {
@@ -204,12 +222,17 @@ export async function retrustHostKey(host: string, port: number, newFingerprint?
     localCache.delete(id);
     saveLocalFile();
 
-    const db = getAdminFirestore();
-    if (db) {
-      try {
-        await db.collection('ssh_host_keys').doc(id).delete();
-      } catch (err: any) {
-        logger.warn({ err: err?.message, host, port }, 'Failed to delete ssh_host_key from Firestore');
+    if (isFirestoreEnabled('host_keys')) {
+      const db = getAdminFirestore();
+      if (db) {
+        try {
+          await db.collection('ssh_host_keys').doc(id).delete();
+        } catch (err: any) {
+          if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+            setFirestoreBlocked(true);
+          }
+          logger.warn({ err: err?.message, host, port }, 'Failed to delete ssh_host_key from Firestore');
+        }
       }
     }
   }
@@ -222,18 +245,24 @@ export async function retrustHostKey(host: string, port: number, newFingerprint?
  */
 export async function getAllHostKeys(): Promise<SshHostKeyRecord[]> {
   loadLocalFile();
-  const db = getAdminFirestore();
-  if (db) {
-    try {
-      const snapshot = await db.collection('ssh_host_keys').get();
-      snapshot.forEach((doc) => {
-        const item = doc.data() as SshHostKeyRecord;
-        if (item && item.hostKeyId) {
-          localCache.set(item.hostKeyId, item);
+  if (isFirestoreEnabled('host_keys')) {
+    const db = getAdminFirestore();
+    if (db) {
+      try {
+        const snapshot = await db.collection('ssh_host_keys').get();
+        snapshot.forEach((doc) => {
+          const item = doc.data() as SshHostKeyRecord;
+          if (item && item.hostKeyId) {
+            localCache.set(item.hostKeyId, item);
+          }
+        });
+        saveLocalFile();
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
         }
-      });
-      saveLocalFile();
-    } catch {}
+      }
+    }
   }
   return Array.from(localCache.values());
 }

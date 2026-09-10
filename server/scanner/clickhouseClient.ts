@@ -1,7 +1,12 @@
 import { DEMO_CLUSTERS, MockClickHouseCluster } from './demoDatasets.js';
 import { ScanTarget } from '../../src/types/yachiru.js';
-import { assertSafeHost } from '../security/ssrfValidator.js';
+import { assertSafeHost, resolveAndPinSafeHost, createPinnedDispatcher } from '../security/ssrfValidator.js';
 import { openSshTunnel, SshTunnelInstance } from './sshTunnel.js';
+import { fetch as undiciFetch } from 'undici';
+
+export const scannerFetch = {
+  fetch: (url: string, init?: any) => undiciFetch(url, init),
+};
 
 export interface ClickHouseTableRow {
   database: string;
@@ -294,6 +299,7 @@ export class ClickHouseScannerClient {
 
     const { baseUrl, host, port, protocol } = this.getCleanEndpoint();
     let tunnel: SshTunnelInstance | null = null;
+    let dispatcher: any = null;
 
     try {
       let activeBaseUrl = baseUrl;
@@ -302,9 +308,17 @@ export class ClickHouseScannerClient {
         tunnel = await openSshTunnel(this.target.sshTunnel, host, port);
         activeBaseUrl = `${protocol}://${tunnel.localHost}:${tunnel.localPort}`;
       } else {
-        // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
-        await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+        // SSRF & DNS Rebinding TOCTOU Prevention: Enforce DNS resolution & pin validated IP
+        const pinned = await resolveAndPinSafeHost(host, Boolean(this.target.isDemoCluster));
+        dispatcher = createPinnedDispatcher(pinned.pinnedIp);
       }
+
+      const executeFetch = (reqUrl: string, init: any) => {
+        if (dispatcher) {
+          return scannerFetch.fetch(reqUrl, { ...init, dispatcher });
+        }
+        return fetch(reqUrl, init);
+      };
 
       const url = `${activeBaseUrl}/?default_format=JSONEachRow`;
       const headers = this.getHeaders();
@@ -312,7 +326,7 @@ export class ClickHouseScannerClient {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-      const resp = await fetch(url, {
+      const resp = await executeFetch(url, {
         method: 'POST',
         headers,
         body: 'SELECT version() AS version, uptime() AS uptime, currentUser() AS user',
@@ -340,7 +354,7 @@ export class ClickHouseScannerClient {
         const dbController = new AbortController();
         const dbTimeoutId = setTimeout(() => dbController.abort(), 4000);
 
-        const dbResp = await fetch(url, {
+        const dbResp = await executeFetch(url, {
           method: 'POST',
           headers,
           body: 'SHOW DATABASES',
@@ -369,6 +383,11 @@ export class ClickHouseScannerClient {
         message: this.formatNetworkError(err, baseUrl, host, port),
       };
     } finally {
+      if (dispatcher) {
+        try {
+          await dispatcher.destroy();
+        } catch {}
+      }
       if (tunnel) {
         await tunnel.close();
       }
@@ -394,6 +413,7 @@ export class ClickHouseScannerClient {
 
     const { baseUrl, host, port, protocol } = this.getCleanEndpoint();
     let tunnel: SshTunnelInstance | null = null;
+    let dispatcher: any = null;
 
     try {
       let activeBaseUrl = baseUrl;
@@ -402,9 +422,17 @@ export class ClickHouseScannerClient {
         tunnel = await openSshTunnel(this.target.sshTunnel, host, port);
         activeBaseUrl = `${protocol}://${tunnel.localHost}:${tunnel.localPort}`;
       } else {
-        // SSRF Prevention: Enforce DNS resolution & verify destination is not an internal, loopback, or metadata address
-        await assertSafeHost(host, Boolean(this.target.isDemoCluster));
+        // SSRF & DNS Rebinding TOCTOU Prevention: Enforce DNS resolution & pin validated IP
+        const pinned = await resolveAndPinSafeHost(host, Boolean(this.target.isDemoCluster));
+        dispatcher = createPinnedDispatcher(pinned.pinnedIp);
       }
+
+      const executeFetch = (reqUrl: string, init: any) => {
+        if (dispatcher) {
+          return scannerFetch.fetch(reqUrl, { ...init, dispatcher });
+        }
+        return fetch(reqUrl, init);
+      };
 
       const url = `${activeBaseUrl}/?default_format=JSONEachRow`;
     
@@ -425,7 +453,7 @@ export class ClickHouseScannerClient {
     try {
       const probeController = new AbortController();
       const probeTimeout = setTimeout(() => probeController.abort(), 6000);
-      const probeResp = await fetch(url, {
+      const probeResp = await executeFetch(url, {
         method: 'POST',
         headers,
         body: 'SELECT version() AS version, uptime() AS uptime',
@@ -456,7 +484,7 @@ export class ClickHouseScannerClient {
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const resp = await fetch(url, {
+        const resp = await executeFetch(url, {
           method: 'POST',
           headers,
           body: query,
@@ -516,7 +544,8 @@ export class ClickHouseScannerClient {
           default_expression,
           data_compressed_bytes,
           data_uncompressed_bytes,
-          compression_codec
+          compression_codec,
+          is_nullable
         FROM system.columns 
         WHERE database = '${targetDb}'
       `),
@@ -539,7 +568,7 @@ export class ClickHouseScannerClient {
         LIMIT 1000
       `),
 
-      // 5. Fetch Active Merges
+      // 5. Fetch Active Merges (Scoped to target database)
       runQuery<ClickHouseMergeRow>(`
         SELECT 
           database,
@@ -551,6 +580,7 @@ export class ClickHouseScannerClient {
           memory_usage,
           is_mutation
         FROM system.merges
+        WHERE database = '${targetDb}'
       `),
 
       // 6. Fetch Query Log (Safe lookback integer and escaped database parameter)
@@ -595,23 +625,35 @@ export class ClickHouseScannerClient {
     const version = versionRes[0]?.version || 'ClickHouse Server';
     const uptime = Number(versionRes[0]?.uptime) || 86400;
 
-      return {
-        version,
-        clusterName: this.target.sshTunnel?.enabled
-          ? `${host}:${port} (${targetDb}) via SSH [${this.target.sshTunnel.host}]`
-          : `${host}:${port} (${targetDb})`,
-        database: targetDb,
-        targetDatabase: targetDb,
-        tables,
-        columns,
-        parts,
-        merges,
-        queryLog,
-        settings,
-        totalDatabases: 1,
-        uptimeSeconds: uptime,
-      };
+    // Normalize column attributes (round-trip is_nullable as boolean; document that cardinality is not computed on live scans)
+    const normalizedColumns = columns.map((col) => ({
+      ...col,
+      is_nullable: Boolean(col.is_nullable === 1 || col.is_nullable === true || String(col.type || '').startsWith('Nullable(')),
+      cardinality_approx: typeof col.cardinality_approx === 'number' ? col.cardinality_approx : undefined,
+    }));
+
+    return {
+      version,
+      clusterName: this.target.sshTunnel?.enabled
+        ? `${host}:${port} (${targetDb}) via SSH [${this.target.sshTunnel.host}]`
+        : `${host}:${port} (${targetDb})`,
+      database: targetDb,
+      targetDatabase: targetDb,
+      tables,
+      columns: normalizedColumns,
+      parts,
+      merges,
+      queryLog,
+      settings,
+      totalDatabases: 1,
+      uptimeSeconds: uptime,
+    };
     } finally {
+      if (dispatcher) {
+        try {
+          await dispatcher.destroy();
+        } catch {}
+      }
       if (tunnel) {
         await tunnel.close();
       }

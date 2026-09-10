@@ -95,7 +95,7 @@ export function resolveAllowedOrigins(env = process.env): string[] {
 }
 
 export const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Trust reverse proxy (Cloud Run, Nginx, load balancers)
 app.set('trust proxy', 1);
@@ -479,7 +479,11 @@ app.post('/api/clickhouse/scan', requireAuditor, scanLimiter, async (req: Reques
         mergesSummary: { activeMerges: clusterData.merges.length, sample: clusterData.merges },
         slowQueries: clusterData.queryLog.slice(0, 10),
         expensivePatterns: clusterData.queryLog.filter((q) => q.read_rows > 1_000_000),
-        columnsWithIssues: clusterData.columns.filter((c) => c.is_nullable || (c.cardinality_approx && c.cardinality_approx < 100)),
+        columnsWithIssues: clusterData.columns.filter((c) => {
+          const isNullable = Boolean(c.is_nullable) || String(c.type || '').startsWith('Nullable(');
+          const isLowCard = typeof c.cardinality_approx === 'number' && c.cardinality_approx < 100;
+          return isNullable || isLowCard;
+        }),
         configSettings: clusterData.settings,
       },
       migrationScript: activeMigrationScript,

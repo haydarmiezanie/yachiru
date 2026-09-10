@@ -175,6 +175,8 @@ Configure these settings in your `.env` file or environment:
 |---|---|---|---|
 | `PORT` | HTTP Port for the application | No | `3000` |
 | `NODE_ENV` | Environment mode (`production` / `development`) | No | `development` |
+| `ENCRYPTION_KEY` | 32+ character cryptographic secret for AES-256-GCM credential encryption. **Required in production if using Saved Connections / SSH tunnels**. In development, an ephemeral key is generated. | **Required in Prod** | *(Ephemeral in dev)* |
+| `SUPER_ADMIN_EMAIL` | Designated super administrator email with permanent unrevokable Admin rights | No | `idarstore24@gmail.com` |
 | `GEMINI_API_KEY` | Google Gemini API key for AI synthesis | No | - |
 | `OPENAI_API_KEY` | OpenAI API key for AI synthesis | No | - |
 | `YACHIRU_API_KEY` | Secret API key to require `x-api-key` / `Bearer` authentication | No | *(None)* |
@@ -186,6 +188,24 @@ Configure these settings in your `.env` file or environment:
 | `CLICKHOUSE_QUERY_TIMEOUT_MS` | Timeout in ms for scanner queries before aborting (prevents hanging connection exhaustion / DoS) | No | `10000` |
 | `USE_FIRESTORE_HISTORY` | Store scan reports in Cloud Firestore document store alongside local atomic document store | No | `false` |
 | `LOG_LEVEL` | Structured logging level (`fatal`, `error`, `warn`, `info`, `debug`) | No | `info` |
+
+---
+
+## 🔒 Security Architecture & Hardening
+
+### 1. Firestore Security Rules & Templating
+Firestore rules are managed via a master template (`firestore.rules.template`) that binds the Super Administrator identity directly to the `SUPER_ADMIN_EMAIL` configuration:
+- **No Self-Privilege Escalation**: Non-admin users are strictly restricted on creation to `role: 'viewer'` and `status: 'pending'`. Any client-side attempt to self-assign `role: 'auditor'` or `status: 'approved'` is rejected at the Firestore rules layer.
+- **Access Requests Defense**: `access_requests/{uid}` creation requires `status == 'pending'`. Only genuine admins can approve requests.
+- **Rules Generation**: Run `npm run rules:generate` to re-compile `firestore.rules` for a custom super admin email before running deployment.
+
+### 2. Saved Credential Encryption & Key Rotation
+All sensitive connection assets (ClickHouse passwords, SSH passwords, SSH private keys, passphrases) are encrypted at rest using AES-256-GCM.
+- In production (`NODE_ENV=production`), `ENCRYPTION_KEY` is strictly required and fails fast on startup if omitted.
+- **Migration Note**: When configuring or rotating `ENCRYPTION_KEY`, existing connection records encrypted under previous keys will fail decryption and must be re-entered and saved.
+
+### 3. DNS-Rebinding TOCTOU Defense
+ClickHouse scanner connections enforce strict IP-pinning via a custom network connection dispatcher. The initial hostname resolution verifies that the destination is not an internal, private, loopback, or cloud-metadata address. The verified IP is pinned for all subsequent query dispatches, preventing malicious DNS rebinding attacks while maintaining correct TLS Server Name Indication (SNI) and HTTP Host headers.
 
 ---
 

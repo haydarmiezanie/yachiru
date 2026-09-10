@@ -4,6 +4,7 @@ import {
   escapeClickHouseString,
   ClickHouseScannerClient,
   ClickHouseTableRow,
+  scannerFetch,
 } from '../server/scanner/clickhouseClient.js';
 
 describe('ClickHouse Scanner Client Security & Parsing', () => {
@@ -131,7 +132,7 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
       let inFlight = 0;
       let maxConcurrent = 0;
 
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const mockFetchHandler = async (_url: any, init: any) => {
         inFlight++;
         if (inFlight > maxConcurrent) {
           maxConcurrent = inFlight;
@@ -166,7 +167,10 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
         }
 
         return new Response(JSON.stringify([]), { status: 200 });
-      });
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(mockFetchHandler as any);
+      const scannerFetchSpy = vi.spyOn(scannerFetch, 'fetch').mockImplementation(mockFetchHandler as any);
 
       const data = await client.fetchClusterData();
 
@@ -181,6 +185,7 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
       expect(data.settings).toHaveLength(1);
 
       fetchSpy.mockRestore();
+      scannerFetchSpy.mockRestore();
     });
 
     it('aborts hanging queries via AbortController timeout and returns fallback without blocking the scan', async () => {
@@ -195,7 +200,7 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
         lookbackDays: 7,
       });
 
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const mockAbortHandler = async (_url: any, init: any) => {
         const body = (init?.body as string) || '';
         const signal = init?.signal;
 
@@ -219,7 +224,10 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
         }
 
         return new Response(JSON.stringify([]), { status: 200 });
-      });
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(mockAbortHandler as any);
+      const scannerFetchSpy = vi.spyOn(scannerFetch, 'fetch').mockImplementation(mockAbortHandler as any);
 
       const startTime = Date.now();
       const data = await client.fetchClusterData();
@@ -237,6 +245,90 @@ describe('ClickHouse Scanner Client Security & Parsing', () => {
       } else {
         delete process.env.CLICKHOUSE_QUERY_TIMEOUT_MS;
       }
+      fetchSpy.mockRestore();
+      scannerFetchSpy.mockRestore();
+    });
+
+    it('round-trips is_nullable correctly from system.columns and scopes system.merges query', async () => {
+      const client = new ClickHouseScannerClient({
+        host: '93.184.216.34',
+        port: 8123,
+        database: 'production_analytics',
+        user: 'scanner',
+      });
+
+      const executedQueries: string[] = [];
+
+      const mockQueryHandler = async (_url: any, init: any) => {
+        const body = (init?.body as string) || '';
+        executedQueries.push(body);
+
+        if (body.includes('SELECT version()')) {
+          return new Response(JSON.stringify([{ version: '24.3.1.2672', uptime: 7200 }]), { status: 200 });
+        }
+        if (body.includes('FROM system.columns')) {
+          // Verify query requests is_nullable and scopes to production_analytics
+          expect(body).toContain('is_nullable');
+          expect(body).toContain("WHERE database = 'production_analytics'");
+          return new Response(
+            JSON.stringify([
+              {
+                database: 'production_analytics',
+                table: 'events',
+                name: 'event_id',
+                type: 'UUID',
+                data_compressed_bytes: 1000,
+                data_uncompressed_bytes: 2000,
+                is_nullable: 0,
+              },
+              {
+                database: 'production_analytics',
+                table: 'events',
+                name: 'user_email',
+                type: 'Nullable(String)',
+                data_compressed_bytes: 5000,
+                data_uncompressed_bytes: 15000,
+                is_nullable: 1,
+              },
+              {
+                database: 'production_analytics',
+                table: 'events',
+                name: 'legacy_notes',
+                type: 'Nullable(String)',
+                data_compressed_bytes: 200,
+                data_uncompressed_bytes: 500,
+                // Even if is_nullable is not returned as 1, Nullable(String) type normalizes to true
+                is_nullable: 0,
+              },
+            ]),
+            { status: 200 }
+          );
+        }
+        if (body.includes('FROM system.merges')) {
+          // Verify system.merges is scoped to production_analytics
+          expect(body).toContain("WHERE database = 'production_analytics'");
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      };
+
+      const scannerFetchSpy = vi.spyOn(scannerFetch, 'fetch').mockImplementation(mockQueryHandler as any);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(mockQueryHandler as any);
+
+      const data = await client.fetchClusterData();
+
+      expect(data.columns).toHaveLength(3);
+      expect(data.columns[0].name).toBe('event_id');
+      expect(data.columns[0].is_nullable).toBe(false);
+      expect(data.columns[0].cardinality_approx).toBeUndefined();
+
+      expect(data.columns[1].name).toBe('user_email');
+      expect(data.columns[1].is_nullable).toBe(true);
+
+      expect(data.columns[2].name).toBe('legacy_notes');
+      expect(data.columns[2].is_nullable).toBe(true);
+
+      scannerFetchSpy.mockRestore();
       fetchSpy.mockRestore();
     });
   });

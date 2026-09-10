@@ -168,8 +168,9 @@ export const DeepDiveInspector: React.FC<DeepDiveInspectorProps> = ({ report }) 
       {/* 3. Columns & Codecs Matrix */}
       {subTab === 'columns' && (
         <div className="rounded-xl border border-slate-800 bg-slate-900/80 overflow-hidden">
-          <div className="p-3 bg-slate-950 border-b border-slate-800 text-xs text-slate-400">
-            Columns flagged with optimization opportunities (Nullable overuse, LowCardinality candidates, Codec missing):
+          <div className="p-3 bg-slate-950 border-b border-slate-800 text-xs text-slate-400 flex flex-wrap items-center justify-between gap-2">
+            <span>Columns flagged with optimization opportunities (Nullable overuse, LowCardinality candidates, Codec missing):</span>
+            <span className="text-[11px] text-slate-500">Note: Column cardinality is not queried on live scans to prevent expensive table scans.</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
@@ -184,22 +185,31 @@ export const DeepDiveInspector: React.FC<DeepDiveInspectorProps> = ({ report }) 
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 text-slate-300 font-mono">
-                {rawStats.columnsWithIssues?.map((col: any, idx: number) => (
-                  <tr key={idx} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="p-3 text-slate-200">{col.table}</td>
-                    <td className="p-3 text-amber-300 font-semibold">{col.name}</td>
-                    <td className="p-3 text-slate-400">{col.type}</td>
-                    <td className="p-3 text-slate-400">{col.cardinality_approx ?? 'N/A'}</td>
-                    <td className="p-3 text-slate-400">{formatBytes(col.data_uncompressed_bytes || 0)}</td>
-                    <td className="p-3 text-emerald-400 font-sans font-medium">
-                      {col.is_nullable
-                        ? 'Remove Nullable -> Default'
-                        : col.cardinality_approx && col.cardinality_approx < 100
-                        ? 'Convert to LowCardinality(String)'
-                        : 'Apply CODEC(ZSTD)'}
-                    </td>
-                  </tr>
-                ))}
+                {rawStats.columnsWithIssues?.map((col: any, idx: number) => {
+                  const isColNullable = Boolean(col.is_nullable) || String(col.type || '').startsWith('Nullable(');
+                  return (
+                    <tr key={idx} className="hover:bg-slate-800/40 transition-colors">
+                      <td className="p-3 text-slate-200">{col.table}</td>
+                      <td className="p-3 text-amber-300 font-semibold">{col.name}</td>
+                      <td className="p-3 text-slate-400">{col.type}</td>
+                      <td className="p-3 text-slate-400">
+                        {typeof col.cardinality_approx === 'number' ? (
+                          col.cardinality_approx
+                        ) : (
+                          <span className="text-slate-500 italic text-[11px]">Not computed (live)</span>
+                        )}
+                      </td>
+                      <td className="p-3 text-slate-400">{formatBytes(col.data_uncompressed_bytes || 0)}</td>
+                      <td className="p-3 text-emerald-400 font-sans font-medium">
+                        {isColNullable
+                          ? 'Remove Nullable -> Default'
+                          : col.cardinality_approx && col.cardinality_approx < 100
+                          ? 'Convert to LowCardinality(String)'
+                          : 'Apply CODEC(ZSTD)'}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

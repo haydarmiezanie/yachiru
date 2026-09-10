@@ -1,6 +1,7 @@
 import dns from 'dns/promises';
 import net from 'net';
 import ipaddr from 'ipaddr.js';
+import { Agent } from 'undici';
 
 const RESTRICTED_RANGES = new Set([
   'private',
@@ -128,26 +129,32 @@ export function checkStaticHostSafety(rawHost: string, isDemoCluster = false): H
   return { safe: true, cleanHost };
 }
 
+export interface PinnedHostResult {
+  safeHost: string;
+  pinnedIp: string;
+  allAddresses: string[];
+}
+
 /**
- * Asserts that the provided target host does not resolve to loopback, private VPC,
- * link-local (e.g., GCP metadata 169.254.169.254), or reserved networks.
+ * Resolves the host, verifies that neither the host nor ANY resolved IP is in a restricted
+ * network range (SSRF check), and returns the validated host and pinned IP.
  *
- * Performs static host safety check first, followed by full asynchronous DNS resolution.
- * Throws an Error if connection is refused due to SSRF risk.
+ * This prevents DNS-rebinding TOCTOU attacks by enabling the caller to pin the connection
+ * directly to the validated IP.
  */
-export async function assertSafeHost(rawHost: string, isDemoCluster = false): Promise<void> {
+export async function resolveAndPinSafeHost(rawHost: string, isDemoCluster = false): Promise<PinnedHostResult> {
   const staticCheck = checkStaticHostSafety(rawHost, isDemoCluster);
   if (!staticCheck.safe) {
     throw new Error(staticCheck.error || `Refusing to connect to restricted host or domain: ${staticCheck.cleanHost}`);
   }
 
-  if (isDemoCluster || process.env.ALLOW_INTERNAL_CLUSTERS === 'true') {
-    return;
-  }
-
   const cleanHost = staticCheck.cleanHost;
 
-  // 2. Resolve DNS addresses (or check literal IP)
+  if (isDemoCluster || process.env.ALLOW_INTERNAL_CLUSTERS === 'true') {
+    return { safeHost: cleanHost, pinnedIp: cleanHost, allAddresses: [cleanHost] };
+  }
+
+  // Resolve DNS addresses (or check literal IP)
   let addresses: string[] = [];
   if (net.isIP(cleanHost)) {
     addresses = [cleanHost];
@@ -164,7 +171,7 @@ export async function assertSafeHost(rawHost: string, isDemoCluster = false): Pr
     throw new Error(`No network addresses resolved for host: ${cleanHost}`);
   }
 
-  // 3. Inspect every resolved IP address
+  // Inspect every resolved IP address
   for (const addr of addresses) {
     const { isRestricted, range } = isRestrictedIpAddress(addr);
     if (isRestricted) {
@@ -173,4 +180,48 @@ export async function assertSafeHost(rawHost: string, isDemoCluster = false): Pr
       );
     }
   }
+
+  return {
+    safeHost: cleanHost,
+    pinnedIp: addresses[0],
+    allAddresses: addresses,
+  };
 }
+
+/**
+ * Asserts that the provided target host does not resolve to loopback, private VPC,
+ * link-local (e.g., GCP metadata 169.254.169.254), or reserved networks.
+ *
+ * Performs static host safety check first, followed by full asynchronous DNS resolution.
+ * Throws an Error if connection is refused due to SSRF risk.
+ */
+export async function assertSafeHost(rawHost: string, isDemoCluster = false): Promise<void> {
+  await resolveAndPinSafeHost(rawHost, isDemoCluster);
+}
+
+/**
+ * Creates an undici Agent that forces all TCP connections to resolve to the pinned IP.
+ *
+ * This guarantees immune defense against DNS-rebinding Time-Of-Check to Time-Of-Use (TOCTOU)
+ * attacks: the underlying socket connects strictly to the pre-validated IP, while retaining
+ * the original Host header and TLS SNI (Server Name Indication) for valid certificate verification.
+ */
+export function createPinnedDispatcher(pinnedIp: string): Agent {
+  const family = net.isIPv6(pinnedIp) ? 6 : 4;
+  return new Agent({
+    connect: {
+      lookup: (_hostname: string, options: any, callback: any) => {
+        if (typeof options === 'function') {
+          callback = options;
+          options = {};
+        }
+        if (options && (options as any).all) {
+          callback(null, [{ address: pinnedIp, family }]);
+        } else {
+          callback(null, pinnedIp, family);
+        }
+      },
+    },
+  });
+}
+

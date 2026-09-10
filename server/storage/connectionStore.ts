@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { getAdminFirestore } from '../auth/rbacMiddleware.js';
+import { isFirestoreEnabled, setFirestoreBlocked } from './firestoreGuard.js';
 import { encryptSecret, decryptSecret } from '../security/encryption.js';
 import { ScanTarget, SavedClusterConnection, SshTunnelConfig } from '../../src/types/yachiru.js';
 import { logger } from '../logger.js';
@@ -90,13 +91,18 @@ export async function saveConnection(
     logger.warn({ err: err?.message, id }, 'Failed to save connection to local file');
   }
 
-  // Save to Firestore
-  const db = getAdminFirestore();
-  if (db) {
-    try {
-      await db.collection('connections').doc(id).set(doc);
-    } catch (err: any) {
-      logger.warn({ err: err?.message, id }, 'Failed to persist connection to Firestore');
+  // Save to Firestore (only when explicitly enabled)
+  if (isFirestoreEnabled('connections')) {
+    const db = getAdminFirestore();
+    if (db) {
+      try {
+        await db.collection('connections').doc(id).set(doc);
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
+        }
+        logger.warn({ err: err?.message, id }, 'Failed to persist connection to Firestore');
+      }
     }
   }
 
@@ -171,13 +177,18 @@ export async function updateConnection(
     logger.warn({ err: err?.message, id }, 'Failed to save updated connection to local file');
   }
 
-  // Save to Firestore
-  const db = getAdminFirestore();
-  if (db) {
-    try {
-      await db.collection('connections').doc(id).set(doc);
-    } catch (err: any) {
-      logger.warn({ err: err?.message, id }, 'Failed to update connection in Firestore');
+  // Save to Firestore (only when explicitly enabled)
+  if (isFirestoreEnabled('connections')) {
+    const db = getAdminFirestore();
+    if (db) {
+      try {
+        await db.collection('connections').doc(id).set(doc);
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
+        }
+        logger.warn({ err: err?.message, id }, 'Failed to update connection in Firestore');
+      }
     }
   }
 
@@ -196,14 +207,20 @@ export async function getStoredConnection(id: string): Promise<StoredConnectionD
     } catch {}
   }
 
-  const db = getAdminFirestore();
-  if (db) {
-    try {
-      const doc = await db.collection('connections').doc(id).get();
-      if (doc.exists) {
-        return doc.data() as StoredConnectionDocument;
+  if (isFirestoreEnabled('connections')) {
+    const db = getAdminFirestore();
+    if (db) {
+      try {
+        const doc = await db.collection('connections').doc(id).get();
+        if (doc.exists) {
+          return doc.data() as StoredConnectionDocument;
+        }
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
+        }
       }
-    } catch {}
+    }
   }
 
   return null;
@@ -321,18 +338,24 @@ export async function listSavedConnections(): Promise<SavedClusterConnection[]> 
     }
   } catch {}
 
-  // Read Firestore
-  const db = getAdminFirestore();
-  if (db) {
-    try {
-      const snap = await db.collection('connections').get();
-      snap.forEach((d) => {
-        const doc = d.data() as StoredConnectionDocument;
-        if (doc && doc.id) {
-          map.set(doc.id, doc);
+  // Read Firestore (only when explicitly enabled)
+  if (isFirestoreEnabled('connections')) {
+    const db = getAdminFirestore();
+    if (db) {
+      try {
+        const snap = await db.collection('connections').get();
+        snap.forEach((d) => {
+          const doc = d.data() as StoredConnectionDocument;
+          if (doc && doc.id) {
+            map.set(doc.id, doc);
+          }
+        });
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
         }
-      });
-    } catch {}
+      }
+    }
   }
 
   return Array.from(map.values()).map(sanitizeConnectionForClient);
@@ -351,12 +374,18 @@ export async function deleteConnection(id: string): Promise<boolean> {
     } catch {}
   }
 
-  const db = getAdminFirestore();
-  if (db) {
-    try {
-      await db.collection('connections').doc(id).delete();
-      deleted = true;
-    } catch {}
+  if (isFirestoreEnabled('connections')) {
+    const db = getAdminFirestore();
+    if (db) {
+      try {
+        await db.collection('connections').doc(id).delete();
+        deleted = true;
+      } catch (err: any) {
+        if (err?.code === 7 || String(err?.message || '').includes('PERMISSION_DENIED') || String(err?.message || '').includes('default credentials')) {
+          setFirestoreBlocked(true);
+        }
+      }
+    }
   }
 
   return deleted;

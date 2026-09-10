@@ -135,6 +135,44 @@ describe('Dimension Analyzers', () => {
     expect(partFinding?.recommendationSql).toContain('async_insert = 1');
   });
 
+  it('analyzePartsAndMerges scopes merge analysis strictly to target database and excludes other databases', () => {
+    const mixedMergeData: RawClusterData = {
+      ...mockClusterData,
+      database: 'tenant_prod',
+      targetDatabase: 'tenant_prod',
+      merges: [
+        {
+          database: 'unrelated_tenant_dev',
+          table: 'unrelated_table',
+          elapsed: 450, // Long running, but belonging to another database!
+          progress: 0.1,
+          num_parts: 50,
+          total_size_bytes_compressed: 500_000_000,
+          memory_usage: 100_000_000,
+          is_mutation: 0,
+        },
+        {
+          database: 'tenant_prod',
+          table: 'events_raw',
+          elapsed: 350, // Long running on the target database!
+          progress: 0.4,
+          num_parts: 20,
+          total_size_bytes_compressed: 200_000_000,
+          memory_usage: 50_000_000,
+          is_mutation: 0,
+        },
+      ],
+    };
+
+    const findings = analyzePartsAndMerges(mixedMergeData, nextId);
+    const mergeFindings = findings.filter((f) => f.title.includes('Long-running Merge'));
+
+    // Must find only the merge on target database 'events_raw', ignoring 'unrelated_table' from unrelated_tenant_dev
+    expect(mergeFindings).toHaveLength(1);
+    expect(mergeFindings[0].tableName).toBe('events_raw');
+    expect(mergeFindings[0].recommendationSql).toContain("WHERE database = 'tenant_prod'");
+  });
+
   it('analyzePrimaryKeyAndQueries detects unindexed WHERE scans', () => {
     const findings = analyzePrimaryKeyAndQueries(mockClusterData, nextId);
     expect(findings.length).toBeGreaterThanOrEqual(1);
