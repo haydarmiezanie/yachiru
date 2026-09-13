@@ -1,354 +1,474 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { CheckCategory, CheckFinding, CheckSeverity } from '../types.js';
 import {
+  AlertOctagon,
   AlertTriangle,
-  Info,
   CheckCircle2,
   Copy,
   Check,
-  Zap,
   Search,
   Filter,
-  Layers,
-  ArrowUpRight,
+  Code2,
+  Table as TableIcon,
+  ChevronDown,
   Sparkles,
-  Database,
-  Flame,
+  Zap,
+  ListOrdered,
+  Activity,
 } from 'lucide-react';
-import { DimensionId, Finding, FindingSeverity } from '../types/yachiru';
 
 interface FindingsListProps {
-  findings: Finding[];
-  selectedDimension: DimensionId | 'all';
-  onSelectDimension: (dim: DimensionId | 'all') => void;
+  findings: CheckFinding[];
+  selectedCategory: CheckCategory | 'all';
+  onCategoryChange: (cat: CheckCategory | 'all') => void;
+  tables: string[];
+  scanId?: string;
+  isAiGenerated?: boolean;
+  narrativeIdentity?: string;
 }
 
 export const FindingsList: React.FC<FindingsListProps> = ({
   findings,
-  selectedDimension,
-  onSelectDimension,
+  selectedCategory,
+  onCategoryChange,
+  tables,
+  scanId,
+  isAiGenerated,
+  narrativeIdentity,
 }) => {
-  const [severityFilter, setSeverityFilter] = useState<FindingSeverity | 'all'>('all');
-  const [onlyAiFilter, setOnlyAiFilter] = useState(false);
+  const [severityFilter, setSeverityFilter] = useState<'all' | CheckSeverity>('all');
+
+  // Derive whether AI-diagnosed findings are present in the current report
+  const hasAiFindings = useMemo(() => findings.some((f) => f.is_ai_diagnosed), [findings]);
+
+  // Initial sourceFilter state: if AI findings are present, default to 'ai', otherwise 'all'
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'ai' | 'deterministic'>(() =>
+    findings.some((f) => f.is_ai_diagnosed) ? 'ai' : 'all'
+  );
+  const [tableFilter, setTableFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const aiAnalyzedCount = findings.filter((f) => Boolean(f.aiInsight)).length;
+  // Automatically select 'ai' on a fresh scan or narrative regeneration whenever AI findings are present, otherwise 'all'.
+  // Keyed on the stable identity of the current report and narrative generation.
+  // The user remains able to manually switch the toggle afterward without this effect overriding their choice.
+  useEffect(() => {
+    if (hasAiFindings) {
+      setSourceFilter('ai');
+    } else {
+      setSourceFilter('all');
+    }
+  }, [scanId, isAiGenerated, narrativeIdentity, hasAiFindings]);
 
   const handleCopySql = (id: string, sql: string) => {
     navigator.clipboard.writeText(sql);
     setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+    setTimeout(() => setCopiedId(null), 2500);
   };
 
-  // Filter findings
-  const filteredFindings = findings.filter((f) => {
-    if (selectedDimension !== 'all' && f.dimension !== selectedDimension) return false;
-    if (severityFilter !== 'all' && f.severity !== severityFilter) return false;
-    if (onlyAiFilter && !f.aiInsight) return false;
-    if (searchQuery.trim() !== '') {
-      const q = searchQuery.toLowerCase();
-      const matchTitle = f.title.toLowerCase().includes(q);
-      const matchTable = f.tableName?.toLowerCase().includes(q) || false;
-      const matchWhat = f.what.toLowerCase().includes(q);
-      const matchSql = f.recommendationSql?.toLowerCase().includes(q) || false;
-      return matchTitle || matchTable || matchWhat || matchSql;
-    }
-    return true;
-  });
+  // Filter, deduplicate by ID, and sort: Critical first, then Warning, then Good
+  const filteredFindings = useMemo(() => {
+    const seenIds = new Set<string>();
+    return findings
+      .filter((f) => {
+        if (seenIds.has(f.id)) return false;
+        seenIds.add(f.id);
 
-  const getSeverityBadge = (severity: FindingSeverity) => {
-    switch (severity) {
-      case 'critical':
-        return (
-          <span className="flex items-center gap-1 rounded-md bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 text-xs font-bold text-rose-400">
-            <Flame className="h-3.5 w-3.5" /> CRITICAL
-          </span>
-        );
-      case 'warning':
-        return (
-          <span className="flex items-center gap-1 rounded-md bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 text-xs font-bold text-amber-400">
-            <AlertTriangle className="h-3.5 w-3.5" /> WARNING
-          </span>
-        );
-      case 'info':
-        return (
-          <span className="flex items-center gap-1 rounded-md bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 text-xs font-bold text-blue-400">
-            <Info className="h-3.5 w-3.5" /> INFO
-          </span>
-        );
-      default:
-        return (
-          <span className="flex items-center gap-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-xs font-bold text-emerald-400">
-            <CheckCircle2 className="h-3.5 w-3.5" /> OPTIMAL
-          </span>
-        );
-    }
-  };
+        if (selectedCategory !== 'all' && f.category !== selectedCategory) return false;
+        if (severityFilter !== 'all' && f.status !== severityFilter) return false;
+        if (tableFilter !== 'all' && f.table !== tableFilter) return false;
+        if (sourceFilter === 'ai' && !f.is_ai_diagnosed) return false;
+        if (sourceFilter === 'deterministic' && f.is_ai_diagnosed) return false;
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const matchTitle = f.title.toLowerCase().includes(q);
+          const matchTable = f.table?.toLowerCase().includes(q) || false;
+          const matchEvidence = f.evidence.toLowerCase().includes(q);
+          const matchImpact = f.impact.toLowerCase().includes(q);
+          const matchRootCause = f.ai_root_cause?.toLowerCase().includes(q) || false;
+          if (!matchTitle && !matchTable && !matchEvidence && !matchImpact && !matchRootCause) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        // AI findings priority if same severity
+        const order: Record<CheckSeverity, number> = { critical: 0, warning: 1, good: 2 };
+        if (order[a.status] !== order[b.status]) {
+          return order[a.status] - order[b.status];
+        }
+        if (a.is_ai_diagnosed && !b.is_ai_diagnosed) return -1;
+        if (!a.is_ai_diagnosed && b.is_ai_diagnosed) return 1;
+        return 0;
+      });
+  }, [findings, selectedCategory, severityFilter, sourceFilter, tableFilter, searchQuery]);
 
-  const getPriorityPill = (priority?: Finding['relativePriority']) => {
-    if (!priority) return null;
-    const effortColor =
-      priority.effort === 'Low' ? 'text-emerald-400' : priority.effort === 'Medium' ? 'text-amber-400' : 'text-rose-400';
-    const impactColor =
-      priority.impact === 'Critical'
-        ? 'text-rose-400 font-bold'
-        : priority.impact === 'High'
-        ? 'text-amber-400 font-semibold'
-        : 'text-blue-400';
-
-    return (
-      <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-950/80 border border-slate-800 px-2.5 py-1 text-xs">
-        <span className="font-mono font-bold text-amber-400">Priority #{priority.rank}</span>
-        <span className="text-slate-600">|</span>
-        <span className="text-slate-400">
-          Effort: <strong className={effortColor}>{priority.effort}</strong>
-        </span>
-        <span className="text-slate-600">|</span>
-        <span className="text-slate-400">
-          Impact: <strong className={impactColor}>{priority.impact}</strong>
-        </span>
-      </div>
-    );
-  };
+  const counts = useMemo(() => {
+    return {
+      all: findings.length,
+      ai: findings.filter((f) => f.is_ai_diagnosed).length,
+      deterministic: findings.filter((f) => !f.is_ai_diagnosed).length,
+      critical: findings.filter((f) => f.status === 'critical').length,
+      warning: findings.filter((f) => f.status === 'warning').length,
+      good: findings.filter((f) => f.status === 'good').length,
+    };
+  }, [findings]);
 
   return (
-    <div className="space-y-5">
-      {/* Filter and Search Bar */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5 shadow-md">
-        {/* Search */}
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+    <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-6 sm:p-7 shadow-xl">
+      {/* Title & Controls Bar */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6 pb-5 border-b border-zinc-800">
+        <div>
+          <h3 className="text-base font-bold text-white tracking-tight flex items-center gap-2">
+            Detailed Diagnostic Findings & Remediations
+            <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-700 font-mono">
+              {filteredFindings.length} of {findings.length}
+            </span>
+          </h3>
+          <p className="text-xs text-zinc-400">
+            ClickHouse architectural evaluations, root cause diagnoses, and executable remediation scripts
+          </p>
+        </div>
+
+        {/* Source Switcher (All vs AI vs Deterministic) & Severity */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Engine Source Filter */}
+          <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 text-xs">
+            <button
+              onClick={() => setSourceFilter('all')}
+              className={`px-2.5 py-1.5 rounded-lg font-medium transition whitespace-nowrap ${
+                sourceFilter === 'all'
+                  ? 'bg-zinc-800 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              All Sources ({counts.all})
+            </button>
+            {counts.ai > 0 && (
+              <button
+                onClick={() => setSourceFilter('ai')}
+                className={`px-2.5 py-1.5 rounded-lg font-medium transition whitespace-nowrap flex items-center gap-1.5 ${
+                  sourceFilter === 'ai'
+                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <Sparkles className="w-3 h-3 text-rose-400" />
+                <span>AI Diagnosed ({counts.ai})</span>
+              </button>
+            )}
+            <button
+              onClick={() => setSourceFilter('deterministic')}
+              className={`px-2.5 py-1.5 rounded-lg font-medium transition whitespace-nowrap flex items-center gap-1.5 ${
+                sourceFilter === 'deterministic'
+                  ? 'bg-zinc-800 text-amber-300 shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Zap className="w-3 h-3 text-amber-400" />
+              <span>Rule Engine ({counts.deterministic})</span>
+            </button>
+          </div>
+
+          {/* Severity Tabs */}
+          <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 text-xs overflow-x-auto">
+            <button
+              onClick={() => setSeverityFilter('all')}
+              className={`px-3 py-1.5 rounded-lg font-medium transition whitespace-nowrap ${
+                severityFilter === 'all'
+                  ? 'bg-zinc-800 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              All Severities
+            </button>
+            <button
+              onClick={() => setSeverityFilter('critical')}
+              className={`px-3 py-1.5 rounded-lg font-medium transition whitespace-nowrap flex items-center gap-1.5 ${
+                severityFilter === 'critical'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                  : 'text-rose-400/80 hover:text-rose-300'
+              }`}
+            >
+              <AlertOctagon className="w-3.5 h-3.5" />
+              <span>Critical ({counts.critical})</span>
+            </button>
+            <button
+              onClick={() => setSeverityFilter('warning')}
+              className={`px-3 py-1.5 rounded-lg font-medium transition whitespace-nowrap flex items-center gap-1.5 ${
+                severityFilter === 'warning'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  : 'text-amber-400/80 hover:text-amber-300'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Warning ({counts.warning})</span>
+            </button>
+            <button
+              onClick={() => setSeverityFilter('good')}
+              className={`px-3 py-1.5 rounded-lg font-medium transition whitespace-nowrap flex items-center gap-1.5 ${
+                severityFilter === 'good'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'text-emerald-400/80 hover:text-emerald-300'
+              }`}
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Optimal ({counts.good})</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Filter Row: Search & Dropdowns */}
+      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 mb-6">
+        <div className="sm:col-span-6 relative">
+          <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search findings by table, keyword, or SQL..."
-            className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+            placeholder="Search diagnosis, root cause, evidence metrics, or table..."
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl pl-9 pr-4 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition"
           />
         </div>
 
-        {/* Severity Filter */}
-        <div className="flex items-center gap-1 overflow-x-auto text-xs">
-          {(['all', 'critical', 'warning', 'info'] as const).map((sev) => {
-            const count =
-              sev === 'all'
-                ? findings.length
-                : findings.filter((f) => f.severity === sev).length;
-            const isSelected = severityFilter === sev;
-            return (
-              <button
-                key={sev}
-                onClick={() => setSeverityFilter(sev)}
-                className={`rounded-lg px-2.5 py-1.5 font-medium uppercase tracking-wider transition-all whitespace-nowrap ${
-                  isSelected
-                    ? 'bg-amber-500 text-slate-950 font-bold shadow'
-                    : 'text-slate-400 hover:text-slate-200 bg-slate-950/60 border border-slate-800'
-                }`}
-              >
-                {sev} ({count})
-              </button>
-            );
-          })}
-
-          {/* AI Insights Filter Toggle */}
-          {aiAnalyzedCount > 0 && (
-            <button
-              onClick={() => setOnlyAiFilter(!onlyAiFilter)}
-              className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 font-medium transition-all whitespace-nowrap ${
-                onlyAiFilter
-                  ? 'bg-purple-600 text-white font-bold shadow'
-                  : 'text-purple-300 hover:text-purple-100 bg-purple-950/40 border border-purple-500/30'
-              }`}
-              title="Filter findings analyzed with deep AI reasoning"
-            >
-              <Sparkles className="h-3 w-3 text-purple-400" />
-              <span>AI Enriched ({aiAnalyzedCount}/{findings.length})</span>
-            </button>
-          )}
+        <div className="sm:col-span-3">
+          <select
+            value={tableFilter}
+            onChange={(e) => setTableFilter(e.target.value)}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-rose-500 transition"
+          >
+            <option value="all">All Tables ({tables.length})</option>
+            {tables.map((t) => (
+              <option key={t} value={t}>
+                Table: {t}
+              </option>
+            ))}
+          </select>
         </div>
 
-        {/* Dimension Filter Dropdown */}
-        <div className="flex items-center gap-1.5 text-xs">
-          <Filter className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+        <div className="sm:col-span-3">
           <select
-            value={selectedDimension}
-            onChange={(e) => onSelectDimension(e.target.value as any)}
-            className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-slate-200 focus:border-amber-500 focus:outline-none"
+            value={selectedCategory}
+            onChange={(e) => onCategoryChange(e.target.value as CheckCategory | 'all')}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-rose-500 transition"
           >
-            <option value="all">All 9 Dimensions</option>
-            <option value="table_engines_partitioning">1. Table Engines & Partitioning</option>
-            <option value="parts_and_merges">2. Parts & Merge Health</option>
-            <option value="primary_key_and_query_patterns">3. Primary Key & query_log</option>
-            <option value="skip_indexes">4. Skip Indexes</option>
-            <option value="data_types_and_storage">5. Data Types & Storage</option>
-            <option value="ttl_and_tiering">6. TTL & Retention</option>
-            <option value="materialized_views_redundant_compute">7. Materialized Views</option>
-            <option value="resource_and_config">8. Resource & Config</option>
-            <option value="general_query_performance">9. General Query Performance</option>
+            <option value="all">All Categories</option>
+            <option value="part_health">Part Health & Compaction</option>
+            <option value="primary_key">Primary Key & ORDER BY</option>
+            <option value="partitioning">Partitioning Strategy</option>
+            <option value="compression">Compression & Codecs</option>
+            <option value="table_engine">Table Engine Sanity</option>
+            <option value="skip_indices">Data Skipping Indices</option>
+            <option value="query_performance">Query Performance & Pruning</option>
+            <option value="replication_distributed">Replication & Distributed</option>
+            <option value="server_settings">Server & MergeTree Settings</option>
           </select>
         </div>
       </div>
 
-      {/* Findings List */}
+      {/* Findings List Items */}
       {filteredFindings.length === 0 ? (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-12 text-center">
-          <CheckCircle2 className="mx-auto h-10 w-10 text-emerald-400/80 mb-3" />
-          <h3 className="text-sm font-semibold text-slate-200">No matching issues found</h3>
-          <p className="mt-1 text-xs text-slate-400">
-            Try adjusting your search criteria or switching dimension filters.
-          </p>
+        <div className="text-center py-12 border border-dashed border-zinc-800 rounded-xl">
+          <CheckCircle2 className="w-8 h-8 text-zinc-600 mx-auto mb-2" />
+          <p className="text-sm font-medium text-zinc-400">No findings match your current filters</p>
+          <button
+            onClick={() => {
+              setSeverityFilter('all');
+              setSourceFilter('all');
+              setTableFilter('all');
+              setSearchQuery('');
+              onCategoryChange('all');
+            }}
+            className="mt-3 text-xs font-semibold text-rose-400 hover:text-rose-300 transition"
+          >
+            Reset all filters
+          </button>
         </div>
       ) : (
         <div className="space-y-4">
-          {filteredFindings.map((finding) => (
-            <div
-              key={finding.id}
-              className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg hover:border-slate-700 transition-all space-y-4"
-            >
-              {/* Header */}
-              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800/80 pb-3.5">
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {getSeverityBadge(finding.severity)}
-                    <span className="rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-300">
-                      {finding.dimensionName}
+          {filteredFindings.map((f) => {
+            const isCritical = f.status === 'critical';
+            const isWarning = f.status === 'warning';
+            const isAi = Boolean(f.is_ai_diagnosed);
+
+            let statusBadge = (
+              <span className="flex items-center gap-1 text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                OPTIMAL
+              </span>
+            );
+
+            let cardBorder = isAi ? 'border-rose-500/30 bg-zinc-950/70 shadow-md' : 'border-zinc-800 bg-zinc-900/40';
+
+            if (isCritical) {
+              statusBadge = (
+                <span className="flex items-center gap-1 text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                  <AlertOctagon className="w-3.5 h-3.5" />
+                  CRITICAL
+                </span>
+              );
+              cardBorder = isAi
+                ? 'border-rose-500/50 bg-rose-950/15 shadow-lg'
+                : 'border-rose-500/40 bg-zinc-950/60';
+            } else if (isWarning) {
+              statusBadge = (
+                <span className="flex items-center gap-1 text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  WARNING
+                </span>
+              );
+              cardBorder = isAi
+                ? 'border-amber-500/40 bg-amber-950/15 shadow-md'
+                : 'border-amber-500/30 bg-zinc-950/40';
+            }
+
+            return (
+              <div
+                key={f.id}
+                className={`p-5 rounded-xl border ${cardBorder} transition-all duration-150 hover:border-zinc-700 space-y-4`}
+              >
+                {/* Header: Status, Title, Category & Table Tag */}
+                <div className="flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    {statusBadge}
+                    {isAi && (
+                      <span className="flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                        <Sparkles className="w-3 h-3 text-rose-400" />
+                        AI DIAGNOSED
+                      </span>
+                    )}
+                    <h4 className="text-sm font-bold text-white">{f.title}</h4>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {f.table && (
+                      <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 flex items-center gap-1">
+                        <TableIcon className="w-3 h-3 text-zinc-500" />
+                        <span>{f.table}</span>
+                      </span>
+                    )}
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-400 font-medium">
+                      {f.category_name}
                     </span>
-                    {finding.tableName && (
-                      <span className="flex items-center gap-1 rounded bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 text-[11px] font-mono text-amber-300">
-                        <Database className="h-3 w-3" />
-                        {finding.tableName}
-                      </span>
-                    )}
-                    {finding.aiInsight && (
-                      <span className="flex items-center gap-1 rounded bg-purple-500/10 border border-purple-500/30 px-2 py-0.5 text-[11px] font-medium text-purple-300">
-                        <Sparkles className="h-3 w-3 text-purple-400" />
-                        AI Enhanced
-                      </span>
-                    )}
-                  </div>
-                  <h3 className="text-base font-bold text-slate-100 mt-1">{finding.title}</h3>
-                </div>
-
-                {/* Priority / Estimated Impact Badge */}
-                <div className="flex flex-col sm:items-end gap-1.5">
-                  {getPriorityPill(finding.relativePriority)}
-                  <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
-                    <Zap className="h-3.5 w-3.5 text-amber-400" />
-                    <span>Est. Impact: <strong>{finding.estimatedImpact.magnitude}</strong></span>
                   </div>
                 </div>
-              </div>
 
-              {/* What / Evidence Box */}
-              <div className="rounded-lg border border-slate-800/90 bg-slate-950/70 p-3.5">
-                <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                  <Database className="h-3.5 w-3.5 text-amber-400" />
-                  <span>Evidence from ClickHouse System Tables</span>
+                {/* Evidence & Assessment Box */}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3.5 rounded-lg bg-zinc-900/90 border border-zinc-800/80">
+                  <div className="md:col-span-4 border-b md:border-b-0 md:border-r border-zinc-800 pb-2 md:pb-0 md:pr-3">
+                    <span className="text-[11px] font-semibold text-zinc-500 uppercase block mb-1">
+                      {isAi ? 'Assessment Vector' : 'Observed Metric'}
+                    </span>
+                    <span className="text-xs font-mono font-bold text-zinc-100 block">
+                      {f.metric_value}
+                    </span>
+                    <span className="text-[11px] text-zinc-400 mt-1 block">
+                      {f.threshold}
+                    </span>
+                  </div>
+
+                  <div className="md:col-span-8">
+                    <span className="text-[11px] font-semibold text-zinc-500 uppercase block mb-1">
+                      {isAi ? 'Deep Architectural Evaluation' : 'Evidence Extracted from ClickHouse'}
+                    </span>
+                    <p className="text-xs text-zinc-300 leading-relaxed font-sans whitespace-pre-wrap">
+                      {f.evidence}
+                    </p>
+                  </div>
                 </div>
-                <p className="text-xs sm:text-sm text-slate-300 leading-relaxed font-mono">
-                  {finding.what}
-                </p>
-              </div>
 
-              {/* Why It Matters (Technical & AI Insights) */}
-              <div className="space-y-3 text-xs">
-                <div className="rounded-lg border border-slate-800/60 bg-slate-950/40 p-3">
-                  <span className="font-semibold text-slate-400 block mb-1">Technical Architecture Impact (System Tables):</span>
-                  <p className="text-slate-300 leading-relaxed">{finding.whyTechnical}</p>
-                </div>
-
-                {/* AI Deep Reasoning (Shown when AI successfully synthesized insight) */}
-                {finding.aiInsight ? (
-                  <div className="rounded-lg border border-purple-500/30 bg-purple-950/20 p-3.5 shadow-sm">
-                    <div className="flex items-center justify-between gap-2 mb-1.5">
-                      <span className="flex items-center gap-1.5 font-bold text-purple-300">
-                        <Sparkles className="h-3.5 w-3.5 text-purple-400" />
-                        AI Architectural Insight & Context:
+                {/* AI Root Cause & Risk Vector (if available) */}
+                {f.ai_root_cause && (
+                  <div className="p-3 rounded-lg bg-zinc-950/60 border border-zinc-800/80 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <span className="font-semibold text-rose-300/90 flex items-center gap-1 mb-1">
+                        <Activity className="w-3.5 h-3.5 text-rose-400" />
+                        Root Cause
                       </span>
-                      {finding.aiRiskLevel && (
-                        <span className="rounded bg-purple-500/20 px-2 py-0.5 text-[10px] font-bold text-purple-200 uppercase">
-                          AI Risk: {finding.aiRiskLevel}
+                      <p className="text-zinc-400 leading-relaxed">{f.ai_root_cause}</p>
+                    </div>
+                    {f.ai_risk_vector && (
+                      <div>
+                        <span className="font-semibold text-amber-300/90 flex items-center gap-1 mb-1">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                          Risk Vector
                         </span>
+                        <p className="text-zinc-400 leading-relaxed">{f.ai_risk_vector}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* AI Multi-Step Remediation Plan */}
+                {f.ai_remediation_steps && f.ai_remediation_steps.length > 0 && (
+                  <div className="p-3 rounded-lg bg-zinc-950/40 border border-zinc-800/60 text-xs">
+                    <span className="font-semibold text-zinc-300 flex items-center gap-1.5 mb-2">
+                      <ListOrdered className="w-3.5 h-3.5 text-rose-400" />
+                      Remediation Plan Steps
+                    </span>
+                    <ol className="list-decimal list-inside space-y-1 text-zinc-300">
+                      {f.ai_remediation_steps.map((step, idx) => (
+                        <li key={idx} className="leading-relaxed">
+                          <span>{step}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {/* Technical Impact (if deterministic) */}
+                {!f.ai_root_cause && f.impact && (
+                  <div className="text-xs text-zinc-400 leading-relaxed">
+                    <strong className="text-zinc-300">ClickHouse Mechanics: </strong>
+                    {f.impact}
+                  </div>
+                )}
+
+                {/* Copyable SQL or Action Recommendation */}
+                {f.recommendation_sql_or_text && (
+                  <div className="pt-2 border-t border-zinc-800/60">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] font-semibold text-zinc-400 flex items-center gap-1.5">
+                        <Code2 className="w-3.5 h-3.5 text-zinc-400" />
+                        <span>
+                          {f.is_sql_recommendation ? 'Recommended Remediation SQL / Tuning Command:' : 'Recommendation:'}
+                        </span>
+                      </span>
+
+                      {f.is_sql_recommendation && (
+                        <button
+                          onClick={() => handleCopySql(f.id, f.recommendation_sql_or_text)}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition cursor-pointer"
+                        >
+                          {copiedId === f.id ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span className="text-emerald-400">Copied SQL</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3 text-zinc-400" />
+                              <span>Copy SQL</span>
+                            </>
+                          )}
+                        </button>
                       )}
                     </div>
-                    <p className="text-slate-200 leading-relaxed">{finding.aiInsight}</p>
-                  </div>
-                ) : finding.whyNarrative && (
-                  <div className="rounded-lg border border-slate-800/80 bg-slate-950/30 p-3">
-                    <span className="font-semibold text-slate-400 block mb-1">
-                      Rule-Based Diagnostic Rationale:
-                    </span>
-                    <p className="text-slate-400 leading-relaxed">{finding.whyNarrative}</p>
+
+                    {f.is_sql_recommendation ? (
+                      <pre className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] font-mono text-rose-300/90 overflow-x-auto leading-relaxed whitespace-pre-wrap">
+                        <code>{f.recommendation_sql_or_text}</code>
+                      </pre>
+                    ) : (
+                      <p className="text-xs text-zinc-300 bg-zinc-950/60 p-2.5 rounded-lg border border-zinc-850 whitespace-pre-wrap">
+                        {f.recommendation_sql_or_text}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
-
-              {/* Recommendation Summary */}
-              <div className="text-xs text-slate-300 font-medium">
-                <span className="text-amber-400 font-semibold">Recommended Action: </span>
-                {finding.recommendationSummary}
-              </div>
-
-              {/* AI Generated Custom SQL (if available) */}
-              {finding.aiSqlFix && (
-                <div className="rounded-lg border border-purple-500/30 bg-slate-950 overflow-hidden">
-                  <div className="flex items-center justify-between border-b border-purple-500/20 px-3.5 py-1.5 bg-purple-950/30 text-xs">
-                    <span className="flex items-center gap-1.5 font-mono text-purple-300 font-semibold">
-                      <Sparkles className="h-3 w-3 text-purple-400" />
-                      AI Recommended Custom SQL Remediation
-                    </span>
-                    <button
-                      onClick={() => handleCopySql(`${finding.id}-ai`, finding.aiSqlFix!)}
-                      className="flex items-center gap-1 rounded bg-purple-900/60 px-2 py-0.5 text-[11px] font-medium text-purple-200 hover:bg-purple-800 transition-colors cursor-pointer"
-                    >
-                      {copiedId === `${finding.id}-ai` ? (
-                        <>
-                          <Check className="h-3 w-3 text-emerald-400" />
-                          <span className="text-emerald-400">Copied!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3 w-3 text-purple-300" />
-                          <span>Copy AI SQL</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <pre className="p-3.5 font-mono text-xs text-purple-200 overflow-x-auto leading-relaxed bg-slate-950">
-                    <code>{finding.aiSqlFix}</code>
-                  </pre>
-                </div>
-              )}
-
-              {/* Executable DDL / SQL Code Block (Deterministic Base Fix) */}
-              {finding.recommendationSql && !finding.aiSqlFix && (
-                <div className="rounded-lg border border-slate-800 bg-slate-950 overflow-hidden">
-                  <div className="flex items-center justify-between border-b border-slate-800 px-3.5 py-1.5 bg-slate-900/60 text-xs">
-                    <span className="font-mono text-slate-400">Deterministic Migration DDL</span>
-                    <button
-                      onClick={() => handleCopySql(finding.id, finding.recommendationSql!)}
-                      className="flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-300 hover:bg-slate-700 hover:text-white transition-colors"
-                    >
-                      {copiedId === finding.id ? (
-                        <>
-                          <Check className="h-3 w-3 text-emerald-400" />
-                          <span className="text-emerald-400">Copied!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3 w-3 text-slate-400" />
-                          <span>Copy SQL</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <pre className="p-3.5 font-mono text-xs text-amber-200/90 overflow-x-auto leading-relaxed bg-slate-950">
-                    <code>{finding.recommendationSql}</code>
-                  </pre>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

@@ -1,51 +1,22 @@
 services:
-  # ---------------------------------------------------
-  # Yachiru ClickHouse Optimization & Health Advisor
-  # ---------------------------------------------------
-  yachiru:
+  # ============================================================
+  # Yachiru ClickHouse Analyzer Web App & API
+  # ============================================================
+  yachiru-analyzer:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: yachiru-advisor
+    container_name: yachiru-analyzer
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
-      - YACHIRU_API_KEY=${YACHIRU_API_KEY:-}
-      - REQUIRE_API_KEY=${REQUIRE_API_KEY:-true}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
-      - STORE_RAW_QUERIES=${STORE_RAW_QUERIES:-true}
-      - PRIVACY_PRESERVING_HISTORY=${PRIVACY_PRESERVING_HISTORY:-false}
-      - FIRESTORE_DATABASE_ID=${FIRESTORE_DATABASE_ID:-ai-studio-yachiruclickhous-d2e31be2-2e73-49b5-a7b3-25ca7280abb7}
-      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-nifty-art-czp2g}
-    depends_on:
-      - redis
-    env_file:
-      - .env
-    volumes:
-      - yachiru-data:/app/data
-
-  # ---------------------------------------------------
-  # Shared Distributed Cache & Rate Limiting Engine
-  # ---------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: yachiru-redis
-    restart: unless-stopped
-    command: redis-server --save "" --appendonly no
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-
-volumes:
-  yachiru-data:
-    driver: local
-  redis-data:
-    driver: local
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}
+    extra_hosts:
+      # Allows connecting to ClickHouse running directly on your host machine
+      # by entering 'host.docker.internal' as the host in the web UI
+      - "host.docker.internal:host-gateway"
 

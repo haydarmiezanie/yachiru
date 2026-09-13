@@ -1,26 +1,22 @@
-# ---------------------------------------------------
-# Stage 1: Build Phase
-# ---------------------------------------------------
-FROM node:20-slim AS builder
+# ==========================================
+# Multi-stage Dockerfile for Yachiru ClickHouse Analyzer
+# ==========================================
+
+# Stage 1: Build stage
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Copy package.json only to avoid lockfile libc (musl/glibc) mismatches
-COPY package.json ./
+# Install build dependencies
+COPY package*.json ./
+RUN npm ci || npm install
 
-# Install all dependencies (including vite, esbuild, typescript)
-RUN npm install
-
-# Copy source files
+# Copy source code and build
 COPY . .
-
-# Build Vite frontend and bundle Express backend to dist/server.cjs
 RUN npm run build
 
-# ---------------------------------------------------
-# Stage 2: Production Runtime
-# ---------------------------------------------------
-FROM node:20-slim AS runner
+# Stage 2: Production runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 
@@ -28,25 +24,21 @@ ENV NODE_ENV=production
 ENV PORT=3000
 
 # Install production dependencies only
-COPY package.json ./
-RUN npm install --omit=dev && npm cache clean --force
+COPY package*.json ./
+RUN npm ci --omit=dev || npm install --omit=dev
 
 # Copy compiled artifacts from builder stage
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/firebase-applet-config.json ./firebase-applet-config.json
 
-# Create persistent data directory for scan histories
-RUN mkdir -p /app/data && chown -R node:node /app
-
-# Switch to non-root user for container security
+# Security: run as non-root node user
 USER node
 
-# Expose HTTP port
+# Expose standard application port
 EXPOSE 3000
 
-# Health check against Yachiru API using Node built-in http client
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/api/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
 
-# Start Yachiru server
+# Start the bundled production server
 CMD ["node", "dist/server.cjs"]
