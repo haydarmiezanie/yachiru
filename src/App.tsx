@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { AnalysisReport, CheckCategory, ConnectionConfig } from './types.js';
+import { AnalysisReport, CheckCategory, ConnectionConfig, AiProvider } from './types.js';
 import { Header } from './components/Header.js';
 import { ConnectionForm } from './components/ConnectionForm.js';
 import { ScanProgress } from './components/ScanProgress.js';
@@ -70,18 +70,22 @@ export default function App() {
   const handleGenerateNarrative = async (
     model: string,
     apiKey?: string,
-    enableAiNarrative: boolean = true
+    enableAiNarrative: boolean = true,
+    provider?: AiProvider
   ) => {
     if (!report) return;
     setIsLoadingNarrative(true);
     try {
+      const targetProvider = provider || (model.startsWith('gpt-') ? 'openai' : 'gemini');
       const response = await fetch('/api/narrate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           report,
+          provider: targetProvider,
           model,
-          geminiApiKey: apiKey,
+          geminiApiKey: targetProvider === 'gemini' ? apiKey : undefined,
+          openaiApiKey: targetProvider === 'openai' ? apiKey : undefined,
           enableAiNarrative,
           allowSystemKeyFallback: enableAiNarrative,
         }),

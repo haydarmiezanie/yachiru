@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ConnectionConfig, AVAILABLE_GEMINI_MODELS } from '../types.js';
+import { ConnectionConfig, AiProvider, AVAILABLE_AI_MODELS } from '../types.js';
+import { ClickHouseUserSetupModal } from './ClickHouseUserSetupModal.js';
 import {
   Database,
   Lock,
@@ -98,25 +99,49 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     hint?: string;
   } | null>(null);
 
-  // User-provided Gemini API Key state
+  // User-provided AI state (Gemini & OpenAI)
   const [enableAiNarrative, setEnableAiNarrative] = useState(() => {
-    return Boolean(sessionStorage.getItem('yachiru_gemini_api_key'));
+    return Boolean(
+      sessionStorage.getItem('yachiru_gemini_api_key') ||
+      sessionStorage.getItem('yachiru_openai_api_key')
+    );
   });
+  const [aiProvider, setAiProvider] = useState<AiProvider>('gemini');
   const [geminiApiKey, setGeminiApiKey] = useState(() => {
     return sessionStorage.getItem('yachiru_gemini_api_key') || '';
   });
+  const [openaiApiKey, setOpenaiApiKey] = useState(() => {
+    return sessionStorage.getItem('yachiru_openai_api_key') || '';
+  });
   const [showApiKey, setShowApiKey] = useState(false);
-  const [geminiModel, setGeminiModel] = useState('gemini-3.8-flash');
+  const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+  const [isSetupModalOpen, setIsSetupModalOpen] = useState(false);
 
   const apiKeyInputRef = useRef<HTMLInputElement>(null);
 
-  // Persist key in session storage for current tab convenience
+  // Persist keys in session storage for current tab convenience
   useEffect(() => {
     if (geminiApiKey) {
       sessionStorage.setItem('yachiru_gemini_api_key', geminiApiKey);
     }
   }, [geminiApiKey]);
+
+  useEffect(() => {
+    if (openaiApiKey) {
+      sessionStorage.setItem('yachiru_openai_api_key', openaiApiKey);
+    }
+  }, [openaiApiKey]);
+
+  const handleProviderToggle = (newProvider: AiProvider) => {
+    setAiProvider(newProvider);
+    setApiKeyError(null);
+    if (newProvider === 'gemini') {
+      setSelectedModel('gemini-3.8-flash');
+    } else {
+      setSelectedModel('gpt-5.4-mini');
+    }
+  };
 
   const handleProtocolChange = (newProtocol: 'http' | 'https') => {
     setProtocol(newProtocol);
@@ -146,12 +171,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
   };
 
   const handleHostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newVal = e.target.value;
-    if (/^https?:\/\//i.test(newVal) || newVal.includes('/') || /:\d+$/.test(newVal)) {
-      applyHostSanitization(newVal);
-    } else {
-      setHost(newVal);
-    }
+    setHost(e.target.value);
   };
 
   const handleHostPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
@@ -218,11 +238,13 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
 
   const validateAndProceed = (targetIsDemo: boolean, forceWithoutAi: boolean = false) => {
     const willUseAi = forceWithoutAi ? false : enableAiNarrative;
+    const activeApiKey = aiProvider === 'openai' ? openaiApiKey : geminiApiKey;
 
-    // Check if AI is enabled but user has not provided an API key
-    if (willUseAi && !geminiApiKey.trim()) {
+    // Check if AI is enabled but user has not provided an API key for selected provider
+    if (willUseAi && !activeApiKey.trim()) {
+      const providerLabel = aiProvider === 'openai' ? 'OpenAI' : 'Gemini';
       setApiKeyError(
-        'Gemini API Key is required because AI Executive Narrative is enabled. Please enter your Gemini API key below or proceed with deterministic analysis without AI.'
+        `${providerLabel} API Key is required because AI Executive Narrative is enabled. Please enter your ${providerLabel} API key below or proceed with deterministic analysis without AI.`
       );
       setShowAdvanced(true);
       setTimeout(() => {
@@ -246,8 +268,10 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         password: '',
         database: 'production',
         enableAiNarrative: willUseAi,
-        geminiModel: geminiModel.trim(),
-        geminiApiKey: willUseAi ? geminiApiKey.trim() : undefined,
+        aiProvider,
+        geminiModel: selectedModel.trim(),
+        geminiApiKey: willUseAi && aiProvider === 'gemini' ? geminiApiKey.trim() : undefined,
+        openaiApiKey: willUseAi && aiProvider === 'openai' ? openaiApiKey.trim() : undefined,
         isDemo: true,
       });
     } else {
@@ -266,8 +290,10 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         queryDurationThresholdMs: Number(durationThreshold),
         queryMemoryThresholdBytes: Number(memoryThresholdMB) * 1024 * 1024,
         enableAiNarrative: willUseAi,
-        geminiModel: geminiModel.trim(),
-        geminiApiKey: willUseAi ? geminiApiKey.trim() : undefined,
+        aiProvider,
+        geminiModel: selectedModel.trim(),
+        geminiApiKey: willUseAi && aiProvider === 'gemini' ? geminiApiKey.trim() : undefined,
+        openaiApiKey: willUseAi && aiProvider === 'openai' ? openaiApiKey.trim() : undefined,
         isDemo: false,
       });
     }
@@ -441,6 +467,19 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
               />
             </div>
+
+            {/* Read-Only User Setup SQL Generator link */}
+            <div className="sm:col-span-12 flex items-center justify-between pt-0.5">
+              <button
+                type="button"
+                id="btn-open-user-setup-modal"
+                onClick={() => setIsSetupModalOpen(true)}
+                className="inline-flex items-center gap-1.5 text-xs text-rose-400 hover:text-rose-300 font-medium transition cursor-pointer hover:underline"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Don&apos;t have a read-only ClickHouse user yet? Generate setup SQL &rarr;</span>
+              </button>
+            </div>
           </div>
 
           {/* AI Narrative Configuration Box (Directly visible in form) */}
@@ -461,34 +500,73 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                 />
                 <label htmlFor="toggle-ai-narrative" className="text-xs font-semibold text-zinc-200 cursor-pointer flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-rose-400" />
-                  <span>Enable Gemini AI Executive Narrative</span>
+                  <span>Enable AI Executive Narrative</span>
                   <span className="text-[11px] font-normal text-zinc-400">(Optional)</span>
                 </label>
               </div>
 
               <span className={`text-[11px] px-2 py-0.5 rounded font-mono ${enableAiNarrative ? 'text-rose-400 bg-rose-500/10' : 'text-zinc-500'}`}>
-                {enableAiNarrative ? 'AI Enabled' : 'Deterministic Only'}
+                {enableAiNarrative ? `${aiProvider === 'openai' ? 'OpenAI' : 'Gemini'} AI Enabled` : 'Deterministic Only'}
               </span>
             </div>
 
-            {/* If AI is enabled, user inputs their API Key */}
+            {/* If AI is enabled, user configures provider, API key, and model */}
             {enableAiNarrative && (
               <div className="pt-2 border-t border-zinc-800/80 space-y-3 animate-in fade-in duration-150">
+                {/* AI Provider Segmented Control */}
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300 mb-1.5">AI Provider</label>
+                  <div className="grid grid-cols-2 gap-2 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800">
+                    <button
+                      type="button"
+                      id="btn-provider-gemini"
+                      onClick={() => handleProviderToggle('gemini')}
+                      className={`py-1.5 px-3 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                        aiProvider === 'gemini'
+                          ? 'bg-rose-600 text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                      }`}
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Google Gemini</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      id="btn-provider-openai"
+                      onClick={() => handleProviderToggle('openai')}
+                      className={`py-1.5 px-3 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                        aiProvider === 'openai'
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                      }`}
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>OpenAI</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* API Key Input */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
                       <KeyRound className="w-3.5 h-3.5 text-rose-400" />
-                      <span>Google Gemini API Key</span>
+                      <span>{aiProvider === 'openai' ? 'OpenAI API Key' : 'Google Gemini API Key'}</span>
                       <span className="text-rose-400 text-xs">*</span>
                     </label>
 
                     <a
-                      href="https://aistudio.google.com/app/apikey"
+                      href={
+                        aiProvider === 'openai'
+                          ? 'https://platform.openai.com/api-keys'
+                          : 'https://aistudio.google.com/app/apikey'
+                      }
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-[11px] text-rose-400 hover:text-rose-300 flex items-center gap-1 transition underline decoration-rose-500/30"
                     >
-                      <span>Get Free API Key</span>
+                      <span>{aiProvider === 'openai' ? 'Get OpenAI Key' : 'Get Free Key at AI Studio'}</span>
                       <ExternalLink className="w-3 h-3" />
                     </a>
                   </div>
@@ -496,14 +574,22 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                   <div className="relative">
                     <input
                       ref={apiKeyInputRef}
-                      id="input-gemini-api-key"
+                      id={aiProvider === 'openai' ? 'input-openai-api-key' : 'input-gemini-api-key'}
                       type={showApiKey ? 'text' : 'password'}
-                      value={geminiApiKey}
+                      value={aiProvider === 'openai' ? openaiApiKey : geminiApiKey}
                       onChange={(e) => {
-                        setGeminiApiKey(e.target.value);
+                        if (aiProvider === 'openai') {
+                          setOpenaiApiKey(e.target.value);
+                        } else {
+                          setGeminiApiKey(e.target.value);
+                        }
                         if (apiKeyError) setApiKeyError(null);
                       }}
-                      placeholder="Enter your Gemini API Key (e.g. AIzaSy...)"
+                      placeholder={
+                        aiProvider === 'openai'
+                          ? 'Enter your OpenAI API Key (sk-...)'
+                          : 'Enter your Gemini API Key (AIzaSy...)'
+                      }
                       className={`w-full bg-zinc-900 border ${
                         apiKeyError ? 'border-rose-500 ring-1 ring-rose-500' : 'border-zinc-800'
                       } rounded-lg pl-3.5 pr-10 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono`}
@@ -519,19 +605,28 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                     </button>
                   </div>
 
+                  {apiKeyError && (
+                    <div className="mt-2 text-xs text-rose-400 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{apiKeyError}</span>
+                    </div>
+                  )}
+
                   <p className="text-[11px] text-zinc-400 mt-1.5 leading-relaxed">
                     API key is provided directly in the UI (no .env setup required) and cached in <span className="text-zinc-300 font-mono">sessionStorage</span> for the current browser tab only. It is automatically cleared when this tab closes and is never saved to persistent disk.
                   </p>
                 </div>
 
+                {/* Model Selection Dropdown */}
                 <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
-                  <span className="text-xs text-zinc-400 shrink-0">Gemini Model:</span>
+                  <span className="text-xs text-zinc-400 shrink-0">Model:</span>
                   <select
-                    value={geminiModel}
-                    onChange={(e) => setGeminiModel(e.target.value)}
+                    id="select-ai-model"
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
                     className="bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-200 font-mono w-full sm:w-auto"
                   >
-                    {AVAILABLE_GEMINI_MODELS.map((m) => (
+                    {AVAILABLE_AI_MODELS.filter((m) => m.provider === aiProvider).map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.name} {m.badge ? `(${m.badge})` : ''}
                       </option>
@@ -722,6 +817,12 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
           </p>
         </div>
       </div>
+
+      {/* ClickHouse Read-Only User Setup Modal */}
+      <ClickHouseUserSetupModal
+        isOpen={isSetupModalOpen}
+        onClose={() => setIsSetupModalOpen(false)}
+      />
     </div>
   );
 };

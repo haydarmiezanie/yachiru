@@ -1,9 +1,36 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import type { ClickHouseClient } from '@clickhouse/client';
 import { runLiveScan, runSimulationScan } from './server/analyzer.js';
-import { generateNarrative, generateDeterministicNarrative, systemKeyState } from './server/narrator.js';
-import { ConnectionConfig } from './src/types.js';
+import {
+  generateNarrativeForProvider,
+  generateDeterministicNarrative,
+  geminiSystemKeyState,
+  openaiSystemKeyState,
+} from './server/narrator.js';
+import { ConnectionConfig, AiProvider } from './src/types.js';
+
+export function classifyConnectionError(errorMsg: string): { hint: string } {
+  if (/timeout|etimedout/i.test(errorMsg)) {
+    return {
+      hint: 'Connection or query timed out. In cloud sandboxes, "localhost" refers to the isolated container, not your local desktop machine. If connecting to a local ClickHouse instance, expose your port 8123 via a tunnel (such as ngrok or Cloudflare tunnel) or use ClickHouse Cloud. You can also explore the realistic simulation demo cluster.',
+    };
+  }
+  if (/econnrefused|connection refused|refused/i.test(errorMsg)) {
+    return {
+      hint: 'Connection was actively refused by the target host. Verify ClickHouse is running and listening on the specified HTTP port (default 8123 for HTTP, 8443 for HTTPS). Note: native TCP client port 9000 is not supported over HTTP.',
+    };
+  }
+  if (/401|403|auth|password|credentials|access denied/i.test(errorMsg)) {
+    return {
+      hint: 'Authentication failed. Please verify your username and password, and ensure the user has SELECT privileges on the required system.* metadata tables (see in-app setup guide).',
+    };
+  }
+  return {
+    hint: 'Please verify host reachability, port (8123 HTTP / 8443 HTTPS), database name, and user privileges. Ensure the user has SELECT privileges on the required system.* metadata tables (see in-app setup guide).',
+  };
+}
 
 async function startServer() {
   const app = express();
@@ -18,20 +45,33 @@ async function startServer() {
       status: 'ok',
       service: 'Yachiru ClickHouse Analyzer',
       hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
+      hasOpenAiApiKey: Boolean(process.env.OPENAI_API_KEY),
       defaultModel: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
-      systemKeyState: systemKeyState.getStatus(),
+      geminiSystemKeyState: geminiSystemKeyState.getStatus(),
+      openaiSystemKeyState: openaiSystemKeyState.getStatus(),
+      // Backward compatibility
+      systemKeyState: geminiSystemKeyState.getStatus(),
     });
   });
 
   // System key status endpoint
   app.get('/api/system-key-status', (req, res) => {
-    res.json(systemKeyState.getStatus());
+    const provider = (req.query.provider as string)?.toLowerCase();
+    if (provider === 'openai') {
+      return res.json(openaiSystemKeyState.getStatus());
+    }
+    res.json(geminiSystemKeyState.getStatus());
   });
 
   // System key reset endpoint
   app.post('/api/system-key-reset', (req, res) => {
-    systemKeyState.reset('Manual admin trigger via /api/system-key-reset');
-    res.json({ success: true, status: systemKeyState.getStatus() });
+    const provider = (req.query.provider as string)?.toLowerCase();
+    if (provider === 'openai') {
+      openaiSystemKeyState.reset('Manual admin trigger via /api/system-key-reset?provider=openai');
+      return res.json({ success: true, provider: 'openai', status: openaiSystemKeyState.getStatus() });
+    }
+    geminiSystemKeyState.reset('Manual admin trigger via /api/system-key-reset');
+    res.json({ success: true, provider: 'gemini', status: geminiSystemKeyState.getStatus() });
   });
 
   // Fast test connection endpoint
@@ -46,6 +86,7 @@ async function startServer() {
       });
     }
 
+    let client: ClickHouseClient | undefined = undefined;
     try {
       const { createClient } = await import('@clickhouse/client');
       const protocol = config.protocol || 'http';
@@ -57,59 +98,60 @@ async function startServer() {
       const password = config.password || '';
       const database = config.database?.trim() || 'default';
 
-      const client = createClient({
+      client = createClient({
         url: `${protocol}://${host}:${port}`,
         username,
         password,
         database,
-        request_timeout: 8000,
         clickhouse_settings: {
-          max_execution_time: 5,
+          connect_timeout: 5,
         },
       });
 
+      // Quick ping test
+      const pingOk = await client.ping();
+      if (!pingOk) {
+        throw new Error('ClickHouse server did not respond with OK to ping test.');
+      }
+
+      // Quick query test to verify credentials and fetch ClickHouse version
+      const versionResult = await client.query({
+        query: 'SELECT version() AS ver',
+        format: 'JSONEachRow',
+      });
+      const versionRows = (await versionResult.json()) as Array<{ ver: string }>;
+      const clickhouseVersion = versionRows[0]?.ver || 'OK';
+
+      // Quick permissions check: attempt to read 1 row from system.build_options or system.tables
       try {
-        const pingRes = await client.ping();
-        if (!pingRes.success) {
-          const pingErr = 'error' in pingRes ? (pingRes as unknown as { error?: { message?: string } }).error : undefined;
-          throw new Error(pingErr?.message || 'Server ping check failed');
-        }
-
-        const verRes = await client.query({
-          query: 'SELECT version() AS version, uptime() AS uptime',
+        await client.query({
+          query: 'SELECT name FROM system.build_options LIMIT 1',
           format: 'JSONEachRow',
-          clickhouse_settings: { max_execution_time: 5 },
         });
-        const verRows = await verRes.json<{ version: string; uptime: number }>();
-        const version = verRows[0]?.version || 'Connected';
-        const uptimeSec = verRows[0]?.uptime || 0;
-        const uptimeStr = `${Math.floor(uptimeSec / 86400)}d ${Math.floor((uptimeSec % 86400) / 3600)}h`;
-
+      } catch (permErr: any) {
         return res.json({
-          success: true,
-          message: `Successfully connected to ClickHouse v${version} (${protocol.toUpperCase()})`,
-          version,
-          uptime: uptimeStr,
+          success: false,
+          error: `Connected to ClickHouse v${clickhouseVersion}, but lack SELECT permissions on system.* tables.`,
+          hint: 'Please ensure your database user has SELECT grants on system.* tables (e.g. system.parts, system.columns, system.tables).',
         });
-      } finally {
-        await client.close();
-      }
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Unknown connection error';
-      let hint = 'Please verify host reachability, port (8123 HTTP / 8443 HTTPS), database name, and user credentials.';
-      if (/timeout|etimedout/i.test(errorMsg)) {
-        hint = 'Connection timed out. In cloud sandboxes, "localhost" refers to the isolated container. If connecting to a local instance, expose via tunnel (ngrok/Cloudflare) or use ClickHouse Cloud.';
-      } else if (/econnrefused/i.test(errorMsg)) {
-        hint = 'Connection refused. Ensure ClickHouse is running and listening on the specified HTTP port (8123 HTTP / 8443 HTTPS). Note that native port 9000 is not supported.';
-      } else if (/401|403|auth|password|credentials|access denied/i.test(errorMsg)) {
-        hint = 'Authentication failed. Please verify your username and password, and verify permissions on target database.';
       }
 
-      return res.status(400).json({
+      res.json({
+        success: true,
+        version: clickhouseVersion,
+        message: `Successfully connected to ClickHouse v${clickhouseVersion} at ${host}:${port}`,
+      });
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'Unknown connection error';
+      console.warn('Test connection failure:', errMsg);
+      const { hint } = classifyConnectionError(errMsg);
+      res.status(400).json({
         success: false,
-        error: errorMsg,
+        error: errMsg,
         hint,
       });
+    } finally {
+      await client?.close();
     }
   });
 
@@ -130,11 +172,16 @@ async function startServer() {
 
       // If AI narrative is requested vs Without AI (Deterministic)
       if (config.enableAiNarrative) {
+        const provider: AiProvider = config.aiProvider || (config.geminiModel?.startsWith('gpt-') ? 'openai' : 'gemini');
+        const activeApiKey = provider === 'openai' ? config.openaiApiKey : config.geminiApiKey;
+        const activeModel = config.geminiModel;
+
         try {
-          const narrative = await generateNarrative(
+          const narrative = await generateNarrativeForProvider(
             report,
-            config.geminiModel,
-            config.geminiApiKey,
+            provider,
+            activeModel,
+            activeApiKey,
             {
               enableAiNarrative: true,
               allowSystemKeyFallback: true,
@@ -170,7 +217,7 @@ async function startServer() {
         } catch (narrativeErr) {
           console.warn('AI Narrative generation failed:', narrativeErr);
           report.ai_narrative = {
-            model: config.geminiModel || 'Gemini AI',
+            model: activeModel || (provider === 'openai' ? 'OpenAI' : 'Gemini AI'),
             executive_summary: '',
             top_priorities: [],
             workload_risk_analysis: '',
@@ -193,25 +240,27 @@ async function startServer() {
       const errorMsg = err instanceof Error ? err.message : 'Unknown connection or query error';
       console.error('ClickHouse scan failure:', errorMsg);
 
-      let diagnosis = 'Please verify host reachability, port (8123 HTTP / 8443 HTTPS), database name, and user privileges. Ensure user has SELECT permissions on system.* and target tables.';
-      if (/timeout|etimedout/i.test(errorMsg)) {
-        diagnosis = 'Connection or query timed out. In cloud sandboxes, "localhost" refers to the isolated container, not your local desktop machine. If connecting to a local ClickHouse instance, expose your port 8123 via a tunnel (such as ngrok or Cloudflare tunnel) or use ClickHouse Cloud. You can also explore the realistic simulation demo cluster.';
-      } else if (/econnrefused/i.test(errorMsg)) {
-        diagnosis = 'Connection was actively refused by the target host. Verify ClickHouse is running and listening on the specified HTTP port (default 8123 for HTTP, 8443 for HTTPS). Note: native TCP client port 9000 is not supported over HTTP.';
-      } else if (/401|403|auth|password|credentials|access denied/i.test(errorMsg)) {
-        diagnosis = 'Authentication failed. Please verify your username and password, and ensure the user has SELECT permissions on system.* and target database tables.';
-      }
+      const { hint } = classifyConnectionError(errorMsg);
 
       res.status(500).json({
         error: errorMsg,
-        hint: diagnosis,
+        hint,
       });
     }
   });
 
   // Narrative generation on-demand for existing report
   app.post('/api/narrate', async (req, res) => {
-    const { report, model, geminiApiKey, enableAiNarrative, allowSystemKeyFallback } = req.body;
+    const {
+      report,
+      provider: reqProvider,
+      model,
+      geminiApiKey,
+      openaiApiKey,
+      enableAiNarrative,
+      allowSystemKeyFallback,
+    } = req.body;
+
     if (!report) {
       return res.status(400).json({ error: 'Missing report payload' });
     }
@@ -220,14 +269,24 @@ async function startServer() {
       const isAiRequested = enableAiNarrative !== false;
       const canUseSystemFallback = allowSystemKeyFallback ?? isAiRequested;
 
-      const narrative = await generateNarrative(report, model, geminiApiKey, {
-        enableAiNarrative: isAiRequested,
-        allowSystemKeyFallback: canUseSystemFallback,
-      });
+      // Determine provider from explicit body or infer from model ID
+      const provider: AiProvider = reqProvider || (model?.startsWith('gpt-') ? 'openai' : 'gemini');
+      const apiKey = provider === 'openai' ? openaiApiKey : geminiApiKey;
+
+      const narrative = await generateNarrativeForProvider(
+        report,
+        provider,
+        model,
+        apiKey,
+        {
+          enableAiNarrative: isAiRequested,
+          allowSystemKeyFallback: canUseSystemFallback,
+        }
+      );
 
       if (!narrative) {
         return res.status(503).json({
-          error: 'AI Narrative could not be generated. Please check your Gemini API key or proceed with the deterministic engine.',
+          error: `AI Narrative could not be generated. Please check your ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API key or proceed with the deterministic engine.`,
         });
       }
       res.json(narrative);

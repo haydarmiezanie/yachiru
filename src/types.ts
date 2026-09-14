@@ -124,6 +124,8 @@ export interface AnalysisReport {
   ai_diagnoses?: AIDiagnosis[];
 }
 
+export type AiProvider = 'gemini' | 'openai';
+
 export interface ConnectionConfig {
   host: string;
   port: number;
@@ -134,8 +136,10 @@ export interface ConnectionConfig {
   queryDurationThresholdMs?: number;
   queryMemoryThresholdBytes?: number;
   enableAiNarrative?: boolean;
+  aiProvider?: AiProvider;
   geminiModel?: string;
   geminiApiKey?: string;
+  openaiApiKey?: string;
   isDemo?: boolean;
 }
 
@@ -143,14 +147,23 @@ export interface ModelOption {
   id: string;
   name: string;
   badge?: string;
+  provider: AiProvider;
 }
 
-export const AVAILABLE_GEMINI_MODELS: ModelOption[] = [
-  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', badge: 'Fast & Hybrid' },
-  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', badge: 'Balanced' },
-  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', badge: 'High Reasoning' },
-  { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', badge: 'High Throughput' },
-  { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite', badge: 'Ultra-Fast' },
-  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', badge: 'Low Latency' },
+export const AVAILABLE_AI_MODELS: ModelOption[] = [
+  // Google Gemini models
+  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', badge: 'Fast & Hybrid', provider: 'gemini' },
+  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', badge: 'Balanced', provider: 'gemini' },
+  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', badge: 'High Reasoning', provider: 'gemini' },
+  { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', badge: 'High Throughput', provider: 'gemini' },
+  { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite', badge: 'Ultra-Fast', provider: 'gemini' },
+  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', badge: 'Low Latency', provider: 'gemini' },
+
+  // OpenAI models
+  { id: 'gpt-6-astra', name: 'GPT-6 Astra', badge: 'Flagship (1.05M ctx)', provider: 'openai' },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', badge: 'Flagship (Ultra Reasoning)', provider: 'openai' },
+  { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', badge: 'Balanced (272K ctx)', provider: 'openai' },
+  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', badge: 'Fast & Efficient', provider: 'openai' },
+  { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', badge: 'Fastest & Default', provider: 'openai' },
 ];
 

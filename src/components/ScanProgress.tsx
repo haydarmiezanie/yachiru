@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { CheckCircle2, Loader2, Sparkles } from 'lucide-react';
-import { AVAILABLE_GEMINI_MODELS } from '../types.js';
+import { AVAILABLE_AI_MODELS } from '../types.js';
 
 interface ScanProgressProps {
   isDemo?: boolean;
@@ -24,12 +24,12 @@ const BASE_CLICKHOUSE_STEPS = [
 export const ScanProgress: React.FC<ScanProgressProps> = ({
   isDemo,
   enableAiNarrative = false,
-  geminiModel = 'gemini-3.7-flash',
+  geminiModel = 'gemini-3.8-flash',
 }) => {
   const steps = useMemo(() => {
     const list = [...BASE_CLICKHOUSE_STEPS];
     if (enableAiNarrative) {
-      const modelObj = AVAILABLE_GEMINI_MODELS.find((m) => m.id === geminiModel);
+      const modelObj = AVAILABLE_AI_MODELS.find((m) => m.id === geminiModel);
       const modelLabel = modelObj ? modelObj.name : geminiModel;
       list.push({
         id: 'narrative',
