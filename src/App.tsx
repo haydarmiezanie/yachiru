@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AnalysisReport, CheckCategory, ConnectionConfig, AiProvider } from './types.js';
 import { Header } from './components/Header.js';
 import { ConnectionForm } from './components/ConnectionForm.js';
@@ -28,6 +28,30 @@ export default function App() {
   const [isThresholdsOpen, setIsThresholdsOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isLoadingNarrative, setIsLoadingNarrative] = useState(false);
+  const [apiKeyRequired, setApiKeyRequired] = useState(false);
+
+  // Check server health and whether API key authentication is required
+  useEffect(() => {
+    fetch('/api/health')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && typeof data.apiKeyRequired === 'boolean') {
+          setApiKeyRequired(data.apiKeyRequired);
+        }
+      })
+      .catch((err) => {
+        console.warn('Could not fetch server health status:', err);
+      });
+  }, []);
+
+  const getAuthHeaders = (configKey?: string): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const key = configKey || (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('yachiru_server_api_key') : null);
+    if (apiKeyRequired && key && key.trim()) {
+      headers['Authorization'] = `Bearer ${key.trim()}`;
+    }
+    return headers;
+  };
 
   const handleConnect = async (config: ConnectionConfig) => {
     setIsLoading(true);
@@ -38,7 +62,7 @@ export default function App() {
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(config.yachiruApiKey),
         body: JSON.stringify(config),
       });
 
@@ -79,7 +103,7 @@ export default function App() {
       const targetProvider = provider || (model.startsWith('gpt-') ? 'openai' : 'gemini');
       const response = await fetch('/api/narrate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(currentScanConfig?.yachiruApiKey),
         body: JSON.stringify({
           report,
           provider: targetProvider,
@@ -202,7 +226,11 @@ export default function App() {
 
         {/* State 2: Connect Form (No report active and not loading) */}
         {!isLoading && !report && (
-          <ConnectionForm onConnect={handleConnect} isLoading={isLoading} />
+          <ConnectionForm
+            onConnect={handleConnect}
+            isLoading={isLoading}
+            apiKeyRequired={apiKeyRequired}
+          />
         )}
 
         {/* State 3: Active Optimization Report Dashboard */}

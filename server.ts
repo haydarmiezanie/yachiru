@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { ClickHouseClient } from '@clickhouse/client';
 import { runLiveScan, runSimulationScan } from './server/analyzer.js';
 import {
@@ -32,6 +33,68 @@ export function classifyConnectionError(errorMsg: string): { hint: string } {
   };
 }
 
+const YACHIRU_API_KEY = process.env.YACHIRU_API_KEY?.trim() || null;
+
+function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!YACHIRU_API_KEY) return next(); // feature disabled, behave exactly as today
+  const header = req.headers['authorization'];
+  const bearerToken = header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined;
+  const altHeader = (req.headers['x-yachiru-api-key'] as string | undefined)?.trim();
+  const provided = bearerToken || altHeader;
+  if (!provided || provided !== YACHIRU_API_KEY) {
+    return res.status(401).json({ error: 'Missing or invalid API key. Provide it via "Authorization: Bearer <key>" or "X-Yachiru-Api-Key: <key>".' });
+  }
+  next();
+}
+
+function validateConnectionConfig(config: ConnectionConfig): { error?: string } {
+  // Skip validation entirely when isDemo is true
+  if (config && config.isDemo === true) {
+    return {};
+  }
+
+  // 1. host must be a non-empty string after trimming
+  if (typeof config?.host !== 'string' || config.host.trim() === '') {
+    return { error: 'host is required and must be a non-empty string.' };
+  }
+
+  // 2. port, if provided, must be a positive integer <= 65535
+  if (config.port !== undefined && config.port !== null && String(config.port).trim() !== '') {
+    const portNum = Number(config.port);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      return { error: 'port must be a positive integer between 1 and 65535.' };
+    }
+  }
+
+  // 3. protocol, if provided, must be exactly 'http' or 'https'
+  if (config.protocol !== undefined && config.protocol !== null && String(config.protocol).trim() !== '') {
+    if (config.protocol !== 'http' && config.protocol !== 'https') {
+      return { error: "protocol must be 'http' or 'https'." };
+    }
+  }
+
+  return {};
+}
+
+const analyzeLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: Number(process.env.YACHIRU_RATE_LIMIT_PER_MINUTE) || 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // Prefer the API key as the rate-limit identity when auth is enabled, so one
+    // caller can't be starved by another IP behind the same NAT/proxy; fall back to
+    // IP when no key is configured.
+    const header = req.headers['authorization'];
+    const bearerToken = header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined;
+    const altHeader = req.headers['x-yachiru-api-key'] as string | undefined;
+    const apiKeyIdentity = bearerToken || altHeader;
+    if (apiKeyIdentity) return apiKeyIdentity;
+    return ipKeyGenerator(req.ip ?? '127.0.0.1');
+  },
+  message: { error: 'Too many analysis requests. Please wait before retrying.' },
+});
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -44,6 +107,7 @@ async function startServer() {
     res.json({
       status: 'ok',
       service: 'Yachiru ClickHouse Analyzer',
+      apiKeyRequired: Boolean(YACHIRU_API_KEY),
       hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
       hasOpenAiApiKey: Boolean(process.env.OPENAI_API_KEY),
       defaultModel: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
@@ -64,7 +128,7 @@ async function startServer() {
   });
 
   // System key reset endpoint
-  app.post('/api/system-key-reset', (req, res) => {
+  app.post('/api/system-key-reset', requireApiKey, (req, res) => {
     const provider = (req.query.provider as string)?.toLowerCase();
     if (provider === 'openai') {
       openaiSystemKeyState.reset('Manual admin trigger via /api/system-key-reset?provider=openai');
@@ -75,8 +139,13 @@ async function startServer() {
   });
 
   // Fast test connection endpoint
-  app.post('/api/test-connection', async (req, res) => {
+  app.post('/api/test-connection', analyzeLimiter, requireApiKey, async (req, res) => {
     const config: ConnectionConfig = req.body;
+    const validation = validateConnectionConfig(config);
+    if (validation.error) {
+      return res.status(400).json({ error: validation.error });
+    }
+
     if (config.isDemo) {
       return res.json({
         success: true,
@@ -156,12 +225,16 @@ async function startServer() {
   });
 
   // Analysis endpoint
-  app.post('/api/analyze', async (req, res) => {
+  app.post('/api/analyze', analyzeLimiter, requireApiKey, async (req, res) => {
     const config: ConnectionConfig = req.body;
+    const validation = validateConnectionConfig(config);
+    if (validation.error) {
+      return res.status(400).json({ error: validation.error });
+    }
 
     try {
       let report;
-      if (config.isDemo || !config.host) {
+      if (config.isDemo) {
         // Run realistic simulated production ClickHouse cluster analysis
         report = runSimulationScan();
       } else {
@@ -250,7 +323,7 @@ async function startServer() {
   });
 
   // Narrative generation on-demand for existing report
-  app.post('/api/narrate', async (req, res) => {
+  app.post('/api/narrate', requireApiKey, async (req, res) => {
     const {
       report,
       provider: reqProvider,

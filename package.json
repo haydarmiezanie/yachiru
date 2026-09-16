@@ -9,7 +9,8 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "generate-api-key": "node scripts/generate-api-key.cjs"
   },
   "dependencies": {
     "@clickhouse/client": "^1.23.1",
@@ -18,6 +19,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.7.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "openai": "^7.15.0",

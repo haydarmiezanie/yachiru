@@ -140,6 +140,7 @@ export interface ConnectionConfig {
   geminiModel?: string;
   geminiApiKey?: string;
   openaiApiKey?: string;
+  yachiruApiKey?: string;
   isDemo?: boolean;
 }
 

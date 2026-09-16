@@ -77,15 +77,20 @@ export function sanitizeHostInput(raw: string): {
 interface ConnectionFormProps {
   onConnect: (config: ConnectionConfig) => void;
   isLoading: boolean;
+  apiKeyRequired?: boolean;
 }
 
-export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoading }) => {
+export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoading, apiKeyRequired = false }) => {
   const [host, setHost] = useState('localhost');
   const [port, setPort] = useState<number>(8123);
   const [protocol, setProtocol] = useState<'http' | 'https'>('http');
   const [username, setUsername] = useState('default');
   const [password, setPassword] = useState('');
   const [database, setDatabase] = useState('default');
+  const [yachiruApiKey, setYachiruApiKey] = useState(() => {
+    return sessionStorage.getItem('yachiru_server_api_key') || '';
+  });
+  const [showYachiruApiKey, setShowYachiruApiKey] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [durationThreshold, setDurationThreshold] = useState<number>(3000);
   const [memoryThresholdMB, setMemoryThresholdMB] = useState<number>(1024);
@@ -121,6 +126,14 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
   const apiKeyInputRef = useRef<HTMLInputElement>(null);
 
   // Persist keys in session storage for current tab convenience
+  useEffect(() => {
+    if (yachiruApiKey) {
+      sessionStorage.setItem('yachiru_server_api_key', yachiruApiKey);
+    } else {
+      sessionStorage.removeItem('yachiru_server_api_key');
+    }
+  }, [yachiruApiKey]);
+
   useEffect(() => {
     if (geminiApiKey) {
       sessionStorage.setItem('yachiru_gemini_api_key', geminiApiKey);
@@ -198,9 +211,14 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     const targetProtocol = autoProtocol || protocol;
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (apiKeyRequired && yachiruApiKey.trim()) {
+        headers['Authorization'] = `Bearer ${yachiruApiKey.trim()}`;
+      }
+
       const response = await fetch('/api/test-connection', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           host: targetHost,
           port: targetPort,
@@ -272,6 +290,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         geminiModel: selectedModel.trim(),
         geminiApiKey: willUseAi && aiProvider === 'gemini' ? geminiApiKey.trim() : undefined,
         openaiApiKey: willUseAi && aiProvider === 'openai' ? openaiApiKey.trim() : undefined,
+        yachiruApiKey: apiKeyRequired && yachiruApiKey.trim() ? yachiruApiKey.trim() : undefined,
         isDemo: true,
       });
     } else {
@@ -294,6 +313,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         geminiModel: selectedModel.trim(),
         geminiApiKey: willUseAi && aiProvider === 'gemini' ? geminiApiKey.trim() : undefined,
         openaiApiKey: willUseAi && aiProvider === 'openai' ? openaiApiKey.trim() : undefined,
+        yachiruApiKey: apiKeyRequired && yachiruApiKey.trim() ? yachiruApiKey.trim() : undefined,
         isDemo: false,
       });
     }
@@ -467,6 +487,41 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
               />
             </div>
+
+            {/* Yachiru API Key (Shown only when server requires authentication via YACHIRU_API_KEY) */}
+            {apiKeyRequired && (
+              <div className="sm:col-span-12 p-3.5 rounded-lg bg-amber-500/5 border border-amber-500/20">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-medium text-amber-300 flex items-center gap-1.5">
+                    <Shield className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Yachiru Server API Key</span>
+                    <span className="text-amber-400 text-xs">*</span>
+                  </label>
+                  <span className="text-[11px] text-amber-400/80 font-mono">YACHIRU_API_KEY enforced</span>
+                </div>
+                <div className="relative">
+                  <input
+                    id="input-yachiru-api-key"
+                    type={showYachiruApiKey ? 'text' : 'password'}
+                    value={yachiruApiKey}
+                    onChange={(e) => setYachiruApiKey(e.target.value)}
+                    placeholder="Enter 32-byte hex key configured in server environment"
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-3.5 pr-10 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500 transition font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowYachiruApiKey(!showYachiruApiKey)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 transition cursor-pointer"
+                    title={showYachiruApiKey ? 'Hide Key' : 'Show Key'}
+                  >
+                    {showYachiruApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-1.5 leading-relaxed">
+                  This server requires API key authentication. The key is attached as a Bearer token and saved in <span className="text-zinc-300 font-mono">sessionStorage</span> for this tab.
+                </p>
+              </div>
+            )}
 
             {/* Read-Only User Setup SQL Generator link */}
             <div className="sm:col-span-12 flex items-center justify-between pt-0.5">

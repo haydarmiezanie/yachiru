@@ -61,6 +61,12 @@ docker run -d -p 3000:3000 \
 
 ---
 
+## Programmatic API & Automation
+
+Yachiru exposes REST API endpoints (`/api/health`, `/api/test-connection`, `/api/analyze`, `/api/narrate`, and `/api/system-key-status`) for automated health checks, CI/CD regression gating, and programmatic ClickHouse cluster auditing. For complete request/response schemas, authentication setup (`YACHIRU_API_KEY`), rate-limiting policies, and runnable CI bash scripts, see **[API.md](API.md)**.
+
+---
+
 ## Stopping the Container
 
 ```bash

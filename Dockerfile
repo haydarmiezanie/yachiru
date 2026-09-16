@@ -29,6 +29,7 @@ RUN npm ci --omit=dev || npm install --omit=dev
 
 # Copy compiled artifacts from builder stage
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/scripts ./scripts
 
 # Security: run as non-root node user
 USER node
