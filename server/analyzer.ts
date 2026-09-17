@@ -249,9 +249,18 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
 
     let settingsData: Array<{ name: string; value: string; changed: number; description: string }> = [];
 
-    // Define individual async query tasks with their own try/catch fallback behavior
-    const fetchParts = async () => {
-      try {
+    // Parallelize independent read-only system queries via Promise.allSettled
+    const [
+      partsSettled,
+      columnsSettled,
+      skippingIndicesSettled,
+      queryLogSettled,
+      replicasSettled,
+      distQueueSettled,
+      settingsSettled,
+    ] = await Promise.allSettled([
+      // system.parts
+      (async () => {
         const partsQuery = `
           SELECT
             table,
@@ -275,14 +284,11 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
           format: 'JSONEachRow',
           clickhouse_settings: { max_execution_time: 12 },
         });
-        partsData = (await partsRes.json()) as typeof partsData;
-      } catch {
-        // System.parts may be heavy or restricted
-      }
-    };
+        return (await partsRes.json()) as typeof partsData;
+      })(),
 
-    const fetchColumns = async () => {
-      try {
+      // system.columns
+      (async () => {
         const colQuery = `
           SELECT
             table,
@@ -302,14 +308,11 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
           format: 'JSONEachRow',
           clickhouse_settings: { max_execution_time: 10 },
         });
-        colData = (await colRes.json()) as typeof colData;
-      } catch {
-        // System.columns query skipped on restricted permissions
-      }
-    };
+        return (await colRes.json()) as typeof colData;
+      })(),
 
-    const fetchSkippingIndices = async () => {
-      try {
+      // system.data_skipping_indices
+      (async () => {
         const skipIdxQuery = `
           SELECT
             table,
@@ -326,14 +329,11 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
           format: 'JSONEachRow',
           clickhouse_settings: { max_execution_time: 8 },
         });
-        skipData = (await skipRes.json()) as typeof skipData;
-      } catch {
-        // Data skipping indices query skipped
-      }
-    };
+        return (await skipRes.json()) as typeof skipData;
+      })(),
 
-    const fetchQueryLog = async () => {
-      try {
+      // system.query_log
+      (async () => {
         const qlogQuery = `
           SELECT
             query,
@@ -358,16 +358,11 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
           format: 'JSONEachRow',
           clickhouse_settings: { max_execution_time: 6 },
         });
-        queryStats = (await qRes.json()) as typeof queryStats;
-        queryLogAvailable = true;
-      } catch {
-        // Query log may be disabled or user lacks privileges
-        queryLogAvailable = false;
-      }
-    };
+        return (await qRes.json()) as typeof queryStats;
+      })(),
 
-    const fetchReplicas = async () => {
-      try {
+      // system.replicas
+      (async () => {
         const repQuery = `
           SELECT
             table,
@@ -383,14 +378,11 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
           format: 'JSONEachRow',
           clickhouse_settings: { max_execution_time: 6 },
         });
-        replicasData = (await rRes.json()) as typeof replicasData;
-      } catch {
-        // Standalone node or no replicated tables
-      }
-    };
+        return (await rRes.json()) as typeof replicasData;
+      })(),
 
-    const fetchDistQueue = async () => {
-      try {
+      // system.distribution_queue
+      (async () => {
         const distQuery = `
           SELECT *
           FROM system.distribution_queue
@@ -404,20 +396,17 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
           clickhouse_settings: { max_execution_time: 6 },
         });
         const rawRows = (await dRes.json()) as Array<Record<string, unknown>>;
-        distQueueData = rawRows.map((r) => ({
+        return rawRows.map((r) => ({
           table: String(r.table || ''),
           bytes_to_send: Number(r.data_compressed_bytes ?? r.data_uncompressed_bytes ?? r.bytes_to_send ?? 0),
           files_to_send: Number(r.compressed_large_files ?? r.uncompressed_large_files ?? r.files_to_send ?? 0),
           error_count: Number(r.error_count ?? 0),
           is_blocked: Number(r.is_blocked ?? 0),
         }));
-      } catch {
-        // No distributed tables or distribution_queue not available
-      }
-    };
+      })(),
 
-    const fetchSettings = async () => {
-      try {
+      // system.settings
+      (async () => {
         const setQuery = `
           SELECT name, value, changed, description
           FROM system.settings
@@ -429,22 +418,35 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
           format: 'JSONEachRow',
           clickhouse_settings: { max_execution_time: 6 },
         });
-        settingsData = (await sRes.json()) as typeof settingsData;
-      } catch {
-        // Settings table read restricted
-      }
-    };
-
-    // Parallelize independent read-only system queries via Promise.allSettled
-    await Promise.allSettled([
-      fetchParts(),
-      fetchColumns(),
-      fetchSkippingIndices(),
-      fetchQueryLog(),
-      fetchReplicas(),
-      fetchDistQueue(),
-      fetchSettings(),
+        return (await sRes.json()) as typeof settingsData;
+      })(),
     ]);
+
+    // Apply settled results with isolated per-query degradation
+    if (partsSettled.status === 'fulfilled') {
+      partsData = partsSettled.value;
+    }
+    if (columnsSettled.status === 'fulfilled') {
+      colData = columnsSettled.value;
+    }
+    if (skippingIndicesSettled.status === 'fulfilled') {
+      skipData = skippingIndicesSettled.value;
+    }
+    if (queryLogSettled.status === 'fulfilled') {
+      queryStats = queryLogSettled.value;
+      queryLogAvailable = true;
+    } else {
+      queryLogAvailable = false;
+    }
+    if (replicasSettled.status === 'fulfilled') {
+      replicasData = replicasSettled.value;
+    }
+    if (distQueueSettled.status === 'fulfilled') {
+      distQueueData = distQueueSettled.value;
+    }
+    if (settingsSettled.status === 'fulfilled') {
+      settingsData = settingsSettled.value;
+    }
 
     // Populate post-query aggregates
     const partsMap = new Map<string, (typeof partsData)[0]>();

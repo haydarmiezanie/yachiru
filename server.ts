@@ -9,6 +9,7 @@ import {
   generateDeterministicNarrative,
   geminiSystemKeyState,
   openaiSystemKeyState,
+  claudeSystemKeyState,
 } from './server/narrator.js';
 import { ConnectionConfig, AiProvider } from './src/types.js';
 
@@ -102,6 +103,11 @@ async function startServer() {
   // JSON parser for connection payloads
   app.use(express.json({ limit: '10mb' }));
 
+  // Favicon fallback route
+  app.get('/favicon.ico', (req, res) => {
+    res.redirect(302, '/favicon.svg');
+  });
+
   // Health endpoint
   app.get('/api/health', (req, res) => {
     res.json({
@@ -110,9 +116,11 @@ async function startServer() {
       apiKeyRequired: Boolean(YACHIRU_API_KEY),
       hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
       hasOpenAiApiKey: Boolean(process.env.OPENAI_API_KEY),
+      hasClaudeApiKey: Boolean(process.env.CLAUDE_API_KEY),
       defaultModel: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       geminiSystemKeyState: geminiSystemKeyState.getStatus(),
       openaiSystemKeyState: openaiSystemKeyState.getStatus(),
+      claudeSystemKeyState: claudeSystemKeyState.getStatus(),
       // Backward compatibility
       systemKeyState: geminiSystemKeyState.getStatus(),
     });
@@ -124,6 +132,9 @@ async function startServer() {
     if (provider === 'openai') {
       return res.json(openaiSystemKeyState.getStatus());
     }
+    if (provider === 'claude' || provider === 'anthropic') {
+      return res.json(claudeSystemKeyState.getStatus());
+    }
     res.json(geminiSystemKeyState.getStatus());
   });
 
@@ -133,6 +144,10 @@ async function startServer() {
     if (provider === 'openai') {
       openaiSystemKeyState.reset('Manual admin trigger via /api/system-key-reset?provider=openai');
       return res.json({ success: true, provider: 'openai', status: openaiSystemKeyState.getStatus() });
+    }
+    if (provider === 'claude' || provider === 'anthropic') {
+      claudeSystemKeyState.reset('Manual admin trigger via /api/system-key-reset?provider=claude');
+      return res.json({ success: true, provider: 'claude', status: claudeSystemKeyState.getStatus() });
     }
     geminiSystemKeyState.reset('Manual admin trigger via /api/system-key-reset');
     res.json({ success: true, provider: 'gemini', status: geminiSystemKeyState.getStatus() });
@@ -245,8 +260,11 @@ async function startServer() {
 
       // If AI narrative is requested vs Without AI (Deterministic)
       if (config.enableAiNarrative) {
-        const provider: AiProvider = config.aiProvider || (config.geminiModel?.startsWith('gpt-') ? 'openai' : 'gemini');
-        const activeApiKey = provider === 'openai' ? config.openaiApiKey : config.geminiApiKey;
+        const provider: AiProvider = config.aiProvider || (
+          config.geminiModel?.startsWith('gpt-') ? 'openai' :
+          config.geminiModel?.startsWith('claude-') ? 'claude' : 'gemini'
+        );
+        const activeApiKey = provider === 'openai' ? config.openaiApiKey : provider === 'claude' ? config.claudeApiKey : config.geminiApiKey;
         const activeModel = config.geminiModel;
 
         try {
@@ -290,7 +308,7 @@ async function startServer() {
         } catch (narrativeErr) {
           console.warn('AI Narrative generation failed:', narrativeErr);
           report.ai_narrative = {
-            model: activeModel || (provider === 'openai' ? 'OpenAI' : 'Gemini AI'),
+            model: activeModel || (provider === 'openai' ? 'OpenAI' : provider === 'claude' ? 'Claude' : 'Gemini AI'),
             executive_summary: '',
             top_priorities: [],
             workload_risk_analysis: '',
@@ -330,6 +348,7 @@ async function startServer() {
       model,
       geminiApiKey,
       openaiApiKey,
+      claudeApiKey,
       enableAiNarrative,
       allowSystemKeyFallback,
     } = req.body;
@@ -343,8 +362,11 @@ async function startServer() {
       const canUseSystemFallback = allowSystemKeyFallback ?? isAiRequested;
 
       // Determine provider from explicit body or infer from model ID
-      const provider: AiProvider = reqProvider || (model?.startsWith('gpt-') ? 'openai' : 'gemini');
-      const apiKey = provider === 'openai' ? openaiApiKey : geminiApiKey;
+      const provider: AiProvider = reqProvider || (
+        model?.startsWith('gpt-') ? 'openai' :
+        model?.startsWith('claude-') ? 'claude' : 'gemini'
+      );
+      const apiKey = provider === 'openai' ? openaiApiKey : provider === 'claude' ? claudeApiKey : geminiApiKey;
 
       const narrative = await generateNarrativeForProvider(
         report,
@@ -359,7 +381,7 @@ async function startServer() {
 
       if (!narrative) {
         return res.status(503).json({
-          error: `AI Narrative could not be generated. Please check your ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API key or proceed with the deterministic engine.`,
+          error: `AI Narrative could not be generated. Please check your ${provider === 'openai' ? 'OpenAI' : provider === 'claude' ? 'Claude' : 'Gemini'} API key or proceed with the deterministic engine.`,
         });
       }
       res.json(narrative);

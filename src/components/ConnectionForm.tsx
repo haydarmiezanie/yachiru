@@ -9,6 +9,7 @@ import {
   Sliders,
   Sparkles,
   Zap,
+  Bot,
   Globe,
   KeyRound,
   FileCode2,
@@ -104,11 +105,12 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     hint?: string;
   } | null>(null);
 
-  // User-provided AI state (Gemini & OpenAI)
+  // User-provided AI state (Gemini, OpenAI & Claude)
   const [enableAiNarrative, setEnableAiNarrative] = useState(() => {
     return Boolean(
       sessionStorage.getItem('yachiru_gemini_api_key') ||
-      sessionStorage.getItem('yachiru_openai_api_key')
+      sessionStorage.getItem('yachiru_openai_api_key') ||
+      sessionStorage.getItem('yachiru_claude_api_key')
     );
   });
   const [aiProvider, setAiProvider] = useState<AiProvider>('gemini');
@@ -117,6 +119,9 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
   });
   const [openaiApiKey, setOpenaiApiKey] = useState(() => {
     return sessionStorage.getItem('yachiru_openai_api_key') || '';
+  });
+  const [claudeApiKey, setClaudeApiKey] = useState(() => {
+    return sessionStorage.getItem('yachiru_claude_api_key') || '';
   });
   const [showApiKey, setShowApiKey] = useState(false);
   const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
@@ -146,13 +151,21 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     }
   }, [openaiApiKey]);
 
+  useEffect(() => {
+    if (claudeApiKey) {
+      sessionStorage.setItem('yachiru_claude_api_key', claudeApiKey);
+    }
+  }, [claudeApiKey]);
+
   const handleProviderToggle = (newProvider: AiProvider) => {
     setAiProvider(newProvider);
     setApiKeyError(null);
     if (newProvider === 'gemini') {
       setSelectedModel('gemini-3.8-flash');
-    } else {
+    } else if (newProvider === 'openai') {
       setSelectedModel('gpt-5.4-mini');
+    } else {
+      setSelectedModel('claude-haiku-4-5-20251001');
     }
   };
 
@@ -256,11 +269,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
 
   const validateAndProceed = (targetIsDemo: boolean, forceWithoutAi: boolean = false) => {
     const willUseAi = forceWithoutAi ? false : enableAiNarrative;
-    const activeApiKey = aiProvider === 'openai' ? openaiApiKey : geminiApiKey;
+    const activeApiKey =
+      aiProvider === 'openai' ? openaiApiKey :
+      aiProvider === 'claude' ? claudeApiKey : geminiApiKey;
 
     // Check if AI is enabled but user has not provided an API key for selected provider
     if (willUseAi && !activeApiKey.trim()) {
-      const providerLabel = aiProvider === 'openai' ? 'OpenAI' : 'Gemini';
+      const providerLabel =
+        aiProvider === 'openai' ? 'OpenAI' :
+        aiProvider === 'claude' ? 'Claude' : 'Gemini';
       setApiKeyError(
         `${providerLabel} API Key is required because AI Executive Narrative is enabled. Please enter your ${providerLabel} API key below or proceed with deterministic analysis without AI.`
       );
@@ -290,6 +307,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         geminiModel: selectedModel.trim(),
         geminiApiKey: willUseAi && aiProvider === 'gemini' ? geminiApiKey.trim() : undefined,
         openaiApiKey: willUseAi && aiProvider === 'openai' ? openaiApiKey.trim() : undefined,
+        claudeApiKey: willUseAi && aiProvider === 'claude' ? claudeApiKey.trim() : undefined,
         yachiruApiKey: apiKeyRequired && yachiruApiKey.trim() ? yachiruApiKey.trim() : undefined,
         isDemo: true,
       });
@@ -313,6 +331,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         geminiModel: selectedModel.trim(),
         geminiApiKey: willUseAi && aiProvider === 'gemini' ? geminiApiKey.trim() : undefined,
         openaiApiKey: willUseAi && aiProvider === 'openai' ? openaiApiKey.trim() : undefined,
+        claudeApiKey: willUseAi && aiProvider === 'claude' ? claudeApiKey.trim() : undefined,
         yachiruApiKey: apiKeyRequired && yachiruApiKey.trim() ? yachiruApiKey.trim() : undefined,
         isDemo: false,
       });
@@ -561,7 +580,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
               </div>
 
               <span className={`text-[11px] px-2 py-0.5 rounded font-mono ${enableAiNarrative ? 'text-rose-400 bg-rose-500/10' : 'text-zinc-500'}`}>
-                {enableAiNarrative ? `${aiProvider === 'openai' ? 'OpenAI' : 'Gemini'} AI Enabled` : 'Deterministic Only'}
+                {enableAiNarrative ? `${aiProvider === 'openai' ? 'OpenAI' : aiProvider === 'claude' ? 'Claude' : 'Gemini'} AI Enabled` : 'Deterministic Only'}
               </span>
             </div>
 
@@ -571,7 +590,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                 {/* AI Provider Segmented Control */}
                 <div>
                   <label className="block text-xs font-medium text-zinc-300 mb-1.5">AI Provider</label>
-                  <div className="grid grid-cols-2 gap-2 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800">
+                  <div className="grid grid-cols-3 gap-2 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800">
                     <button
                       type="button"
                       id="btn-provider-gemini"
@@ -583,7 +602,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                       }`}
                     >
                       <Sparkles className="w-3.5 h-3.5" />
-                      <span>Google Gemini</span>
+                      <span>Gemini</span>
                     </button>
 
                     <button
@@ -599,6 +618,20 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                       <Zap className="w-3.5 h-3.5" />
                       <span>OpenAI</span>
                     </button>
+
+                    <button
+                      type="button"
+                      id="btn-provider-claude"
+                      onClick={() => handleProviderToggle('claude')}
+                      className={`py-1.5 px-3 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                        aiProvider === 'claude'
+                          ? 'bg-amber-600 text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                      }`}
+                    >
+                      <Bot className="w-3.5 h-3.5" />
+                      <span>Claude</span>
+                    </button>
                   </div>
                 </div>
 
@@ -607,7 +640,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
                       <KeyRound className="w-3.5 h-3.5 text-rose-400" />
-                      <span>{aiProvider === 'openai' ? 'OpenAI API Key' : 'Google Gemini API Key'}</span>
+                      <span>{aiProvider === 'openai' ? 'OpenAI API Key' : aiProvider === 'claude' ? 'Anthropic Claude API Key' : 'Google Gemini API Key'}</span>
                       <span className="text-rose-400 text-xs">*</span>
                     </label>
 
@@ -615,13 +648,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                       href={
                         aiProvider === 'openai'
                           ? 'https://platform.openai.com/api-keys'
+                          : aiProvider === 'claude'
+                          ? 'https://console.anthropic.com/settings/keys'
                           : 'https://aistudio.google.com/app/apikey'
                       }
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-[11px] text-rose-400 hover:text-rose-300 flex items-center gap-1 transition underline decoration-rose-500/30"
                     >
-                      <span>{aiProvider === 'openai' ? 'Get OpenAI Key' : 'Get Free Key at AI Studio'}</span>
+                      <span>{aiProvider === 'openai' ? 'Get OpenAI Key' : aiProvider === 'claude' ? 'Get Anthropic Key' : 'Get Free Key at AI Studio'}</span>
                       <ExternalLink className="w-3 h-3" />
                     </a>
                   </div>
@@ -629,12 +664,14 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                   <div className="relative">
                     <input
                       ref={apiKeyInputRef}
-                      id={aiProvider === 'openai' ? 'input-openai-api-key' : 'input-gemini-api-key'}
+                      id={aiProvider === 'openai' ? 'input-openai-api-key' : aiProvider === 'claude' ? 'input-claude-api-key' : 'input-gemini-api-key'}
                       type={showApiKey ? 'text' : 'password'}
-                      value={aiProvider === 'openai' ? openaiApiKey : geminiApiKey}
+                      value={aiProvider === 'openai' ? openaiApiKey : aiProvider === 'claude' ? claudeApiKey : geminiApiKey}
                       onChange={(e) => {
                         if (aiProvider === 'openai') {
                           setOpenaiApiKey(e.target.value);
+                        } else if (aiProvider === 'claude') {
+                          setClaudeApiKey(e.target.value);
                         } else {
                           setGeminiApiKey(e.target.value);
                         }
@@ -643,6 +680,8 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                       placeholder={
                         aiProvider === 'openai'
                           ? 'Enter your OpenAI API Key (sk-...)'
+                          : aiProvider === 'claude'
+                          ? 'Enter your Anthropic Claude API Key (sk-ant-...)'
                           : 'Enter your Gemini API Key (AIzaSy...)'
                       }
                       className={`w-full bg-zinc-900 border ${

@@ -124,7 +124,7 @@ export interface AnalysisReport {
   ai_diagnoses?: AIDiagnosis[];
 }
 
-export type AiProvider = 'gemini' | 'openai';
+export type AiProvider = 'gemini' | 'openai' | 'claude';
 
 export interface ConnectionConfig {
   host: string;
@@ -140,6 +140,7 @@ export interface ConnectionConfig {
   geminiModel?: string;
   geminiApiKey?: string;
   openaiApiKey?: string;
+  claudeApiKey?: string;
   yachiruApiKey?: string;
   isDemo?: boolean;
 }
@@ -166,5 +167,12 @@ export const AVAILABLE_AI_MODELS: ModelOption[] = [
   { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', badge: 'Balanced (272K ctx)', provider: 'openai' },
   { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', badge: 'Fast & Efficient', provider: 'openai' },
   { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', badge: 'Fastest & Default', provider: 'openai' },
+
+  // Anthropic Claude models
+  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', badge: 'Fastest & Default (200K ctx)', provider: 'claude' },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', badge: 'Balanced (1M ctx)', provider: 'claude' },
+  { id: 'claude-opus-5', name: 'Claude Opus 5', badge: 'High-Capability (1M ctx)', provider: 'claude' },
+  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', badge: 'Mythos Class (1M ctx)', provider: 'claude' },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', badge: 'Previous Gen Sonnet (1M ctx)', provider: 'claude' },
 ];
 

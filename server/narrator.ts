@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { AINarrative, AnalysisReport, AiProvider } from '../src/types.js';
 
 // Default TTL for system API key depletion status (10 minutes)
@@ -91,6 +92,7 @@ export class SystemKeyStateManager {
 // Provider-specific system key state managers
 export const geminiSystemKeyState = new SystemKeyStateManager('Gemini');
 export const openaiSystemKeyState = new SystemKeyStateManager('OpenAI');
+export const claudeSystemKeyState = new SystemKeyStateManager('Claude');
 
 // Backward compatibility alias for existing code
 export const systemKeyState = geminiSystemKeyState;
@@ -167,6 +169,42 @@ export function getOpenAiClient(
     return {
       client: new OpenAI({
         apiKey: process.env.OPENAI_API_KEY,
+      }),
+      source: 'system',
+    };
+  }
+
+  return { client: null, source: 'none' };
+}
+
+export interface GetClaudeResult {
+  client: Anthropic | null;
+  source: 'user' | 'system' | 'none';
+}
+
+/**
+ * Instantiates the Anthropic SDK client.
+ * ONLY falls back to process.env.CLAUDE_API_KEY if allowSystemKeyFallback is explicitly true.
+ * NEVER falls back to Gemini or OpenAI keys.
+ */
+export function getClaudeClient(
+  customApiKey?: string,
+  allowSystemKeyFallback: boolean = false
+): GetClaudeResult {
+  const userKey = customApiKey?.trim();
+  if (userKey) {
+    return {
+      client: new Anthropic({
+        apiKey: userKey,
+      }),
+      source: 'user',
+    };
+  }
+
+  if (allowSystemKeyFallback && process.env.CLAUDE_API_KEY) {
+    return {
+      client: new Anthropic({
+        apiKey: process.env.CLAUDE_API_KEY,
       }),
       source: 'system',
     };
@@ -309,6 +347,98 @@ export function categorizeOpenAiError(err: unknown): { category: AiErrorCategory
 
   // Network / socket errors
   if (
+    lower.includes('econnrefused') ||
+    lower.includes('enotfound') ||
+    lower.includes('etimedout') ||
+    lower.includes('econnreset') ||
+    lower.includes('fetch failed') ||
+    lower.includes('network error') ||
+    lower.includes('socket hang up') ||
+    lower.includes('connection timeout')
+  ) {
+    return { category: 'network_error', rawMessage };
+  }
+
+  return { category: 'unknown', rawMessage };
+}
+
+/**
+ * Categorizes errors thrown by the Anthropic SDK into the shared AiErrorCategory union.
+ */
+export function categorizeClaudeError(err: unknown): { category: AiErrorCategory; rawMessage: string } {
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  const lower = rawMessage.toLowerCase();
+
+  const status = (err as any)?.status || (err as any)?.statusCode;
+
+  // 1. Quota / Credits / Rate Limit (HTTP 429)
+  if (
+    status === 429 ||
+    err instanceof Anthropic.RateLimitError ||
+    lower.includes('rate_limit') ||
+    lower.includes('rate limit') ||
+    lower.includes('quota') ||
+    lower.includes('credit') ||
+    lower.includes('too many requests')
+  ) {
+    return { category: 'quota_exhausted', rawMessage };
+  }
+
+  // 2. Invalid Key / Auth / Permission (401 / 403)
+  if (
+    status === 401 ||
+    status === 403 ||
+    err instanceof Anthropic.AuthenticationError ||
+    err instanceof Anthropic.PermissionDeniedError ||
+    lower.includes('invalid_api_key') ||
+    lower.includes('invalid api key') ||
+    lower.includes('incorrect api key') ||
+    lower.includes('authentication') ||
+    lower.includes('unauthorized') ||
+    lower.includes('permission denied')
+  ) {
+    return { category: 'invalid_key', rawMessage };
+  }
+
+  // 3. Model not found (HTTP 404)
+  if (
+    status === 404 ||
+    err instanceof Anthropic.NotFoundError ||
+    lower.includes('model_not_found') ||
+    lower.includes('not_found') ||
+    lower.includes('does not exist') ||
+    lower.includes('no such model')
+  ) {
+    return { category: 'model_not_found', rawMessage };
+  }
+
+  // 4. Service unavailable / Overloaded (HTTP >= 500)
+  if (
+    (typeof status === 'number' && status >= 500) ||
+    err instanceof Anthropic.InternalServerError ||
+    lower.includes('overloaded') ||
+    lower.includes('service unavailable') ||
+    lower.includes('server_error')
+  ) {
+    return { category: 'service_unavailable', rawMessage };
+  }
+
+  // 5. Schema / JSON parsing
+  if (
+    err instanceof SyntaxError ||
+    lower.includes('json') ||
+    lower.includes('syntaxerror') ||
+    lower.includes('schema') ||
+    lower.includes('unexpected token') ||
+    lower.includes('empty text returned')
+  ) {
+    return { category: 'schema_error', rawMessage };
+  }
+
+  // 6. Network / Connection errors
+  if (
+    err instanceof Anthropic.APIConnectionError ||
+    err instanceof Anthropic.APIConnectionTimeoutError ||
     lower.includes('econnrefused') ||
     lower.includes('enotfound') ||
     lower.includes('etimedout') ||
@@ -497,6 +627,67 @@ export function getOpenAiModelFallbackChain(primaryModel: string): string[] {
     }
   }
   return chain;
+}
+
+export function resolveClaudeModelId(inputModel?: string): string {
+  if (!inputModel) return 'claude-haiku-4-5-20251001';
+  const clean = inputModel.trim().toLowerCase();
+
+  const VALID_CLAUDE_MODELS = [
+    'claude-haiku-4-5-20251001',
+    'claude-sonnet-5',
+    'claude-opus-5',
+    'claude-fable-5-1',
+    'claude-sonnet-4-6',
+  ];
+
+  if (VALID_CLAUDE_MODELS.includes(clean)) {
+    return clean;
+  }
+
+  if (clean.includes('haiku')) return 'claude-haiku-4-5-20251001';
+  if (clean.includes('sonnet-5')) return 'claude-sonnet-5';
+  if (clean.includes('opus-5') || clean.includes('opus')) return 'claude-opus-5';
+  if (clean.includes('fable')) return 'claude-fable-5-1';
+  if (clean.includes('sonnet-4-6') || clean.includes('sonnet')) return 'claude-sonnet-4-6';
+
+  return 'claude-haiku-4-5-20251001';
+}
+
+export function getClaudeModelFallbackChain(primaryModel: string): string[] {
+  const chain: string[] = [primaryModel];
+  const standardFallbacks = [
+    'claude-haiku-4-5-20251001',
+    'claude-sonnet-5',
+    'claude-sonnet-4-6',
+    'claude-opus-5',
+    'claude-fable-5-1',
+  ];
+
+  for (const model of standardFallbacks) {
+    if (!chain.includes(model)) {
+      chain.push(model);
+    }
+  }
+  return chain;
+}
+
+/**
+ * Validates and resolves reasoning effort for Claude models.
+ * claude-haiku-4-5-20251001 does NOT support effort / extended thinking at all - returns undefined.
+ * For other models (claude-sonnet-5, claude-opus-5, claude-fable-5-1, claude-sonnet-4-6), supports 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+ */
+export function getSupportedClaudeEffort(
+  modelId: string,
+  requestedEffort: string = 'medium'
+): 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined {
+  if (modelId === 'claude-haiku-4-5-20251001' || modelId.includes('haiku')) {
+    return undefined;
+  }
+
+  const allowed: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'> = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const req = requestedEffort?.toLowerCase() as any;
+  return allowed.includes(req) ? req : 'medium';
 }
 
 /**
@@ -1332,9 +1523,216 @@ export async function generateNarrativeOpenAI(
   };
 }
 
+export async function generateNarrativeClaude(
+  report: AnalysisReport,
+  userModelPreference?: string,
+  userApiKey?: string,
+  options: NarrativeOptions = { enableAiNarrative: true, allowSystemKeyFallback: true }
+): Promise<AINarrative> {
+  const isAiRequested = options.enableAiNarrative !== false;
+  const allowSystemFallback = options.allowSystemKeyFallback ?? isAiRequested;
+  const hasUserKey = Boolean(userApiKey && userApiKey.trim());
+  const targetModel = resolveClaudeModelId(userModelPreference);
+
+  // If user explicitly selected "Without AI", return deterministic narrative immediately
+  if (!isAiRequested) {
+    console.log('[Yachiru] Deterministic mode selected ("Without AI"). Generating deterministic evidence report.');
+    return generateDeterministicNarrative(report, 'Deterministic Rule Engine (Without AI)');
+  }
+
+  // If AI was requested but system key is marked depleted and user provided no key:
+  if (!hasUserKey && claudeSystemKeyState.isDepleted()) {
+    const status = claudeSystemKeyState.getStatus();
+    console.log(
+      `[Yachiru] Skipping system Claude API call: default key is marked depleted until ${status.expiresAt}.`
+    );
+    return {
+      model: targetModel,
+      executive_summary: '',
+      top_priorities: [],
+      workload_risk_analysis: '',
+      ai_diagnoses: [],
+      isAiGenerated: false,
+      aiError: `System Claude quota is temporarily depleted (HTTP 429). Automatic retry resets at ${status.expiresAt} (~${status.remainingSeconds}s remaining). Please provide your own Claude API Key or generate without AI.`,
+      aiErrorCategory: 'quota_exhausted',
+    };
+  }
+
+  // Instantiate client with strict fallback control
+  const { client: claudeClient, source } = getClaudeClient(userApiKey, allowSystemFallback);
+  if (!claudeClient) {
+    console.log('[Yachiru] No valid Claude API key available (custom key absent and system fallback disabled/unset).');
+    return {
+      model: targetModel,
+      executive_summary: '',
+      top_priorities: [],
+      workload_risk_analysis: '',
+      ai_diagnoses: [],
+      isAiGenerated: false,
+      aiError: 'A Claude API Key is required for live AI synthesis. Please provide an API key in the configuration or select "Generate Without AI (Deterministic)".',
+      aiErrorCategory: 'invalid_key',
+    };
+  }
+
+  const { systemInstruction, userPrompt } = buildAuditPrompt(report);
+  const candidateModels = getClaudeModelFallbackChain(targetModel);
+  let lastError: unknown = null;
+  let finalModelUsed = targetModel;
+
+  for (const currentModel of candidateModels) {
+    const isPrimary = currentModel === targetModel;
+    const maxAttemptsForModel = isPrimary ? 2 : 1;
+
+    for (let attempt = 1; attempt <= maxAttemptsForModel; attempt++) {
+      try {
+        console.log(
+          `[Yachiru] Requesting full Claude diagnosis via ${source} key with model: "${currentModel}" (attempt ${attempt}/${maxAttemptsForModel})`
+        );
+
+        const effort = getSupportedClaudeEffort(currentModel, 'medium');
+
+        const messageParams: Anthropic.MessageCreateParamsNonStreaming = {
+          model: currentModel,
+          max_tokens: 16000,
+          system: systemInstruction, // Top-level string parameter
+          messages: [
+            {
+              role: 'user',
+              content: userPrompt,
+            },
+          ],
+          output_config: {
+            format: {
+              type: 'json_schema',
+              schema: OPENAI_AUDIT_JSON_SCHEMA,
+            },
+            ...(effort ? { effort } : {}),
+          },
+        };
+
+        const response = await claudeClient.messages.create(messageParams);
+
+        // Extract output text
+        let text = '';
+        if (Array.isArray(response.content)) {
+          for (const block of response.content) {
+            if (block.type === 'text' && (block as any).text) {
+              text += (block as any).text;
+            }
+          }
+        }
+
+        if (!text) {
+          throw new Error('Empty text returned by Claude model');
+        }
+
+        const parsed = parseJsonSafe(text);
+
+        // Normalize nullable fields into standard AINarrative shape
+        const normalizedTopPriorities = Array.isArray(parsed.top_priorities)
+          ? parsed.top_priorities.map((tp: any) => ({
+              priority: tp.priority,
+              title: tp.title,
+              target_table: tp.target_table === null ? undefined : tp.target_table,
+              why: tp.why,
+              action: tp.action,
+            }))
+          : [];
+
+        const normalizedAiDiagnoses = Array.isArray(parsed.ai_diagnoses)
+          ? parsed.ai_diagnoses.map((diag: any) => ({
+              id: diag.id,
+              category: diag.category,
+              category_name: diag.category_name,
+              title: diag.title,
+              status: diag.status,
+              table: diag.table === null ? undefined : diag.table,
+              deep_assessment: diag.deep_assessment,
+              root_cause: diag.root_cause,
+              risk_vector: diag.risk_vector,
+              remediation_plan: Array.isArray(diag.remediation_plan) ? diag.remediation_plan : [],
+              remediation_sql: diag.remediation_sql === null ? undefined : diag.remediation_sql,
+              is_sql_recommendation:
+                diag.is_sql_recommendation === null
+                  ? Boolean(diag.remediation_sql && diag.remediation_sql.trim().length > 0)
+                  : Boolean(diag.is_sql_recommendation),
+            }))
+          : [];
+
+        console.log(`[Yachiru] Claude full diagnosis succeeded using model "${currentModel}"`);
+        return {
+          model: currentModel,
+          executive_summary: parsed.executive_summary || '',
+          cluster_health_verdict:
+            parsed.cluster_health_verdict === null ? undefined : parsed.cluster_health_verdict,
+          top_priorities: normalizedTopPriorities,
+          workload_risk_analysis: parsed.workload_risk_analysis || '',
+          ai_diagnoses: normalizedAiDiagnoses,
+          isAiGenerated: true,
+        };
+      } catch (err: unknown) {
+        lastError = err;
+        finalModelUsed = currentModel;
+        const { category, rawMessage } = categorizeClaudeError(err);
+
+        // If quota exhausted or invalid key, break early
+        if (category === 'quota_exhausted' || category === 'invalid_key') {
+          break;
+        }
+
+        // If transient 503 / network error and attempt < maxAttempts, retry briefly
+        if ((category === 'service_unavailable' || category === 'network_error') && attempt < maxAttemptsForModel) {
+          console.warn(
+            `[Yachiru] Transient ${category} on Claude model "${currentModel}" (attempt ${attempt}). Retrying in 1000ms... [${rawMessage}]`
+          );
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          continue;
+        }
+
+        console.warn(
+          `[Yachiru] Claude model "${currentModel}" encountered ${category}. Attempting fallback candidates... [${rawMessage}]`
+        );
+        break;
+      }
+    }
+
+    const { category: checkCategory } = categorizeClaudeError(lastError);
+    if (checkCategory === 'quota_exhausted' || checkCategory === 'invalid_key') {
+      break;
+    }
+  }
+
+  // Handle terminal error if all models exhausted
+  const { category, rawMessage } = categorizeClaudeError(lastError);
+
+  if (category === 'quota_exhausted' && !hasUserKey) {
+    claudeSystemKeyState.markDepleted(rawMessage);
+  }
+
+  const { friendlyMessage } = getAiErrorInfo(
+    category,
+    rawMessage || 'Claude synthesis service unavailable',
+    hasUserKey
+  );
+
+  console.info(`[Yachiru] Claude diagnosis failed across models [${category}]: ${rawMessage}`);
+
+  return {
+    model: finalModelUsed,
+    executive_summary: '',
+    top_priorities: [],
+    workload_risk_analysis: '',
+    ai_diagnoses: [],
+    isAiGenerated: false,
+    aiError: friendlyMessage,
+    aiErrorCategory: category,
+    rawError: rawMessage || undefined,
+  };
+}
+
 /**
  * Top-level provider dispatcher called by /api/analyze and /api/narrate in server.ts.
- * Dispatches cleanly between Gemini and OpenAI, defaulting to Gemini if provider is omitted.
+ * Dispatches cleanly between Gemini, OpenAI, and Claude, defaulting to Gemini if provider is omitted.
  */
 export async function generateNarrativeForProvider(
   report: AnalysisReport,
@@ -1345,6 +1743,9 @@ export async function generateNarrativeForProvider(
 ): Promise<AINarrative> {
   if (provider === 'openai') {
     return generateNarrativeOpenAI(report, userModelPreference, userApiKey, options);
+  }
+  if (provider === 'claude') {
+    return generateNarrativeClaude(report, userModelPreference, userApiKey, options);
   }
   return generateNarrative(report, userModelPreference, userApiKey, options);
 }

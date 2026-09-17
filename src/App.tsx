@@ -100,7 +100,10 @@ export default function App() {
     if (!report) return;
     setIsLoadingNarrative(true);
     try {
-      const targetProvider = provider || (model.startsWith('gpt-') ? 'openai' : 'gemini');
+      const targetProvider = provider || (
+        model.startsWith('gpt-') ? 'openai' :
+        model.startsWith('claude-') ? 'claude' : 'gemini'
+      );
       const response = await fetch('/api/narrate', {
         method: 'POST',
         headers: getAuthHeaders(currentScanConfig?.yachiruApiKey),
@@ -110,6 +113,7 @@ export default function App() {
           model,
           geminiApiKey: targetProvider === 'gemini' ? apiKey : undefined,
           openaiApiKey: targetProvider === 'openai' ? apiKey : undefined,
+          claudeApiKey: targetProvider === 'claude' ? apiKey : undefined,
           enableAiNarrative,
           allowSystemKeyFallback: enableAiNarrative,
         }),

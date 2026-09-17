@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <!-- Gradient matching Header: from-rose-600 via-rose-500 to-amber-400 -->
+    <linearGradient id="yachiruBorder" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#e11d48" />
+      <stop offset="45%" stop-color="#f43f5e" />
+      <stop offset="100%" stop-color="#fbbf24" />
+    </linearGradient>
+
+    <!-- Subtle inner surface sheen -->
+    <radialGradient id="innerSheen" cx="50%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#18181b" />
+      <stop offset="100%" stop-color="#09090b" />
+    </radialGradient>
+  </defs>
+
+  <!-- Outer Gradient Border Container (rounded-2xl) -->
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#yachiruBorder)" />
+
+  <!-- Inner Dark Core (zinc-950) -->
+  <rect x="6" y="6" width="52" height="52" rx="14" fill="url(#innerSheen)" />
+
+  <!-- Yachiru Kanji '八' (font-black text-rose-400) -->
+  <text
+    x="32"
+    y="35"
+    text-anchor="middle"
+    dominant-baseline="central"
+    fill="#fb7185"
+    font-size="30"
+    font-weight="900"
+    font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Hiragino Sans', 'Noto Sans CJK JP', sans-serif"
+    letter-spacing="1"
+  >八</text>
+
+  <!-- Notification / Pulse Ring & Dot (Matching top-right badge) -->
+  <circle cx="52" cy="12" r="7.5" fill="#fb7185" fill-opacity="0.3" />
+  <circle cx="52" cy="12" r="5" fill="#f43f5e" stroke="#09090b" stroke-width="1.5" />
+</svg>

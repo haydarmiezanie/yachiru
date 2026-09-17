@@ -13,6 +13,7 @@ import {
   EyeOff,
   ExternalLink,
   Zap,
+  Bot,
   RotateCcw,
   Activity,
   Code2,
@@ -42,17 +43,23 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
   const [isOpen, setIsOpen] = useState(true);
 
   // Detect initial provider from narrative or default to gemini
-  const initialProvider: AiProvider = narrative?.model?.startsWith('gpt-') ? 'openai' : 'gemini';
+  const initialProvider: AiProvider =
+    narrative?.model?.startsWith('gpt-') ? 'openai' :
+    narrative?.model?.startsWith('claude-') ? 'claude' : 'gemini';
   const [aiProvider, setAiProvider] = useState<AiProvider>(initialProvider);
 
   const [geminiModel, setGeminiModel] = useState('gemini-3.8-flash');
   const [openaiModel, setOpenaiModel] = useState('gpt-5.4-mini');
+  const [claudeModel, setClaudeModel] = useState('claude-haiku-4-5-20251001');
 
   const [geminiApiKey, setGeminiApiKey] = useState(() => {
     return sessionStorage.getItem('yachiru_gemini_api_key') || '';
   });
   const [openaiApiKey, setOpenaiApiKey] = useState(() => {
     return sessionStorage.getItem('yachiru_openai_api_key') || '';
+  });
+  const [claudeApiKey, setClaudeApiKey] = useState(() => {
+    return sessionStorage.getItem('yachiru_claude_api_key') || '';
   });
 
   const [showApiKey, setShowApiKey] = useState(false);
@@ -73,6 +80,12 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
     }
   }, [openaiApiKey]);
 
+  useEffect(() => {
+    if (claudeApiKey) {
+      sessionStorage.setItem('yachiru_claude_api_key', claudeApiKey);
+    }
+  }, [claudeApiKey]);
+
   const handleCopySql = (id: string, sql: string) => {
     navigator.clipboard.writeText(sql);
     setCopiedSqlId(id);
@@ -91,12 +104,18 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
     setApiKeyError(null);
   };
 
-  const currentModel = aiProvider === 'openai' ? openaiModel : geminiModel;
-  const currentApiKey = aiProvider === 'openai' ? openaiApiKey : geminiApiKey;
+  const currentModel =
+    aiProvider === 'openai' ? openaiModel :
+    aiProvider === 'claude' ? claudeModel : geminiModel;
+  const currentApiKey =
+    aiProvider === 'openai' ? openaiApiKey :
+    aiProvider === 'claude' ? claudeApiKey : geminiApiKey;
 
   const handleGenerateWithAi = () => {
     if (!currentApiKey.trim()) {
-      const providerLabel = aiProvider === 'openai' ? 'OpenAI' : 'Google Gemini';
+      const providerLabel =
+        aiProvider === 'openai' ? 'OpenAI' :
+        aiProvider === 'claude' ? 'Anthropic Claude' : 'Google Gemini';
       setApiKeyError(
         `A ${providerLabel} API Key is required for live AI synthesis. Please enter your API key below or select "Generate Without AI (Deterministic)".`
       );
@@ -158,7 +177,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 {narrative?.aiError ? (
                   <span className="text-amber-200/90">{narrative.aiError}</span>
                 ) : (
-                  'Generate an executive summary, workload risk evaluation, and concrete remediation steps powered by Google Gemini or OpenAI.'
+                  'Generate an executive summary, workload risk evaluation, and concrete remediation steps powered by Google Gemini, OpenAI, or Claude.'
                 )}
               </p>
             </div>
@@ -221,7 +240,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
             {/* Provider Toggle */}
             <div>
               <label className="block text-xs font-medium text-zinc-300 mb-1.5">AI Provider</label>
-              <div className="grid grid-cols-2 gap-2 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800 max-w-sm">
+              <div className="grid grid-cols-3 gap-2 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800 max-w-md">
                 <button
                   type="button"
                   onClick={() => handleProviderToggle('gemini')}
@@ -232,7 +251,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                   }`}
                 >
                   <Sparkles className="w-3.5 h-3.5" />
-                  <span>Google Gemini</span>
+                  <span>Gemini</span>
                 </button>
 
                 <button
@@ -247,6 +266,19 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                   <Zap className="w-3.5 h-3.5" />
                   <span>OpenAI</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleProviderToggle('claude')}
+                  className={`py-1.5 px-3 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                    aiProvider === 'claude'
+                      ? 'bg-amber-600 text-white shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                  }`}
+                >
+                  <Bot className="w-3.5 h-3.5" />
+                  <span>Claude</span>
+                </button>
               </div>
             </div>
 
@@ -255,19 +287,21 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
                     <KeyRound className="w-3.5 h-3.5 text-rose-400" />
-                    <span>{aiProvider === 'openai' ? 'OpenAI API Key' : 'Google Gemini API Key'}</span>
+                    <span>{aiProvider === 'openai' ? 'OpenAI API Key' : aiProvider === 'claude' ? 'Anthropic Claude API Key' : 'Google Gemini API Key'}</span>
                   </label>
                   <a
                     href={
                       aiProvider === 'openai'
                         ? 'https://platform.openai.com/api-keys'
+                        : aiProvider === 'claude'
+                        ? 'https://console.anthropic.com/settings/keys'
                         : 'https://aistudio.google.com/app/apikey'
                     }
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-[11px] text-rose-400 hover:text-rose-300 flex items-center gap-1 underline"
                   >
-                    <span>{aiProvider === 'openai' ? 'Get OpenAI Key' : 'Get Free Key at AI Studio'}</span>
+                    <span>{aiProvider === 'openai' ? 'Get OpenAI Key' : aiProvider === 'claude' ? 'Get Anthropic Key' : 'Get Free Key at AI Studio'}</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
@@ -275,10 +309,12 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 <div className="relative">
                   <input
                     type={showApiKey ? 'text' : 'password'}
-                    value={aiProvider === 'openai' ? openaiApiKey : geminiApiKey}
+                    value={aiProvider === 'openai' ? openaiApiKey : aiProvider === 'claude' ? claudeApiKey : geminiApiKey}
                     onChange={(e) => {
                       if (aiProvider === 'openai') {
                         setOpenaiApiKey(e.target.value);
+                      } else if (aiProvider === 'claude') {
+                        setClaudeApiKey(e.target.value);
                       } else {
                         setGeminiApiKey(e.target.value);
                       }
@@ -287,6 +323,8 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                     placeholder={
                       aiProvider === 'openai'
                         ? 'Enter your OpenAI API Key (sk-...)'
+                        : aiProvider === 'claude'
+                        ? 'Enter your Anthropic Claude API Key (sk-ant-...)'
                         : 'Enter your Gemini API Key (AIzaSy...)'
                     }
                     className="w-full bg-zinc-900 border border-zinc-800 rounded-lg pl-3 pr-10 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 font-mono"
@@ -308,6 +346,8 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                   onChange={(e) => {
                     if (aiProvider === 'openai') {
                       setOpenaiModel(e.target.value);
+                    } else if (aiProvider === 'claude') {
+                      setClaudeModel(e.target.value);
                     } else {
                       setGeminiModel(e.target.value);
                     }
@@ -339,7 +379,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 transition cursor-pointer flex items-center gap-1.5"
               >
                 <Sparkles className="w-3 h-3" />
-                <span>Run with {aiProvider === 'openai' ? 'OpenAI' : 'Gemini'}</span>
+                <span>Run with {aiProvider === 'openai' ? 'OpenAI' : aiProvider === 'claude' ? 'Claude' : 'Gemini'}</span>
               </button>
             </div>
           </div>
@@ -393,7 +433,10 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
             </h3>
             <p className="text-xs text-zinc-400">
               {narrative.isAiGenerated
-                ? `Synthesized via ${narrative.model.startsWith('gpt-') ? 'OpenAI' : 'Google Gemini'} AI using live diagnostic metrics`
+                ? `Synthesized via ${
+                    narrative.model.startsWith('gpt-') ? 'OpenAI' :
+                    narrative.model.startsWith('claude-') ? 'Anthropic Claude' : 'Google Gemini'
+                  } AI using live diagnostic metrics`
                 : 'Deterministic evidence synthesis (strictly computed from local ClickHouse metrics without external AI calls)'}
             </p>
           </div>
@@ -451,7 +494,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
           {/* Provider Selection */}
           <div>
             <label className="block text-xs font-medium text-zinc-300 mb-1.5">AI Provider</label>
-            <div className="grid grid-cols-2 gap-2 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800 max-w-sm">
+            <div className="grid grid-cols-3 gap-2 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800 max-w-md">
               <button
                 type="button"
                 onClick={() => handleProviderToggle('gemini')}
@@ -462,7 +505,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 }`}
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>Google Gemini</span>
+                <span>Gemini</span>
               </button>
 
               <button
@@ -477,6 +520,19 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 <Zap className="w-3.5 h-3.5" />
                 <span>OpenAI</span>
               </button>
+
+              <button
+                type="button"
+                onClick={() => handleProviderToggle('claude')}
+                className={`py-1.5 px-3 rounded-md text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                  aiProvider === 'claude'
+                    ? 'bg-amber-600 text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                }`}
+              >
+                <Bot className="w-3.5 h-3.5" />
+                <span>Claude</span>
+              </button>
             </div>
           </div>
 
@@ -485,19 +541,21 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
                   <KeyRound className="w-3.5 h-3.5 text-rose-400" />
-                  <span>{aiProvider === 'openai' ? 'OpenAI API Key' : 'Google Gemini API Key'}</span>
+                  <span>{aiProvider === 'openai' ? 'OpenAI API Key' : aiProvider === 'claude' ? 'Anthropic Claude API Key' : 'Google Gemini API Key'}</span>
                 </label>
                 <a
                   href={
                     aiProvider === 'openai'
                       ? 'https://platform.openai.com/api-keys'
+                      : aiProvider === 'claude'
+                      ? 'https://console.anthropic.com/settings/keys'
                       : 'https://aistudio.google.com/app/apikey'
                   }
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-[11px] text-rose-400 hover:text-rose-300 underline flex items-center gap-1"
                 >
-                  <span>{aiProvider === 'openai' ? 'Get OpenAI Key' : 'Get Key at AI Studio'}</span>
+                  <span>{aiProvider === 'openai' ? 'Get OpenAI Key' : aiProvider === 'claude' ? 'Get Anthropic Key' : 'Get Key at AI Studio'}</span>
                   <ExternalLink className="w-3 h-3" />
                 </a>
               </div>
@@ -505,10 +563,12 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
               <div className="relative">
                 <input
                   type={showApiKey ? 'text' : 'password'}
-                  value={aiProvider === 'openai' ? openaiApiKey : geminiApiKey}
+                  value={aiProvider === 'openai' ? openaiApiKey : aiProvider === 'claude' ? claudeApiKey : geminiApiKey}
                   onChange={(e) => {
                     if (aiProvider === 'openai') {
                       setOpenaiApiKey(e.target.value);
+                    } else if (aiProvider === 'claude') {
+                      setClaudeApiKey(e.target.value);
                     } else {
                       setGeminiApiKey(e.target.value);
                     }
@@ -517,6 +577,8 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                   placeholder={
                     aiProvider === 'openai'
                       ? 'Enter your OpenAI API Key (sk-...)'
+                      : aiProvider === 'claude'
+                      ? 'Enter your Anthropic Claude API Key (sk-ant-...)'
                       : 'Enter your Gemini API Key (AIzaSy...)'
                   }
                   className="w-full bg-zinc-900 border border-zinc-800 rounded-lg pl-3 pr-10 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 font-mono"
@@ -538,6 +600,8 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 onChange={(e) => {
                   if (aiProvider === 'openai') {
                     setOpenaiModel(e.target.value);
+                  } else if (aiProvider === 'claude') {
+                    setClaudeModel(e.target.value);
                   } else {
                     setGeminiModel(e.target.value);
                   }
@@ -569,7 +633,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
               className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 transition cursor-pointer flex items-center gap-1.5"
             >
               <Sparkles className="w-3 h-3" />
-              <span>{isLoadingNarrative ? 'Processing...' : `Run with ${aiProvider === 'openai' ? 'OpenAI' : 'Gemini'}`}</span>
+              <span>{isLoadingNarrative ? 'Processing...' : `Run with ${aiProvider === 'openai' ? 'OpenAI' : aiProvider === 'claude' ? 'Claude' : 'Gemini'}`}</span>
             </button>
           </div>
         </div>
