@@ -15,6 +15,7 @@ import { FindingsList } from './components/FindingsList.js';
 import { TableDrilldown } from './components/TableDrilldown.js';
 import { ThresholdsModal } from './components/ThresholdsModal.js';
 import { ExportModal } from './components/ExportModal.js';
+import { FeedbackModal } from './components/FeedbackModal.js';
 import { AlertCircle, FileSearch, LayoutGrid, Table } from 'lucide-react';
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
   const [activeViewTab, setActiveViewTab] = useState<'findings' | 'tables'>('findings');
   const [isThresholdsOpen, setIsThresholdsOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
   const [isLoadingNarrative, setIsLoadingNarrative] = useState(false);
   const [apiKeyRequired, setApiKeyRequired] = useState(false);
 
@@ -184,6 +186,7 @@ export default function App() {
         onNewScan={handleNewScan}
         onOpenThresholds={() => setIsThresholdsOpen(true)}
         onOpenExport={() => setIsExportOpen(true)}
+        onOpenFeedback={() => setIsFeedbackOpen(true)}
         isDemo={report?.is_demo}
       />
 
@@ -330,6 +333,13 @@ export default function App() {
         />
       )}
 
+      {/* Feedback / Bug Report / Feature Request Modal */}
+      <FeedbackModal
+        isOpen={isFeedbackOpen}
+        onClose={() => setIsFeedbackOpen(false)}
+        report={report}
+      />
+
       {/* Footer */}
       <footer className="border-t border-zinc-900 mt-16 py-6 text-center text-xs text-zinc-500">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -339,9 +349,20 @@ export default function App() {
             <span>ClickHouse Database Optimization Analyzer</span>
           </div>
 
-          <div className="text-[11px] text-zinc-400 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
-            <span>Read-Only SQL Safety Enforced</span>
+          <div className="flex items-center gap-3 sm:gap-4 text-[11px] text-zinc-400">
+            <button
+              type="button"
+              id="btn-footer-feedback"
+              onClick={() => setIsFeedbackOpen(true)}
+              className="text-zinc-400 hover:text-rose-400 transition cursor-pointer hover:underline"
+            >
+              Report a Bug / Request a Feature
+            </button>
+            <span>•</span>
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+              <span>Read-Only SQL Safety Enforced</span>
+            </div>
           </div>
         </div>
       </footer>

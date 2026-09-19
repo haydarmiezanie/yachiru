@@ -1,11 +1,12 @@
 import React from 'react';
-import { ShieldCheck, BookOpen, Download, RotateCcw, Sparkles } from 'lucide-react';
+import { ShieldCheck, BookOpen, Download, RotateCcw, MessageSquarePlus } from 'lucide-react';
 
 interface HeaderProps {
   hasReport: boolean;
   onNewScan: () => void;
   onOpenThresholds: () => void;
   onOpenExport: () => void;
+  onOpenFeedback: () => void;
   isDemo?: boolean;
 }
 
@@ -14,6 +15,7 @@ export const Header: React.FC<HeaderProps> = ({
   onNewScan,
   onOpenThresholds,
   onOpenExport,
+  onOpenFeedback,
   isDemo,
 }) => {
   return (
@@ -60,9 +62,19 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Header Actions */}
         <div className="flex items-center gap-2 sm:gap-3">
           <button
+            id="btn-open-feedback"
+            onClick={onOpenFeedback}
+            className="flex items-center gap-1.5 text-xs font-medium text-zinc-300 hover:text-white px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition cursor-pointer"
+            title="Report a bug or request a feature"
+          >
+            <MessageSquarePlus className="w-3.5 h-3.5 text-rose-400" />
+            <span className="hidden sm:inline">Feedback</span>
+          </button>
+
+          <button
             id="btn-thresholds-guide"
             onClick={onOpenThresholds}
-            className="flex items-center gap-1.5 text-xs font-medium text-zinc-300 hover:text-white px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition"
+            className="flex items-center gap-1.5 text-xs font-medium text-zinc-300 hover:text-white px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 transition cursor-pointer"
             title="View operational thresholds and mechanics"
           >
             <BookOpen className="w-3.5 h-3.5 text-zinc-400" />
@@ -74,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="btn-export-report"
                 onClick={onOpenExport}
-                className="flex items-center gap-1.5 text-xs font-medium text-zinc-200 hover:text-white px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 transition"
+                className="flex items-center gap-1.5 text-xs font-medium text-zinc-200 hover:text-white px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 transition cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5 text-zinc-400" />
                 <span>Export Report</span>
@@ -83,7 +95,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="btn-new-scan"
                 onClick={onNewScan}
-                className="flex items-center gap-1.5 text-xs font-semibold text-white px-3.5 py-2 rounded-lg bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 shadow-sm transition"
+                className="flex items-center gap-1.5 text-xs font-semibold text-white px-3.5 py-2 rounded-lg bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 shadow-sm transition cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>New Scan</span>
@@ -95,3 +107,4 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+

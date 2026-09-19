@@ -143,6 +143,14 @@ export interface ConnectionConfig {
   claudeApiKey?: string;
   yachiruApiKey?: string;
   isDemo?: boolean;
+  useSshTunnel?: boolean;
+  sshHost?: string;
+  sshPort?: number; // default 22
+  sshUsername?: string;
+  sshAuthMethod?: 'password' | 'privateKey';
+  sshPassword?: string;
+  sshPrivateKey?: string;
+  sshPrivateKeyPassphrase?: string;
 }
 
 export interface ModelOption {

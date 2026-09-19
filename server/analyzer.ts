@@ -1,5 +1,6 @@
-import { createClient } from '@clickhouse/client';
+import { createClient, type ClickHouseClient } from '@clickhouse/client';
 import { AnalysisReport, CategoryScore, CheckFinding, ConnectionConfig, TableMetadata } from '../src/types.js';
+import { openSshTunnel, OpenTunnelResult } from './sshTunnel.js';
 
 // Hard safety validator: Ensure any query string is strictly a read-only SELECT
 export function assertReadOnlySql(sql: string): void {
@@ -103,7 +104,9 @@ export function calculateScores(findings: CheckFinding[]): { categories: Categor
 // Live ClickHouse analyzer using @clickhouse/client
 export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisReport> {
   const protocol = config.protocol || 'http';
-  const host = config.host;
+  let host = config.host?.trim() || 'localhost';
+  // Strip any accidental protocol or paths from host
+  host = host.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
   const port = config.port || (protocol === 'https' ? 8443 : 8123);
   const username = config.username || 'default';
   const password = config.password || '';
@@ -111,16 +114,8 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
   const durationThresholdMs = config.queryDurationThresholdMs || 3000;
   const memoryThresholdBytes = config.queryMemoryThresholdBytes || 1073741824; // 1GB
 
-  const client = createClient({
-    url: `${protocol}://${host}:${port}`,
-    username,
-    password,
-    database,
-    request_timeout: 20000,
-    clickhouse_settings: {
-      max_execution_time: 15,
-    },
-  });
+  let tunnel: OpenTunnelResult | undefined;
+  let client: ClickHouseClient | undefined;
 
   const findings: CheckFinding[] = [];
   const tables: TableMetadata[] = [];
@@ -129,6 +124,34 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
   let totalQueriesAnalyzed = 0;
 
   try {
+    if (config.useSshTunnel) {
+      tunnel = await openSshTunnel({
+        sshHost: config.sshHost!.trim(),
+        sshPort: Number(config.sshPort) || 22,
+        sshUsername: config.sshUsername!.trim(),
+        sshAuthMethod: config.sshAuthMethod || 'password',
+        sshPassword: config.sshPassword,
+        sshPrivateKey: config.sshPrivateKey,
+        sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+        targetHost: host,
+        targetPort: port,
+      });
+    }
+
+    const clientHost = tunnel ? tunnel.localHost : host;
+    const clientPort = tunnel ? tunnel.localPort : port;
+
+    client = createClient({
+      url: `${protocol}://${clientHost}:${clientPort}`,
+      username,
+      password,
+      database,
+      request_timeout: 20000,
+      clickhouse_settings: {
+        max_execution_time: 15,
+      },
+    });
+
     // 0. Pre-flight connectivity check (fails fast within 7s if host is unreachable)
     try {
       const pingRes = await client.ping();
@@ -997,7 +1020,8 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
       tables,
     };
   } finally {
-    await client.close();
+    await client?.close();
+    await tunnel?.close();
   }
 }
 

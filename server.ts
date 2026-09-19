@@ -4,6 +4,7 @@ import { createServer as createViteServer } from 'vite';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { ClickHouseClient } from '@clickhouse/client';
 import { runLiveScan, runSimulationScan } from './server/analyzer.js';
+import { openSshTunnel, OpenTunnelResult } from './server/sshTunnel.js';
 import {
   generateNarrativeForProvider,
   generateDeterministicNarrative,
@@ -14,6 +15,41 @@ import {
 import { ConnectionConfig, AiProvider } from './src/types.js';
 
 export function classifyConnectionError(errorMsg: string): { hint: string } {
+  // Check SSH tunnel specific errors first
+  const isSsh = /ssh|bastion|all configured authentication methods failed|channel open failure|administratively prohibited|host key|handshake|passphrase|privatekey/i.test(errorMsg);
+
+  if (isSsh) {
+    if (/auth|all configured authentication methods failed|password|key|passphrase|denied/i.test(errorMsg)) {
+      return {
+        hint: 'Could not establish the SSH tunnel: SSH authentication failed. Verify the bastion SSH username, password, or private key (and passphrase, if encrypted).',
+      };
+    }
+    if (/timeout|readytimeout/i.test(errorMsg)) {
+      return {
+        hint: 'Could not establish the SSH tunnel: connection to the bastion timed out. Verify that the bastion host and port (default 22) are reachable and firewall rules permit inbound SSH.',
+      };
+    }
+    if (/refused|econnrefused/i.test(errorMsg)) {
+      return {
+        hint: 'Could not establish the SSH tunnel: connection refused by the bastion host. Verify that SSH daemon is running on the bastion and listening on the specified port (default 22).',
+      };
+    }
+    if (/notfound|enotfound|eai_again/i.test(errorMsg)) {
+      return {
+        hint: 'Could not establish the SSH tunnel: bastion hostname could not be resolved. Verify the bastion address.',
+      };
+    }
+    if (/channel open failure|administratively prohibited/i.test(errorMsg)) {
+      return {
+        hint: 'Could not establish the SSH tunnel: bastion refused port forwarding to the ClickHouse host. Ensure "AllowTcpForwarding yes" is enabled in the bastion SSH daemon configuration.',
+      };
+    }
+    return {
+      hint: 'Could not establish the SSH tunnel: verify the bastion host, port, username, and credentials.',
+    };
+  }
+
+  // ClickHouse connection errors
   if (/timeout|etimedout/i.test(errorMsg)) {
     return {
       hint: 'Connection or query timed out. In cloud sandboxes, "localhost" refers to the isolated container, not your local desktop machine. If connecting to a local ClickHouse instance, expose your port 8123 via a tunnel (such as ngrok or Cloudflare tunnel) or use ClickHouse Cloud. You can also explore the realistic simulation demo cluster.',
@@ -71,6 +107,34 @@ function validateConnectionConfig(config: ConnectionConfig): { error?: string } 
   if (config.protocol !== undefined && config.protocol !== null && String(config.protocol).trim() !== '') {
     if (config.protocol !== 'http' && config.protocol !== 'https') {
       return { error: "protocol must be 'http' or 'https'." };
+    }
+  }
+
+  // 4. SSH Tunnel validation when useSshTunnel is true
+  if (config?.useSshTunnel === true) {
+    if (typeof config.sshHost !== 'string' || config.sshHost.trim() === '') {
+      return { error: 'sshHost is required and must be a non-empty string when SSH tunnel is enabled.' };
+    }
+    if (config.sshPort !== undefined && config.sshPort !== null && String(config.sshPort).trim() !== '') {
+      const sshPortNum = Number(config.sshPort);
+      if (!Number.isInteger(sshPortNum) || sshPortNum < 1 || sshPortNum > 65535) {
+        return { error: 'sshPort must be a positive integer between 1 and 65535.' };
+      }
+    }
+    if (typeof config.sshUsername !== 'string' || config.sshUsername.trim() === '') {
+      return { error: 'sshUsername is required and must be a non-empty string when SSH tunnel is enabled.' };
+    }
+    const authMethod = config.sshAuthMethod || 'password';
+    if (authMethod === 'password') {
+      if (typeof config.sshPassword !== 'string' || config.sshPassword.trim() === '') {
+        return { error: 'sshPassword is required and must be a non-empty string when using password SSH authentication.' };
+      }
+    } else if (authMethod === 'privateKey') {
+      if (typeof config.sshPrivateKey !== 'string' || config.sshPrivateKey.trim() === '') {
+        return { error: 'sshPrivateKey is required and must be a non-empty string when using private key SSH authentication.' };
+      }
+    } else {
+      return { error: "sshAuthMethod must be 'password' or 'privateKey'." };
     }
   }
 
@@ -170,6 +234,7 @@ async function startServer() {
       });
     }
 
+    let tunnel: OpenTunnelResult | undefined = undefined;
     let client: ClickHouseClient | undefined = undefined;
     try {
       const { createClient } = await import('@clickhouse/client');
@@ -182,8 +247,25 @@ async function startServer() {
       const password = config.password || '';
       const database = config.database?.trim() || 'default';
 
+      if (config.useSshTunnel) {
+        tunnel = await openSshTunnel({
+          sshHost: config.sshHost!.trim(),
+          sshPort: Number(config.sshPort) || 22,
+          sshUsername: config.sshUsername!.trim(),
+          sshAuthMethod: config.sshAuthMethod || 'password',
+          sshPassword: config.sshPassword,
+          sshPrivateKey: config.sshPrivateKey,
+          sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+          targetHost: host,
+          targetPort: port,
+        });
+      }
+
+      const clientHost = tunnel ? tunnel.localHost : host;
+      const clientPort = tunnel ? tunnel.localPort : port;
+
       client = createClient({
-        url: `${protocol}://${host}:${port}`,
+        url: `${protocol}://${clientHost}:${clientPort}`,
         username,
         password,
         database,
@@ -236,6 +318,7 @@ async function startServer() {
       });
     } finally {
       await client?.close();
+      await tunnel?.close();
     }
   });
 

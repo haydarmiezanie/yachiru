@@ -97,6 +97,26 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
   const [memoryThresholdMB, setMemoryThresholdMB] = useState<number>(1024);
   const [hostCorrectedNotice, setHostCorrectedNotice] = useState<string | null>(null);
 
+  // SSH Tunnel state
+  const [useSshTunnel, setUseSshTunnel] = useState(false);
+  const [sshHost, setSshHost] = useState('');
+  const [sshPort, setSshPort] = useState<number>(22);
+  const [sshUsername, setSshUsername] = useState('');
+  const [sshAuthMethod, setSshAuthMethod] = useState<'password' | 'privateKey'>('password');
+  const [sshPassword, setSshPassword] = useState(() => {
+    return sessionStorage.getItem('yachiru_ssh_password') || '';
+  });
+  const [sshPrivateKey, setSshPrivateKey] = useState(() => {
+    return sessionStorage.getItem('yachiru_ssh_private_key') || '';
+  });
+  const [sshPrivateKeyPassphrase, setSshPrivateKeyPassphrase] = useState(() => {
+    return sessionStorage.getItem('yachiru_ssh_private_key_passphrase') || '';
+  });
+  const [showSshPassword, setShowSshPassword] = useState(false);
+  const [showSshPassphrase, setShowSshPassphrase] = useState(false);
+  const [sshHostCorrectedNotice, setSshHostCorrectedNotice] = useState<string | null>(null);
+  const [sshValidationError, setSshValidationError] = useState<string | null>(null);
+
   // Test Connection state
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [testResult, setTestResult] = useState<{
@@ -157,6 +177,31 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     }
   }, [claudeApiKey]);
 
+  // Persist SSH secrets in session storage for current tab convenience (cleared on tab close)
+  useEffect(() => {
+    if (sshPassword) {
+      sessionStorage.setItem('yachiru_ssh_password', sshPassword);
+    } else {
+      sessionStorage.removeItem('yachiru_ssh_password');
+    }
+  }, [sshPassword]);
+
+  useEffect(() => {
+    if (sshPrivateKey) {
+      sessionStorage.setItem('yachiru_ssh_private_key', sshPrivateKey);
+    } else {
+      sessionStorage.removeItem('yachiru_ssh_private_key');
+    }
+  }, [sshPrivateKey]);
+
+  useEffect(() => {
+    if (sshPrivateKeyPassphrase) {
+      sessionStorage.setItem('yachiru_ssh_private_key_passphrase', sshPrivateKeyPassphrase);
+    } else {
+      sessionStorage.removeItem('yachiru_ssh_private_key_passphrase');
+    }
+  }, [sshPrivateKeyPassphrase]);
+
   const handleProviderToggle = (newProvider: AiProvider) => {
     setAiProvider(newProvider);
     setApiKeyError(null);
@@ -214,9 +259,92 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     }
   };
 
+  const applySshHostSanitization = (raw: string) => {
+    let toClean = raw.trim();
+    if (/^ssh:\/\//i.test(toClean)) {
+      toClean = toClean.replace(/^ssh:\/\//i, '');
+      if (toClean.includes('@')) {
+        const parts = toClean.split('@');
+        const userPart = parts[0];
+        toClean = parts.slice(1).join('@');
+        if (userPart && !sshUsername) {
+          setSshUsername(userPart);
+        }
+      }
+      toClean = 'http://' + toClean;
+    }
+    const { host: cleanedHost, autoPort, wasCorrected } = sanitizeHostInput(toClean);
+    setSshHost(cleanedHost);
+    if (autoPort) {
+      setSshPort(autoPort);
+    }
+    if (wasCorrected || toClean !== raw.trim()) {
+      setSshHostCorrectedNotice(`SSH Host cleaned: ${cleanedHost}`);
+      setTimeout(() => setSshHostCorrectedNotice(null), 4000);
+    }
+  };
+
+  const handleSshHostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSshHost(e.target.value);
+    if (sshValidationError) setSshValidationError(null);
+  };
+
+  const handleSshHostPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pasteText = e.clipboardData.getData('text');
+    if (pasteText && (/^https?:\/\//i.test(pasteText) || /^ssh:\/\//i.test(pasteText) || pasteText.includes('/') || /:\d+$/.test(pasteText))) {
+      e.preventDefault();
+      applySshHostSanitization(pasteText);
+    }
+  };
+
+  const handleSshHostBlur = () => {
+    if (/^https?:\/\//i.test(sshHost) || /^ssh:\/\//i.test(sshHost) || sshHost.includes('/') || /:\d+$/.test(sshHost)) {
+      applySshHostSanitization(sshHost);
+    }
+  };
+
   const handleTestConnection = async () => {
     setIsTestingConnection(true);
     setTestResult(null);
+
+    if (useSshTunnel) {
+      if (!sshHost.trim()) {
+        setTestResult({
+          success: false,
+          message: 'Bastion SSH Host is required when SSH tunnel is enabled.',
+          hint: 'Please provide the bastion/jump host IP or domain name.',
+        });
+        setIsTestingConnection(false);
+        return;
+      }
+      if (!sshUsername.trim()) {
+        setTestResult({
+          success: false,
+          message: 'Bastion SSH Username is required when SSH tunnel is enabled.',
+          hint: 'Please provide the SSH username for authenticating with the bastion.',
+        });
+        setIsTestingConnection(false);
+        return;
+      }
+      if (sshAuthMethod === 'password' && !sshPassword.trim()) {
+        setTestResult({
+          success: false,
+          message: 'Bastion SSH Password is required for Password Authentication.',
+          hint: 'Please enter the SSH password for your bastion user.',
+        });
+        setIsTestingConnection(false);
+        return;
+      }
+      if (sshAuthMethod === 'privateKey' && !sshPrivateKey.trim()) {
+        setTestResult({
+          success: false,
+          message: 'Bastion SSH Private Key is required for Private Key Authentication.',
+          hint: 'Please paste the PEM-formatted SSH private key.',
+        });
+        setIsTestingConnection(false);
+        return;
+      }
+    }
 
     const { host: cleanedHost, autoProtocol, autoPort } = sanitizeHostInput(host);
     const targetHost = cleanedHost || host.trim();
@@ -229,6 +357,22 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         headers['Authorization'] = `Bearer ${yachiruApiKey.trim()}`;
       }
 
+      const sshPayload = useSshTunnel
+        ? {
+            useSshTunnel: true,
+            sshHost: sshHost.trim(),
+            sshPort: Number(sshPort) || 22,
+            sshUsername: sshUsername.trim(),
+            sshAuthMethod,
+            sshPassword: sshAuthMethod === 'password' ? sshPassword : undefined,
+            sshPrivateKey: sshAuthMethod === 'privateKey' ? sshPrivateKey : undefined,
+            sshPrivateKeyPassphrase:
+              sshAuthMethod === 'privateKey' && sshPrivateKeyPassphrase
+                ? sshPrivateKeyPassphrase
+                : undefined,
+          }
+        : { useSshTunnel: false };
+
       const response = await fetch('/api/test-connection', {
         method: 'POST',
         headers,
@@ -240,6 +384,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
           password,
           database: database.trim(),
           isDemo: false,
+          ...sshPayload,
         }),
       });
 
@@ -247,7 +392,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       if (response.ok && data.success) {
         setTestResult({
           success: true,
-          message: data.message || `Connected to ClickHouse v${data.version || 'OK'} successfully (${targetProtocol.toUpperCase()})`,
+          message: data.message || `Connected to ClickHouse v${data.version || 'OK'} successfully (${targetProtocol.toUpperCase()}${useSshTunnel ? ' via SSH Tunnel' : ''})`,
         });
       } else {
         setTestResult({
@@ -260,7 +405,9 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       setTestResult({
         success: false,
         message: err instanceof Error ? err.message : 'Network failure testing connection',
-        hint: 'Please ensure host is reachable and HTTP port is open (default 8123 HTTP / 8443 HTTPS).',
+        hint: useSshTunnel
+          ? 'Could not connect through SSH tunnel. Ensure bastion host and ClickHouse target are reachable.'
+          : 'Please ensure host is reachable and HTTP port is open (default 8123 HTTP / 8443 HTTPS).',
       });
     } finally {
       setIsTestingConnection(false);
@@ -312,10 +459,46 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         isDemo: true,
       });
     } else {
+      if (useSshTunnel) {
+        if (!sshHost.trim()) {
+          setSshValidationError('Bastion SSH Host is required when SSH tunnel is enabled.');
+          return;
+        }
+        if (!sshUsername.trim()) {
+          setSshValidationError('Bastion SSH Username is required when SSH tunnel is enabled.');
+          return;
+        }
+        if (sshAuthMethod === 'password' && !sshPassword.trim()) {
+          setSshValidationError('Bastion SSH Password is required for Password Authentication.');
+          return;
+        }
+        if (sshAuthMethod === 'privateKey' && !sshPrivateKey.trim()) {
+          setSshValidationError('Bastion SSH Private Key is required for Private Key Authentication.');
+          return;
+        }
+      }
+      setSshValidationError(null);
+
       const { host: cleanedHost, autoProtocol, autoPort } = sanitizeHostInput(host);
       const finalHost = cleanedHost || host.trim();
       const finalPort = autoPort || Number(port);
       const finalProtocol = autoProtocol || protocol;
+
+      const sshPayload = useSshTunnel
+        ? {
+            useSshTunnel: true,
+            sshHost: sshHost.trim(),
+            sshPort: Number(sshPort) || 22,
+            sshUsername: sshUsername.trim(),
+            sshAuthMethod,
+            sshPassword: sshAuthMethod === 'password' ? sshPassword : undefined,
+            sshPrivateKey: sshAuthMethod === 'privateKey' ? sshPrivateKey : undefined,
+            sshPrivateKeyPassphrase:
+              sshAuthMethod === 'privateKey' && sshPrivateKeyPassphrase
+                ? sshPrivateKeyPassphrase
+                : undefined,
+          }
+        : { useSshTunnel: false };
 
       onConnect({
         host: finalHost,
@@ -334,6 +517,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         claudeApiKey: willUseAi && aiProvider === 'claude' ? claudeApiKey.trim() : undefined,
         yachiruApiKey: apiKeyRequired && yachiruApiKey.trim() ? yachiruApiKey.trim() : undefined,
         isDemo: false,
+        ...sshPayload,
       });
     }
   };
@@ -380,34 +564,54 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       {/* Main Connection Form Card */}
       <div className="bg-zinc-900/70 border border-zinc-800 rounded-2xl p-6 sm:p-8 shadow-xl backdrop-blur-sm">
         <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-zinc-800 pb-4 gap-3">
             <div className="flex items-center gap-2 text-zinc-100 font-semibold text-base">
               <Server className="w-4 h-4 text-rose-400" />
               <span>ClickHouse Target Instance</span>
             </div>
-            <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-xs">
-              <button
-                type="button"
-                onClick={() => handleProtocolChange('http')}
-                className={`px-3 py-1 rounded font-medium transition cursor-pointer ${
-                  protocol === 'http'
-                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                HTTP (8123)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleProtocolChange('https')}
-                className={`px-3 py-1 rounded font-medium transition cursor-pointer ${
-                  protocol === 'https'
-                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                HTTPS (8443 / Cloud)
-              </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* SSH Tunnel Toggle */}
+              <div className="flex items-center bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-xs">
+                <button
+                  type="button"
+                  id="btn-toggle-ssh-tunnel"
+                  onClick={() => setUseSshTunnel(!useSshTunnel)}
+                  className={`px-3 py-1 rounded font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    useSshTunnel
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <Shield className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>SSH Tunnel {useSshTunnel ? 'Enabled' : 'Disabled'}</span>
+                </button>
+              </div>
+
+              {/* Protocol Toggle */}
+              <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-xs">
+                <button
+                  type="button"
+                  onClick={() => handleProtocolChange('http')}
+                  className={`px-3 py-1 rounded font-medium transition cursor-pointer ${
+                    protocol === 'http'
+                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  HTTP (8123)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleProtocolChange('https')}
+                  className={`px-3 py-1 rounded font-medium transition cursor-pointer ${
+                    protocol === 'https'
+                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  HTTPS (8443 / Cloud)
+                </button>
+              </div>
             </div>
           </div>
 
@@ -434,13 +638,19 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                 onChange={handleHostChange}
                 onPaste={handleHostPaste}
                 onBlur={handleHostBlur}
-                placeholder="example.clickhouse.cloud or my-node.internal"
+                placeholder={useSshTunnel ? "localhost or internal ClickHouse host (as reachable from bastion)" : "example.clickhouse.cloud or my-node.internal"}
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
               />
-              {(host.trim().toLowerCase() === 'localhost' || host.trim() === '127.0.0.1') && (
-                <p className="text-[11px] text-amber-400/90 mt-1.5 flex items-center gap-1">
-                  <span>💡 In this cloud runtime, &apos;localhost&apos; points to the container. Use a public URL/tunnel or ClickHouse Cloud for live instances.</span>
+              {useSshTunnel ? (
+                <p className="text-[11px] text-cyan-400/90 mt-1.5 flex items-start gap-1 leading-relaxed">
+                  <span>ℹ️ <strong>Reachable from Bastion:</strong> When SSH tunneling is enabled, enter the ClickHouse host address <em>as reachable from the jump host</em> (often <code className="bg-zinc-800 text-zinc-200 px-1 py-0.5 rounded font-mono">localhost</code> or an internal VPC hostname/IP, not necessarily reachable directly from your browser).</span>
                 </p>
+              ) : (
+                (host.trim().toLowerCase() === 'localhost' || host.trim() === '127.0.0.1') && (
+                  <p className="text-[11px] text-amber-400/90 mt-1.5 flex items-center gap-1">
+                    <span>💡 In this cloud runtime, &apos;localhost&apos; points to the container. Use a public URL/tunnel or ClickHouse Cloud for live instances.</span>
+                  </p>
+                )
               )}
             </div>
 
@@ -506,6 +716,206 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
               />
             </div>
+
+            {/* SSH Tunnel Configuration Section (when enabled) */}
+            {useSshTunnel && (
+              <div className="sm:col-span-12 p-4 sm:p-5 rounded-xl bg-cyan-950/20 border border-cyan-500/30 space-y-4 animate-in fade-in duration-200">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-cyan-500/20 pb-3 gap-2">
+                  <div className="flex items-center gap-2 text-cyan-200 font-semibold text-sm">
+                    <Shield className="w-4 h-4 text-cyan-400" />
+                    <span>SSH Bastion / Jump Host Details</span>
+                  </div>
+                  <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-xs self-start sm:self-auto">
+                    <button
+                      type="button"
+                      id="btn-ssh-auth-password"
+                      onClick={() => setSshAuthMethod('password')}
+                      className={`px-3 py-1 rounded font-medium transition cursor-pointer ${
+                        sshAuthMethod === 'password'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      Password Auth
+                    </button>
+                    <button
+                      type="button"
+                      id="btn-ssh-auth-key"
+                      onClick={() => setSshAuthMethod('privateKey')}
+                      className={`px-3 py-1 rounded font-medium transition cursor-pointer ${
+                        sshAuthMethod === 'privateKey'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      Private Key (PEM)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5">
+                  {/* Bastion Host */}
+                  <div className="sm:col-span-8">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                        <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Bastion SSH Host</span>
+                        <span className="text-rose-400 text-xs">*</span>
+                      </label>
+                      {sshHostCorrectedNotice && (
+                        <span className="text-[11px] text-emerald-400 flex items-center gap-1 font-mono animate-in fade-in">
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span>{sshHostCorrectedNotice}</span>
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      id="input-ssh-host"
+                      type="text"
+                      value={sshHost}
+                      onChange={handleSshHostChange}
+                      onPaste={handleSshHostPaste}
+                      onBlur={handleSshHostBlur}
+                      placeholder="bastion.example.com or 198.51.100.1"
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500 transition font-mono"
+                    />
+                  </div>
+
+                  {/* Bastion Port */}
+                  <div className="sm:col-span-4">
+                    <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                      <span>SSH Port</span>
+                    </label>
+                    <input
+                      id="input-ssh-port"
+                      type="number"
+                      value={sshPort}
+                      onChange={(e) => setSshPort(Number(e.target.value))}
+                      placeholder="22"
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500 transition font-mono"
+                    />
+                  </div>
+
+                  {/* Bastion Username */}
+                  <div className="sm:col-span-12">
+                    <label className="block text-xs font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
+                      <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>SSH Username</span>
+                      <span className="text-rose-400 text-xs">*</span>
+                    </label>
+                    <input
+                      id="input-ssh-username"
+                      type="text"
+                      value={sshUsername}
+                      onChange={(e) => setSshUsername(e.target.value)}
+                      placeholder="ubuntu, ec2-user, or bastion username"
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500 transition font-mono"
+                    />
+                  </div>
+
+                  {/* Auth Method Secrets */}
+                  {sshAuthMethod === 'password' ? (
+                    <div className="sm:col-span-12">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>SSH Password</span>
+                          <span className="text-rose-400 text-xs">*</span>
+                        </label>
+                        <span className="text-[11px] text-zinc-500 font-mono">sessionStorage tab-scoped</span>
+                      </div>
+                      <div className="relative">
+                        <input
+                          id="input-ssh-password"
+                          type={showSshPassword ? 'text' : 'password'}
+                          value={sshPassword}
+                          onChange={(e) => setSshPassword(e.target.value)}
+                          placeholder="Enter bastion SSH password"
+                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-3.5 pr-10 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500 transition font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowSshPassword(!showSshPassword)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 transition cursor-pointer"
+                        >
+                          {showSshPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="sm:col-span-12">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                            <FileCode2 className="w-3.5 h-3.5 text-cyan-400" />
+                            <span>SSH Private Key (OpenSSH or RSA PEM)</span>
+                            <span className="text-rose-400 text-xs">*</span>
+                          </label>
+                          <span className="text-[11px] text-zinc-500 font-mono">sessionStorage tab-scoped</span>
+                        </div>
+                        <textarea
+                          id="input-ssh-private-key"
+                          rows={4}
+                          value={sshPrivateKey}
+                          onChange={(e) => setSshPrivateKey(e.target.value)}
+                          placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
+                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500 transition font-mono"
+                        />
+                      </div>
+                      <div className="sm:col-span-12">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                            <Lock className="w-3.5 h-3.5 text-zinc-400" />
+                            <span>Key Passphrase (optional, if key is encrypted)</span>
+                          </label>
+                          <span className="text-[11px] text-zinc-500 font-mono">sessionStorage tab-scoped</span>
+                        </div>
+                        <div className="relative">
+                          <input
+                            id="input-ssh-passphrase"
+                            type={showSshPassphrase ? 'text' : 'password'}
+                            value={sshPrivateKeyPassphrase}
+                            onChange={(e) => setSshPrivateKeyPassphrase(e.target.value)}
+                            placeholder="Passphrase to decrypt private key"
+                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-3.5 pr-10 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500 transition font-mono"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowSshPassphrase(!showSshPassphrase)}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 transition cursor-pointer"
+                          >
+                            {showSshPassphrase ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Mandatory Disclosure: SSH Host Key Verification Notice */}
+                  <div className="sm:col-span-12 p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 space-y-1.5">
+                    <div className="flex items-center gap-2 text-zinc-200 font-semibold text-xs">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>Bastion SSH Host Key Verification Notice</span>
+                    </div>
+                    <p className="leading-relaxed">
+                      This version of Yachiru does not verify the bastion&apos;s SSH host key (no known-hosts pinning or Trust On First Use / TOFU verification is implemented). Traffic over the tunnel is encrypted using standard SSH cryptographic ciphers, but you should ensure the bastion hostname and network routing are trusted.
+                    </p>
+                    <div className="text-[11px] text-zinc-500 pt-1 border-t border-zinc-800/80 flex flex-wrap gap-x-4 gap-y-1">
+                      <span>🔒 <strong>Ephemeral Credentials:</strong> SSH keys and passwords are held in session memory only and are never written to persistent disk.</span>
+                      <span>⚡ <strong>Dynamic Forwarding:</strong> Forwarded connections are bound to an OS-assigned ephemeral loopback port and torn down when the request completes.</span>
+                    </div>
+                  </div>
+
+                  {/* SSH Validation Error Alert */}
+                  {sshValidationError && (
+                    <div className="sm:col-span-12 p-3 rounded-lg bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2 animate-in fade-in">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                      <span>{sshValidationError}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Yachiru API Key (Shown only when server requires authentication via YACHIRU_API_KEY) */}
             {apiKeyRequired && (
