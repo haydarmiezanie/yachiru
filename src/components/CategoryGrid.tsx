@@ -10,6 +10,10 @@ import {
   Activity,
   Network,
   SlidersHorizontal,
+  RefreshCw,
+  HardDrive,
+  AlertOctagon,
+  ListOrdered,
   ChevronRight,
 } from 'lucide-react';
 
@@ -29,6 +33,10 @@ const CATEGORY_ICONS: Record<CheckCategory, React.ElementType> = {
   query_performance: Activity,
   replication_distributed: Network,
   server_settings: SlidersHorizontal,
+  mutations: RefreshCw,
+  disk_space: HardDrive,
+  system_errors: AlertOctagon,
+  replication_queue: ListOrdered,
 };
 
 export const CategoryGrid: React.FC<CategoryGridProps> = ({

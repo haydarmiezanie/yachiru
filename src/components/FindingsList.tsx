@@ -262,6 +262,10 @@ export const FindingsList: React.FC<FindingsListProps> = ({
             <option value="query_performance">Query Performance & Pruning</option>
             <option value="replication_distributed">Replication & Distributed</option>
             <option value="server_settings">Server & MergeTree Settings</option>
+            <option value="mutations">Table Mutations</option>
+            <option value="disk_space">Disk Space & Storage</option>
+            <option value="system_errors">System Errors & Stability</option>
+            <option value="replication_queue">Replication Queue & Retries</option>
           </select>
         </div>
       </div>

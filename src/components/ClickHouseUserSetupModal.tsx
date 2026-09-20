@@ -38,10 +38,15 @@ GRANT SELECT ON system.settings TO ${effectiveUsername};
 
 -- Recommended, optional: Yachiru degrades gracefully and simply skips
 -- these checks if the grants below are missing (no crash, no failed scan).
--- Grant them if you want Query Performance and Replication/Distributed checks.
+-- Grant them if you want Query Performance, Replication/Distributed, Mutations,
+-- Disk Space, Error Rates, and Replication Queue checks.
 GRANT SELECT ON system.query_log TO ${effectiveUsername};
 GRANT SELECT ON system.replicas TO ${effectiveUsername};
 GRANT SELECT ON system.distribution_queue TO ${effectiveUsername};
+GRANT SELECT ON system.mutations TO ${effectiveUsername};
+GRANT SELECT ON system.disks TO ${effectiveUsername};
+GRANT SELECT ON system.errors TO ${effectiveUsername};
+GRANT SELECT ON system.replication_queue TO ${effectiveUsername};
 
 -- Recommended: enforce read-only at the ClickHouse server level too, as a
 -- second layer of defense in addition to Yachiru's own client-side guard.

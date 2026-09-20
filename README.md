@@ -60,6 +60,10 @@ Yachiru is designed from the ground up with a **strict read-only, zero-data-acce
      - `system.query_log` (enables Query Performance and unpruned scan diagnostics)
      - `system.replicas` (enables Replication & Distributed consistency checks)
      - `system.distribution_queue` (enables Distributed table queue health checks)
+     - `system.mutations` (enables Table Mutations and stuck/failing DDL checks)
+     - `system.disks` (enables Storage Volume Headroom and Disk Space checks)
+     - `system.errors` (enables System Error Rate and Exception spike checks)
+     - `system.replication_queue` (enables Replication Queue Backlog and Retry checks)
 4. **Server-Level Read-Only Setting (`readonly = 2`)**:
    It is recommended to enforce read-only status on the user profile via `SETTINGS readonly = 2, max_execution_time = 30`.
    > **Note on `readonly = 2` vs `readonly = 1`**: ClickHouse setting `readonly = 1` rejects all per-query setting overrides, which breaks diagnostic execution (Yachiru sets defensive per-query execution timeouts such as `max_execution_time`). Setting `readonly = 2` safely blocks all mutations while allowing required per-query read settings and timeouts.
@@ -80,6 +84,10 @@ GRANT SELECT ON system.settings TO yachiru_readonly;
 GRANT SELECT ON system.query_log TO yachiru_readonly;
 GRANT SELECT ON system.replicas TO yachiru_readonly;
 GRANT SELECT ON system.distribution_queue TO yachiru_readonly;
+GRANT SELECT ON system.mutations TO yachiru_readonly;
+GRANT SELECT ON system.disks TO yachiru_readonly;
+GRANT SELECT ON system.errors TO yachiru_readonly;
+GRANT SELECT ON system.replication_queue TO yachiru_readonly;
 ALTER USER yachiru_readonly SETTINGS readonly = 2, max_execution_time = 30;
 ```
 

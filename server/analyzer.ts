@@ -56,40 +56,47 @@ export function calculateScores(findings: CheckFinding[]): { categories: Categor
     { id: 'query_performance', name: 'Query Performance & Pruning', description: 'Scanned vs returned ratios, execution latency, and memory spikes' },
     { id: 'replication_distributed', name: 'Replication & Distributed Backlog', description: 'Replication queue delays, read-only states, and send queues' },
     { id: 'server_settings', name: 'Server & MergeTree Settings', description: 'Memory limits, background thread pools, and delay triggers' },
+    { id: 'mutations', name: 'Table Mutations', description: 'Stuck, failing, or long-running table ALTER UPDATE/DELETE mutations' },
+    { id: 'disk_space', name: 'Disk Space & Storage', description: 'Disk capacity, free percentage, and storage volume headroom' },
+    { id: 'system_errors', name: 'System Errors & Stability', description: 'Recent error counts, recurring exception codes, and cluster stability' },
+    { id: 'replication_queue', name: 'Replication Queue & Retries', description: 'Pending replication tasks, recurring sync failures, and retry backlogs' },
   ];
 
-  const categories: CategoryScore[] = categoryDefs.map((def) => {
-    const catFindings = findings.filter((f) => f.category === def.id);
-    const critical = catFindings.filter((f) => f.status === 'critical').length;
-    const warning = catFindings.filter((f) => f.status === 'warning').length;
-    const good = catFindings.filter((f) => f.status === 'good').length;
-    const total = catFindings.length;
+  const categories: CategoryScore[] = categoryDefs
+    .map((def) => {
+      const catFindings = findings.filter((f) => f.category === def.id);
+      const critical = catFindings.filter((f) => f.status === 'critical').length;
+      const warning = catFindings.filter((f) => f.status === 'warning').length;
+      const good = catFindings.filter((f) => f.status === 'good').length;
+      const total = catFindings.length;
 
-    // Score deduction algorithm: Start at 100
-    // Each critical finding docks 30 pts, warning docks 12 pts, min 0
-    let score = 100;
-    if (total > 0) {
-      score = Math.max(0, 100 - (critical * 30 + warning * 12));
-    }
+      // Gracefully skip categories with zero evaluated checks (e.g. optional table ungranted or not applicable)
+      if (total === 0) {
+        return null;
+      }
 
-    const status = critical > 0 ? 'critical' : warning > 0 ? 'warning' : 'good';
+      // Score deduction algorithm: Start at 100
+      // Each critical finding docks 30 pts, warning docks 12 pts, min 0
+      const score = Math.max(0, 100 - (critical * 30 + warning * 12));
+      const status = critical > 0 ? 'critical' : warning > 0 ? 'warning' : 'good';
 
-    return {
-      category: def.id,
-      name: def.name,
-      score,
-      status,
-      critical_count: critical,
-      warning_count: warning,
-      good_count: good,
-      total_checks: total,
-      description: def.description,
-    };
-  });
+      return {
+        category: def.id,
+        name: def.name,
+        score,
+        status,
+        critical_count: critical,
+        warning_count: warning,
+        good_count: good,
+        total_checks: total,
+        description: def.description,
+      };
+    })
+    .filter((c): c is CategoryScore => c !== null);
 
   // Calculate weighted overall score
   const totalScoreSum = categories.reduce((sum, c) => sum + c.score, 0);
-  const overall_score = Math.round(totalScoreSum / categories.length);
+  const overall_score = categories.length > 0 ? Math.round(totalScoreSum / categories.length) : 100;
 
   let verdict: 'Optimized' | 'Needs Tuning' | 'Critical Optimization Required' = 'Optimized';
   if (overall_score < 60 || findings.filter((f) => f.status === 'critical').length >= 3) {
@@ -113,6 +120,15 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
   const database = config.database || 'default';
   const durationThresholdMs = config.queryDurationThresholdMs || 3000;
   const memoryThresholdBytes = config.queryMemoryThresholdBytes || 1073741824; // 1GB
+  const mutationWarningAgeHours = config.mutationWarningAgeHours ?? 1;
+  const mutationCriticalAgeHours = config.mutationCriticalAgeHours ?? 6;
+  const diskWarningFreePct = config.diskWarningFreePct ?? 20;
+  const diskCriticalFreePct = config.diskCriticalFreePct ?? 10;
+  const errorRecentWindowHours = config.errorRecentWindowHours ?? 24;
+  const errorWarningCount = config.errorWarningCount ?? 100;
+  const errorCriticalCount = config.errorCriticalCount ?? 1000;
+  const repQueueWarningSize = config.replicationQueueWarningSize ?? 50;
+  const repQueueMaxRetries = config.replicationQueueMaxRetries ?? 10;
 
   let tunnel: OpenTunnelResult | undefined;
   let client: ClickHouseClient | undefined;
@@ -272,6 +288,42 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
 
     let settingsData: Array<{ name: string; value: string; changed: number; description: string }> = [];
 
+    let mutationsData: Array<{
+      database: string;
+      table: string;
+      mutation_id: string;
+      command: string;
+      create_time: string;
+      is_done: number;
+      parts_to_do: number;
+      latest_fail_reason: string;
+    }> | null = null;
+
+    let disksData: Array<{
+      name: string;
+      path: string;
+      free_space: number;
+      total_space: number;
+    }> | null = null;
+
+    let errorsData: Array<{
+      name: string;
+      code: number;
+      error_count: number;
+      last_error_message: string;
+      last_error_time: string;
+    }> | null = null;
+
+    let repQueueData: Array<{
+      database: string;
+      table: string;
+      node_name: string;
+      type: string;
+      create_time: string;
+      num_tries: number;
+      last_exception: string;
+    }> | null = null;
+
     // Parallelize independent read-only system queries via Promise.allSettled
     const [
       partsSettled,
@@ -281,6 +333,10 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
       replicasSettled,
       distQueueSettled,
       settingsSettled,
+      mutationsSettled,
+      disksSettled,
+      errorsSettled,
+      replicationQueueSettled,
     ] = await Promise.allSettled([
       // system.parts
       (async () => {
@@ -443,6 +499,111 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
         });
         return (await sRes.json()) as typeof settingsData;
       })(),
+
+      // system.mutations
+      (async () => {
+        const mutationsQuery = `
+          SELECT
+            database,
+            table,
+            mutation_id,
+            command,
+            create_time,
+            is_done,
+            parts_to_do,
+            latest_fail_reason
+          FROM system.mutations
+          WHERE database = '${database.replace(/'/g, "\\'")}' AND is_done = 0
+        `;
+        assertReadOnlySql(mutationsQuery);
+        const mRes = await client.query({
+          query: mutationsQuery,
+          format: 'JSONEachRow',
+          clickhouse_settings: { max_execution_time: 8 },
+        });
+        const rawRows = (await mRes.json()) as Array<Record<string, unknown>>;
+        return rawRows.map((r) => ({
+          database: String(r.database || ''),
+          table: String(r.table || ''),
+          mutation_id: String(r.mutation_id || ''),
+          command: String(r.command || ''),
+          create_time: String(r.create_time || ''),
+          is_done: Number(r.is_done ?? 0),
+          parts_to_do: Number(r.parts_to_do ?? 0),
+          latest_fail_reason: String(r.latest_fail_reason || ''),
+        }));
+      })(),
+
+      // system.disks (cluster-wide, no database filter)
+      (async () => {
+        const disksQuery = `
+          SELECT name, path, free_space, total_space
+          FROM system.disks
+        `;
+        assertReadOnlySql(disksQuery);
+        const dRes = await client.query({
+          query: disksQuery,
+          format: 'JSONEachRow',
+          clickhouse_settings: { max_execution_time: 6 },
+        });
+        const rawRows = (await dRes.json()) as Array<Record<string, unknown>>;
+        return rawRows.map((r) => ({
+          name: String(r.name || ''),
+          path: String(r.path || ''),
+          free_space: Number(r.free_space ?? 0),
+          total_space: Number(r.total_space ?? 0),
+        }));
+      })(),
+
+      // system.errors (cluster-wide, no database filter)
+      (async () => {
+        const errorsQuery = `
+          SELECT name, code, value AS error_count, last_error_message, last_error_time
+          FROM system.errors
+          WHERE value > 0
+          ORDER BY value DESC
+          LIMIT 20
+        `;
+        assertReadOnlySql(errorsQuery);
+        const eRes = await client.query({
+          query: errorsQuery,
+          format: 'JSONEachRow',
+          clickhouse_settings: { max_execution_time: 6 },
+        });
+        const rawRows = (await eRes.json()) as Array<Record<string, unknown>>;
+        return rawRows.map((r) => ({
+          name: String(r.name || ''),
+          code: Number(r.code ?? 0),
+          error_count: Number(r.error_count ?? 0),
+          last_error_message: String(r.last_error_message || ''),
+          last_error_time: String(r.last_error_time || ''),
+        }));
+      })(),
+
+      // system.replication_queue (database-scoped)
+      (async () => {
+        const repQueueQuery = `
+          SELECT database, table, node_name, type, create_time, num_tries, last_exception
+          FROM system.replication_queue
+          WHERE database = '${database.replace(/'/g, "\\'")}'
+        `;
+        assertReadOnlySql(repQueueQuery);
+        const rqRes = await client.query({
+          query: repQueueQuery,
+          format: 'JSONEachRow',
+          clickhouse_settings: { max_execution_time: 8 },
+        });
+        const rawRows = (await rqRes.json()) as Array<Record<string, unknown>>;
+        return rawRows.map((r) => ({
+          database: String(r.database || ''),
+          table: String(r.table || ''),
+          node_name: String(r.node_name || ''),
+          type: String(r.type || ''),
+          create_time: String(r.create_time || ''),
+          num_tries: Number(r.num_tries ?? 0),
+          last_exception: String(r.last_exception || ''),
+        }));
+      })(),
     ]);
 
     // Apply settled results with isolated per-query degradation
@@ -469,6 +630,18 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
     }
     if (settingsSettled.status === 'fulfilled') {
       settingsData = settingsSettled.value;
+    }
+    if (mutationsSettled.status === 'fulfilled') {
+      mutationsData = mutationsSettled.value;
+    }
+    if (disksSettled.status === 'fulfilled') {
+      disksData = disksSettled.value;
+    }
+    if (errorsSettled.status === 'fulfilled') {
+      errorsData = errorsSettled.value;
+    }
+    if (replicationQueueSettled.status === 'fulfilled') {
+      repQueueData = replicationQueueSettled.value;
     }
 
     // Populate post-query aggregates
@@ -955,6 +1128,277 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
       }
     }
 
+    // 10. Mutations Health (system.mutations)
+    if (mutationsData !== null) {
+      let problemMutationsCount = 0;
+      for (const m of mutationsData) {
+        const createTimeMs = new Date(m.create_time).getTime();
+        const ageHours = !isNaN(createTimeMs) ? Math.max(0, (Date.now() - createTimeMs) / (1000 * 60 * 60)) : 0;
+        const hasFailReason = Boolean(m.latest_fail_reason && m.latest_fail_reason.trim() !== '');
+
+        if (hasFailReason) {
+          problemMutationsCount++;
+          findings.push({
+            id: `mutation_fail_${m.table}_${m.mutation_id}`,
+            category: 'mutations',
+            category_name: 'Table Mutations',
+            title: `Mutation repeatedly failing on '${m.table}'`,
+            table: m.table,
+            status: 'critical',
+            metric_value: `Parts to do: ${m.parts_to_do}`,
+            threshold: 'Threshold: 0 failing mutations',
+            evidence: `Mutation ID '${m.mutation_id}' on table '${m.table}' failed with reason: ${m.latest_fail_reason}.\nCommand: ${m.command} (started: ${m.create_time}, parts remaining: ${m.parts_to_do}).`,
+            impact: 'Stuck or failing mutations block subsequent ALTER/UPDATE commands and consume background merge threads.',
+            recommendation_sql_or_text: `-- Inspect stuck mutation:\nSELECT * FROM system.mutations WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${m.table.replace(/'/g, "\\'")}';\n-- KILL MUTATION WHERE database = '${database.replace(/'/g, "\\'")}' AND mutation_id = '${m.mutation_id}';`,
+            is_sql_recommendation: true,
+          });
+        } else if (ageHours >= mutationCriticalAgeHours) {
+          problemMutationsCount++;
+          findings.push({
+            id: `mutation_long_${m.table}_${m.mutation_id}`,
+            category: 'mutations',
+            category_name: 'Table Mutations',
+            title: `Critically long-running mutation on '${m.table}' (${ageHours.toFixed(1)}h)`,
+            table: m.table,
+            status: 'critical',
+            metric_value: `${ageHours.toFixed(1)}h runtime`,
+            threshold: `Threshold: < ${mutationCriticalAgeHours}h runtime`,
+            evidence: `Mutation ID '${m.mutation_id}' has been executing for ${ageHours.toFixed(1)} hours (started: ${m.create_time}).\nParts remaining: ${m.parts_to_do}.\nCommand: ${m.command}`,
+            impact: 'Long-running table mutations cause high disk I/O load and keep unmerged parts active across replicas.',
+            recommendation_sql_or_text: `-- Check mutation progress in system.mutations:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${m.table.replace(/'/g, "\\'")}';`,
+            is_sql_recommendation: true,
+          });
+        } else if (ageHours >= mutationWarningAgeHours) {
+          problemMutationsCount++;
+          findings.push({
+            id: `mutation_warn_${m.table}_${m.mutation_id}`,
+            category: 'mutations',
+            category_name: 'Table Mutations',
+            title: `Long-running mutation on '${m.table}' (${ageHours.toFixed(1)}h)`,
+            table: m.table,
+            status: 'warning',
+            metric_value: `${ageHours.toFixed(1)}h runtime`,
+            threshold: `Threshold: < ${mutationWarningAgeHours}h runtime`,
+            evidence: `Mutation ID '${m.mutation_id}' has been executing for ${ageHours.toFixed(1)} hours (started: ${m.create_time}).\nParts remaining: ${m.parts_to_do}.\nCommand: ${m.command}`,
+            impact: 'Extended mutation runtimes compete with real-time background merges.',
+            recommendation_sql_or_text: `-- Monitor mutation progress:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${m.table.replace(/'/g, "\\'")}';`,
+            is_sql_recommendation: true,
+          });
+        }
+      }
+
+      if (problemMutationsCount === 0) {
+        findings.push({
+          id: 'mutations_healthy',
+          category: 'mutations',
+          category_name: 'Table Mutations',
+          title: 'No stuck or failing mutations',
+          status: 'good',
+          metric_value: `${mutationsData.length} pending mutations`,
+          threshold: `Threshold: 0 failing mutations, max runtime < ${mutationWarningAgeHours}h`,
+          evidence: `system.mutations reports 0 failing, stuck, or abnormally long-running mutations for database '${database}'.`,
+          impact: 'All table ALTER UPDATE/DELETE mutations are completing cleanly.',
+          recommendation_sql_or_text: 'Table mutation pipeline is operating normally.',
+          is_sql_recommendation: false,
+        });
+      }
+    }
+
+    // 11. Disk Space & Storage Headroom (system.disks)
+    if (disksData !== null && disksData.length > 0) {
+      let problemDisksCount = 0;
+      let minFreePct = 100;
+
+      for (const d of disksData) {
+        const total = Number(d.total_space || 0);
+        const free = Number(d.free_space || 0);
+        const freePct = total > 0 ? (free / total) * 100 : 100;
+        if (freePct < minFreePct) minFreePct = freePct;
+
+        if (freePct < diskCriticalFreePct) {
+          problemDisksCount++;
+          findings.push({
+            id: `disk_space_crit_${d.name}`,
+            category: 'disk_space',
+            category_name: 'Disk Space & Storage',
+            title: `Disk '${d.name}' critically low on space (${freePct.toFixed(1)}% free)`,
+            status: 'critical',
+            metric_value: `${freePct.toFixed(1)}% free (${formatBytes(free)} / ${formatBytes(total)})`,
+            threshold: `Threshold: ≥ ${diskCriticalFreePct}% free space`,
+            evidence: `Storage volume '${d.name}' at path '${d.path}' has only ${formatBytes(free)} available out of ${formatBytes(total)} (${freePct.toFixed(1)}% free).`,
+            impact: 'ClickHouse will reject incoming inserts and halt background merges with "No space left on device" when volume is full.',
+            recommendation_sql_or_text: `-- Inspect largest partitions across active parts:\nSELECT table, partition, formatReadableSize(sum(bytes_on_disk)) AS size FROM system.parts WHERE active = 1 GROUP BY table, partition ORDER BY sum(bytes_on_disk) DESC LIMIT 10;\n-- Drop or detach historical partitions if applicable.`,
+            is_sql_recommendation: true,
+          });
+        } else if (freePct < diskWarningFreePct) {
+          problemDisksCount++;
+          findings.push({
+            id: `disk_space_warn_${d.name}`,
+            category: 'disk_space',
+            category_name: 'Disk Space & Storage',
+            title: `Disk '${d.name}' running low on space (${freePct.toFixed(1)}% free)`,
+            status: 'warning',
+            metric_value: `${freePct.toFixed(1)}% free (${formatBytes(free)} / ${formatBytes(total)})`,
+            threshold: `Threshold: ≥ ${diskWarningFreePct}% free space`,
+            evidence: `Storage volume '${d.name}' at path '${d.path}' has ${formatBytes(free)} available out of ${formatBytes(total)} (${freePct.toFixed(1)}% free).`,
+            impact: 'Storage volume is nearing capacity. Insufficient headroom can impede large table part compactions.',
+            recommendation_sql_or_text: `-- Check largest tables on this storage volume:\nSELECT table, formatReadableSize(sum(bytes_on_disk)) AS size FROM system.parts WHERE active = 1 GROUP BY table ORDER BY sum(bytes_on_disk) DESC LIMIT 10;`,
+            is_sql_recommendation: true,
+          });
+        }
+      }
+
+      if (problemDisksCount === 0) {
+        findings.push({
+          id: 'disks_healthy',
+          category: 'disk_space',
+          category_name: 'Disk Space & Storage',
+          title: 'Adequate disk space across all storage volumes',
+          status: 'good',
+          metric_value: `All disks healthy (min ${minFreePct.toFixed(1)}% free)`,
+          threshold: `Threshold: ≥ ${diskWarningFreePct}% free space`,
+          evidence: `All ${disksData.length} storage volumes in system.disks have sufficient headroom (minimum free space is ${minFreePct.toFixed(1)}%).`,
+          impact: 'Storage volumes have ample capacity for incoming parts, merges, and temporary sort buffers.',
+          recommendation_sql_or_text: 'Disk space headroom is optimal.',
+          is_sql_recommendation: false,
+        });
+      }
+    }
+
+    // 12. System Errors & Cluster Stability (system.errors)
+    if (errorsData !== null) {
+      let problemErrorsCount = 0;
+      const windowCutoffMs = Date.now() - errorRecentWindowHours * 60 * 60 * 1000;
+
+      for (const err of errorsData) {
+        const errorTimeMs = new Date(err.last_error_time).getTime();
+        const isRecent = !isNaN(errorTimeMs) && errorTimeMs >= windowCutoffMs;
+        const errCount = Number(err.error_count || 0);
+
+        if (isRecent) {
+          if (errCount >= errorCriticalCount) {
+            problemErrorsCount++;
+            findings.push({
+              id: `error_crit_${err.code}`,
+              category: 'system_errors',
+              category_name: 'System Errors & Stability',
+              title: `Elevated ${err.name} errors (${errCount.toLocaleString()} occurrences)`,
+              status: 'critical',
+              metric_value: `${errCount.toLocaleString()} errors (last: ${err.last_error_time})`,
+              threshold: `Threshold: < ${errorCriticalCount} occurrences in past ${errorRecentWindowHours}h`,
+              evidence: `Error code ${err.code} (${err.name}) has occurred ${errCount.toLocaleString()} times.\nLast error time: ${err.last_error_time}.\nLast error message: ${err.last_error_message || 'None recorded'}.`,
+              impact: 'Recurring critical error spikes indicate cluster instability, memory limits exceeded, or failing application queries.',
+              recommendation_sql_or_text: `-- Inspect system.errors for full details on error code ${err.code}:\nSELECT * FROM system.errors WHERE code = ${err.code};\n-- Review server error log for stack traces.`,
+              is_sql_recommendation: true,
+            });
+          } else if (errCount >= errorWarningCount) {
+            problemErrorsCount++;
+            findings.push({
+              id: `error_warn_${err.code}`,
+              category: 'system_errors',
+              category_name: 'System Errors & Stability',
+              title: `Elevated ${err.name} errors (${errCount.toLocaleString()} occurrences)`,
+              status: 'warning',
+              metric_value: `${errCount.toLocaleString()} errors (last: ${err.last_error_time})`,
+              threshold: `Threshold: < ${errorWarningCount} occurrences in past ${errorRecentWindowHours}h`,
+              evidence: `Error code ${err.code} (${err.name}) has occurred ${errCount.toLocaleString()} times.\nLast error time: ${err.last_error_time}.\nLast error message: ${err.last_error_message || 'None recorded'}.`,
+              impact: `Frequent occurrences of ${err.name} indicate repeated client-side query syntax issues or transient resource constraints.`,
+              recommendation_sql_or_text: `-- Inspect error code ${err.code} in system.errors:\nSELECT name, value, last_error_message, last_error_time FROM system.errors WHERE code = ${err.code};`,
+              is_sql_recommendation: true,
+            });
+          }
+        }
+      }
+
+      if (problemErrorsCount === 0) {
+        findings.push({
+          id: 'errors_healthy',
+          category: 'system_errors',
+          category_name: 'System Errors & Stability',
+          title: 'Error rates within normal operational thresholds',
+          status: 'good',
+          metric_value: '0 elevated error spikes',
+          threshold: `Threshold: < ${errorWarningCount} errors in past ${errorRecentWindowHours}h`,
+          evidence: `system.errors reported no recurring error codes exceeding ${errorWarningCount} occurrences within the last ${errorRecentWindowHours} hours.`,
+          impact: 'Server error pipeline is quiet and queries execute reliably.',
+          recommendation_sql_or_text: 'System error frequency is optimal.',
+          is_sql_recommendation: false,
+        });
+      }
+    }
+
+    // 13. Replication Queue Backlog (system.replication_queue)
+    // Degrades gracefully on single node / non-replicated setups (skips if not replicated or table inaccessible)
+    if (repQueueData !== null && (replicasData.length > 0 || repQueueData.length > 0)) {
+      let problemQueueCount = 0;
+
+      // Check repeatedly failing queue entries with exceptions
+      for (const rq of repQueueData) {
+        const tries = Number(rq.num_tries || 0);
+        const hasException = Boolean(rq.last_exception && rq.last_exception.trim() !== '');
+
+        if (tries >= repQueueMaxRetries && hasException) {
+          problemQueueCount++;
+          findings.push({
+            id: `rep_queue_fail_${rq.table}_${rq.node_name}`,
+            category: 'replication_queue',
+            category_name: 'Replication Queue & Retries',
+            title: `Replication queue entry repeatedly failing on '${rq.table}'`,
+            table: rq.table,
+            status: 'critical',
+            metric_value: `${tries} retries`,
+            threshold: `Threshold: < ${repQueueMaxRetries} retries with 0 exceptions`,
+            evidence: `Replication action '${rq.type}' on node '${rq.node_name}' has failed ${tries} times (created: ${rq.create_time}).\nException: ${rq.last_exception}`,
+            impact: 'Failed replication queue tasks block subsequent part syncs, leading to replica divergence and stale queries.',
+            recommendation_sql_or_text: `-- Inspect stuck task in replication_queue:\nSELECT type, num_tries, last_exception, create_time FROM system.replication_queue WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${rq.table.replace(/'/g, "\\'")}' ORDER BY num_tries DESC LIMIT 5;`,
+            is_sql_recommendation: true,
+          });
+        }
+      }
+
+      // Check queue backlog size grouped by table
+      const queueByTable = new Map<string, number>();
+      for (const rq of repQueueData) {
+        queueByTable.set(rq.table, (queueByTable.get(rq.table) || 0) + 1);
+      }
+
+      for (const [tableName, count] of queueByTable.entries()) {
+        if (count > repQueueWarningSize) {
+          problemQueueCount++;
+          findings.push({
+            id: `rep_queue_backlog_${tableName}`,
+            category: 'replication_queue',
+            category_name: 'Replication Queue & Retries',
+            title: `Replication queue backlog on '${tableName}'`,
+            table: tableName,
+            status: 'warning',
+            metric_value: `${count} pending tasks`,
+            threshold: `Threshold: ≤ ${repQueueWarningSize} tasks`,
+            evidence: `Table '${tableName}' has ${count} pending actions in system.replication_queue. Replica synchronization is lagging.`,
+            impact: 'High replication backlog delays data visibility on read replicas.',
+            recommendation_sql_or_text: `-- Check queue tasks distribution:\nSELECT type, count() FROM system.replication_queue WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${tableName.replace(/'/g, "\\'")}' GROUP BY type;`,
+            is_sql_recommendation: true,
+          });
+        }
+      }
+
+      if (problemQueueCount === 0) {
+        findings.push({
+          id: 'replication_queue_healthy',
+          category: 'replication_queue',
+          category_name: 'Replication Queue & Retries',
+          title: repQueueData.length === 0 ? 'Replication queue is clear' : 'Replication tasks processing normally',
+          status: 'good',
+          metric_value: `${repQueueData.length} pending tasks`,
+          threshold: `Threshold: ≤ ${repQueueWarningSize} tasks, 0 retry failures`,
+          evidence: `system.replication_queue has ${repQueueData.length} pending tasks with 0 recurring retry failures.`,
+          impact: 'Replicas are keeping pace with part mutations and merges.',
+          recommendation_sql_or_text: 'Replication queue is healthy.',
+          is_sql_recommendation: false,
+        });
+      }
+    }
+
     // Build Table Metadata list
     for (const t of tablesData) {
       const partInfo = partsMap.get(t.name);
@@ -1278,6 +1722,67 @@ export function runSimulationScan(): AnalysisReport {
       impact: 'Queries involving GROUP BY on high-cardinality keys or multi-table JOINs will fail with MEMORY_LIMIT_EXCEEDED exceptions.',
       recommendation_sql_or_text: `-- Increase max_memory_usage in user profile or config.xml / users.xml:\n-- Or override per session:\nSET max_memory_usage = 10737418240; -- 10 GB\nSET max_bytes_before_external_group_by = 5368709120; -- 5 GB spill to disk`,
       is_sql_recommendation: true,
+    },
+
+    // 10. Table Mutations
+    {
+      id: 'mutation_warn_events_raw',
+      category: 'mutations',
+      category_name: 'Table Mutations',
+      title: "Long-running mutation on 'events_raw' (2.4h)",
+      table: 'events_raw',
+      status: 'warning',
+      metric_value: '2.4h runtime (84 parts remaining)',
+      threshold: 'Threshold: < 1.0h runtime',
+      evidence: "Mutation 'mutation_48291' (UPDATE status = 'archived' WHERE event_time < '2023-01-01') has been running for 2.4 hours across 84 remaining unmerged parts.",
+      impact: 'Extended mutation runtimes compete with real-time background merges and elevate disk write amplification.',
+      recommendation_sql_or_text: `-- Check mutation progress in system.mutations:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE table = 'events_raw';`,
+      is_sql_recommendation: true,
+    },
+
+    // 11. Disk Space & Storage
+    {
+      id: 'disk_space_healthy_nvme',
+      category: 'disk_space',
+      category_name: 'Disk Space & Storage',
+      title: 'Adequate disk space across all storage volumes',
+      status: 'good',
+      metric_value: 'All disks healthy (38.4% free on /var/lib/clickhouse)',
+      threshold: 'Threshold: ≥ 20.0% free space',
+      evidence: 'Primary storage volume default at path /var/lib/clickhouse/ has 384 GB free out of 1.00 TB (38.4% free).',
+      impact: 'Storage volumes have ample capacity for incoming parts, background merges, and sorting buffers.',
+      recommendation_sql_or_text: 'Disk space headroom is optimal.',
+      is_sql_recommendation: false,
+    },
+
+    // 12. System Errors & Stability
+    {
+      id: 'system_errors_healthy',
+      category: 'system_errors',
+      category_name: 'System Errors & Stability',
+      title: 'Error rates within normal operational thresholds',
+      status: 'good',
+      metric_value: '0 elevated error spikes',
+      threshold: 'Threshold: < 100 errors in past 24h',
+      evidence: 'system.errors reported no recurring error codes exceeding 100 occurrences within the last 24 hours.',
+      impact: 'Server error pipeline is quiet and queries execute reliably.',
+      recommendation_sql_or_text: 'System error frequency is optimal.',
+      is_sql_recommendation: false,
+    },
+
+    // 13. Replication Queue & Retries
+    {
+      id: 'rep_queue_healthy',
+      category: 'replication_queue',
+      category_name: 'Replication Queue & Retries',
+      title: 'Replication queue is clear',
+      status: 'good',
+      metric_value: '0 pending tasks',
+      threshold: 'Threshold: ≤ 50 tasks, 0 retry failures',
+      evidence: 'system.replication_queue has 0 pending tasks with 0 recurring retry failures.',
+      impact: 'Replicas are keeping pace with part mutations and merges.',
+      recommendation_sql_or_text: 'Replication queue is healthy.',
+      is_sql_recommendation: false,
     },
   ];
 

@@ -9,7 +9,11 @@ export type CheckCategory =
   | 'skip_indices'
   | 'query_performance'
   | 'replication_distributed'
-  | 'server_settings';
+  | 'server_settings'
+  | 'mutations'
+  | 'disk_space'
+  | 'system_errors'
+  | 'replication_queue';
 
 export interface AIDiagnosis {
   id: string;
@@ -135,6 +139,15 @@ export interface ConnectionConfig {
   database: string;
   queryDurationThresholdMs?: number;
   queryMemoryThresholdBytes?: number;
+  mutationWarningAgeHours?: number;
+  mutationCriticalAgeHours?: number;
+  diskWarningFreePct?: number;
+  diskCriticalFreePct?: number;
+  errorRecentWindowHours?: number;
+  errorWarningCount?: number;
+  errorCriticalCount?: number;
+  replicationQueueWarningSize?: number;
+  replicationQueueMaxRetries?: number;
   enableAiNarrative?: boolean;
   aiProvider?: AiProvider;
   geminiModel?: string;
