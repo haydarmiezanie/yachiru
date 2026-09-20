@@ -1,6 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ConnectionConfig, AiProvider, AVAILABLE_AI_MODELS } from '../types.js';
+import { ConnectionConfig, AiProvider, AVAILABLE_AI_MODELS, SavedConnectionProfile } from '../types.js';
 import { ClickHouseUserSetupModal } from './ClickHouseUserSetupModal.js';
+import {
+  listSavedProfiles,
+  saveProfile,
+  deleteProfile,
+  touchProfileLastUsed,
+  extractProfileFromFormState,
+} from '../utils/savedProfiles.js';
 import {
   Database,
   Lock,
@@ -20,6 +27,10 @@ import {
   Check,
   Activity,
   CheckCircle2,
+  Bookmark,
+  FolderOpen,
+  Save,
+  Trash2,
 } from 'lucide-react';
 
 export function sanitizeHostInput(raw: string): {
@@ -96,6 +107,25 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
   const [durationThreshold, setDurationThreshold] = useState<number>(3000);
   const [memoryThresholdMB, setMemoryThresholdMB] = useState<number>(1024);
   const [hostCorrectedNotice, setHostCorrectedNotice] = useState<string | null>(null);
+
+  // Saved Connection Profiles (strictly non-secret fields persisted in localStorage)
+  const [profiles, setProfiles] = useState<SavedConnectionProfile[]>(() => listSavedProfiles());
+  const [selectedProfileId, setSelectedProfileId] = useState<string>(() => {
+    const list = listSavedProfiles();
+    if (list.length === 0) return '';
+    const sorted = [...list].sort((a, b) => {
+      const timeA = new Date(a.lastUsedAt || a.createdAt).getTime();
+      const timeB = new Date(b.lastUsedAt || b.createdAt).getTime();
+      return timeB - timeA;
+    });
+    return sorted[0]?.id || '';
+  });
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileNameInput, setProfileNameInput] = useState('');
+  const [overwriteCandidate, setOverwriteCandidate] = useState<SavedConnectionProfile | null>(null);
+  const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
+  const [profileFeedbackNotice, setProfileFeedbackNotice] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // SSH Tunnel state
   const [useSshTunnel, setUseSshTunnel] = useState(false);
@@ -221,6 +251,121 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     } else if (newProtocol === 'http' && port === 8443) {
       setPort(8123);
     }
+  };
+
+  const handleLoadProfile = (profileId: string) => {
+    if (!profileId) return;
+    const target = profiles.find((p) => p.id === profileId);
+    if (!target) return;
+
+    // Populate non-secret fields ONLY — NEVER touch credentials or API keys
+    setHost(target.host);
+    setPort(target.port);
+    setProtocol(target.protocol);
+    setDatabase(target.database);
+    setUsername(target.username);
+
+    if (target.useSshTunnel) {
+      setUseSshTunnel(true);
+      setSshHost(target.sshHost || '');
+      setSshPort(target.sshPort || 22);
+      setSshUsername(target.sshUsername || '');
+      setSshAuthMethod(target.sshAuthMethod || 'password');
+    } else {
+      setUseSshTunnel(false);
+    }
+
+    // Touch last used timestamp
+    touchProfileLastUsed(target.id);
+    const refreshed = listSavedProfiles();
+    setProfiles(refreshed);
+
+    setProfileFeedbackNotice(`Loaded profile "${target.name}". Password & API keys require typing each session.`);
+    setTimeout(() => setProfileFeedbackNotice(null), 5000);
+  };
+
+  const handleInitiateSaveProfile = () => {
+    const trimmedName = profileNameInput.trim();
+    if (!trimmedName) {
+      setProfileSaveError('Please enter a name for this connection profile.');
+      return;
+    }
+    if (!host.trim()) {
+      setProfileSaveError('Host cannot be empty.');
+      return;
+    }
+
+    // Check for existing profile with the same name (case-insensitive)
+    const existing = profiles.find(
+      (p) => p.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    );
+
+    if (existing) {
+      setOverwriteCandidate(existing);
+      setProfileSaveError(null);
+      return;
+    }
+
+    executeSaveProfile(trimmedName);
+  };
+
+  const executeSaveProfile = (name: string, overwriteId?: string) => {
+    try {
+      // Build strictly using allowlist function — NO passwords, NO API keys
+      const cleanData = extractProfileFromFormState({
+        name,
+        host,
+        port,
+        protocol,
+        database,
+        username,
+        useSshTunnel,
+        sshHost,
+        sshPort,
+        sshUsername,
+        sshAuthMethod,
+      });
+
+      const saved = saveProfile(cleanData, overwriteId);
+      const refreshed = listSavedProfiles();
+      setProfiles(refreshed);
+      setSelectedProfileId(saved.id);
+      setIsSavingProfile(false);
+      setProfileNameInput('');
+      setOverwriteCandidate(null);
+      setProfileSaveError(null);
+
+      setProfileFeedbackNotice(`Saved "${saved.name}"! Non-secret fields persisted in localStorage.`);
+      setTimeout(() => setProfileFeedbackNotice(null), 4000);
+    } catch (err) {
+      setProfileSaveError(err instanceof Error ? err.message : 'Failed to save profile to browser storage.');
+    }
+  };
+
+  const confirmOverwriteProfile = () => {
+    if (!overwriteCandidate) return;
+    executeSaveProfile(overwriteCandidate.name, overwriteCandidate.id);
+  };
+
+  const handleDeleteProfile = (profileId: string) => {
+    deleteProfile(profileId);
+    const refreshed = listSavedProfiles();
+    setProfiles(refreshed);
+    setConfirmDeleteId(null);
+
+    if (refreshed.length > 0) {
+      const sorted = [...refreshed].sort((a, b) => {
+        const timeA = new Date(a.lastUsedAt || a.createdAt).getTime();
+        const timeB = new Date(b.lastUsedAt || b.createdAt).getTime();
+        return timeB - timeA;
+      });
+      setSelectedProfileId(sorted[0].id);
+    } else {
+      setSelectedProfileId('');
+    }
+
+    setProfileFeedbackNotice('Profile deleted.');
+    setTimeout(() => setProfileFeedbackNotice(null), 3000);
   };
 
   const applyHostSanitization = (raw: string) => {
@@ -564,6 +709,226 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       {/* Main Connection Form Card */}
       <div className="bg-zinc-900/70 border border-zinc-800 rounded-2xl p-6 sm:p-8 shadow-xl backdrop-blur-sm">
         <form onSubmit={handleSubmit} className="space-y-6">
+          {/* Saved Connection Profiles Section */}
+          <div className="space-y-2">
+            {profiles.length > 0 ? (
+              <div className="p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2">
+                    <Bookmark className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span className="text-xs font-semibold text-zinc-200">Saved Connections</span>
+                    <span className="text-[11px] text-zinc-500 font-mono">(Non-secret fields only)</span>
+                  </div>
+                  {!isSavingProfile && (
+                    <button
+                      type="button"
+                      id="btn-open-save-profile"
+                      onClick={() => {
+                        setIsSavingProfile(true);
+                        setProfileNameInput('');
+                        setProfileSaveError(null);
+                        setOverwriteCandidate(null);
+                      }}
+                      className="text-xs text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition cursor-pointer self-start sm:self-auto"
+                    >
+                      <Save className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Save Current as Profile</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <div className="relative flex-1">
+                    <select
+                      id="select-saved-profile"
+                      value={selectedProfileId}
+                      onChange={(e) => {
+                        const newId = e.target.value;
+                        setSelectedProfileId(newId);
+                        setConfirmDeleteId(null);
+                        if (newId) {
+                          handleLoadProfile(newId);
+                        }
+                      }}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-200 font-mono focus:outline-none focus:border-rose-500 cursor-pointer"
+                    >
+                      {profiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} — {p.host}:{p.port} ({p.database} / {p.username}){p.useSshTunnel ? ' [SSH]' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    type="button"
+                    id="btn-load-saved-profile"
+                    onClick={() => handleLoadProfile(selectedProfileId)}
+                    disabled={!selectedProfileId}
+                    className="px-3.5 py-1.5 bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30 rounded-lg text-xs font-medium transition cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    <span>Load Profile</span>
+                  </button>
+
+                  {confirmDeleteId === selectedProfileId ? (
+                    <div className="flex items-center gap-1.5 shrink-0 bg-red-950/40 border border-red-500/30 rounded-lg px-2.5 py-1 text-xs">
+                      <span className="text-red-300 text-[11px] font-medium">Delete?</span>
+                      <button
+                        type="button"
+                        id="btn-confirm-delete-profile"
+                        onClick={() => handleDeleteProfile(selectedProfileId)}
+                        className="px-2 py-0.5 bg-red-600 hover:bg-red-500 text-white rounded text-[11px] font-semibold transition cursor-pointer"
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        id="btn-cancel-delete-profile"
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="px-1.5 py-0.5 text-zinc-400 hover:text-zinc-200 text-[11px] cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      id="btn-delete-saved-profile"
+                      title="Delete selected profile"
+                      onClick={() => setConfirmDeleteId(selectedProfileId)}
+                      disabled={!selectedProfileId}
+                      className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg border border-zinc-800 transition cursor-pointer shrink-0 flex items-center justify-center"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 text-xs text-zinc-400">
+                  <Bookmark className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                  <span>No saved connection profiles yet</span>
+                  <span className="text-[11px] text-zinc-500 hidden sm:inline">(stores non-secret host/port/database, never passwords)</span>
+                </div>
+                {!isSavingProfile && (
+                  <button
+                    type="button"
+                    id="btn-open-save-profile-empty"
+                    onClick={() => {
+                      setIsSavingProfile(true);
+                      setProfileNameInput('');
+                      setProfileSaveError(null);
+                      setOverwriteCandidate(null);
+                    }}
+                    className="text-xs text-zinc-300 hover:text-white flex items-center gap-1.5 px-3 py-1 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition cursor-pointer shrink-0"
+                  >
+                    <Save className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Save Current as Profile</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Inline Save Form */}
+            {isSavingProfile && (
+              <div className="p-3.5 rounded-xl bg-zinc-900 border border-zinc-700/80 space-y-2.5 animate-in fade-in">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                    <Save className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Save Connection Profile</span>
+                  </span>
+                  <span className="text-[10px] text-zinc-400 font-mono">🔒 Passwords & API keys are NEVER saved</span>
+                </div>
+
+                {overwriteCandidate ? (
+                  <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-500/30 text-xs space-y-2">
+                    <p className="text-amber-200">
+                      A profile named &ldquo;<strong className="text-white">{overwriteCandidate.name}</strong>&rdquo; already exists. Overwrite it?
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        id="btn-confirm-overwrite-profile"
+                        onClick={confirmOverwriteProfile}
+                        className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium text-xs transition cursor-pointer"
+                      >
+                        Yes, Overwrite
+                      </button>
+                      <button
+                        type="button"
+                        id="btn-cancel-overwrite-profile"
+                        onClick={() => setOverwriteCandidate(null)}
+                        className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs transition cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <input
+                      type="text"
+                      id="input-profile-name"
+                      value={profileNameInput}
+                      onChange={(e) => {
+                        setProfileNameInput(e.target.value);
+                        setProfileSaveError(null);
+                      }}
+                      placeholder="Profile label (e.g. Production Cluster, Staging VPC)"
+                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 font-sans"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleInitiateSaveProfile();
+                        }
+                      }}
+                      autoFocus
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        id="btn-submit-save-profile"
+                        onClick={handleInitiateSaveProfile}
+                        className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer"
+                      >
+                        Save Profile
+                      </button>
+                      <button
+                        type="button"
+                        id="btn-cancel-save-profile"
+                        onClick={() => {
+                          setIsSavingProfile(false);
+                          setProfileSaveError(null);
+                          setOverwriteCandidate(null);
+                        }}
+                        className="px-2.5 py-1.5 text-zinc-400 hover:text-zinc-200 text-xs cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {profileSaveError && (
+                  <p className="text-[11px] text-red-400 flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" />
+                    <span>{profileSaveError}</span>
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Profile loaded or action feedback */}
+            {profileFeedbackNotice && (
+              <div className="text-[11px] text-emerald-400 flex items-center gap-1.5 px-1 animate-in fade-in">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>{profileFeedbackNotice}</span>
+              </div>
+            )}
+          </div>
+
           <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-zinc-800 pb-4 gap-3">
             <div className="flex items-center gap-2 text-zinc-100 font-semibold text-base">
               <Server className="w-4 h-4 text-rose-400" />

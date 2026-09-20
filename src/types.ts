@@ -166,6 +166,23 @@ export interface ConnectionConfig {
   sshPrivateKeyPassphrase?: string;
 }
 
+export interface SavedConnectionProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  protocol: 'http' | 'https';
+  database: string;
+  username: string;
+  useSshTunnel?: boolean;
+  sshHost?: string;
+  sshPort?: number;
+  sshUsername?: string;
+  sshAuthMethod?: 'password' | 'privateKey';
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
 export interface ModelOption {
   id: string;
   name: string;
