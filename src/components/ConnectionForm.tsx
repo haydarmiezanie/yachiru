@@ -31,6 +31,7 @@ import {
   FolderOpen,
   Save,
   Trash2,
+  History,
 } from 'lucide-react';
 
 export function sanitizeHostInput(raw: string): {
@@ -147,6 +148,17 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
   const [sshHostCorrectedNotice, setSshHostCorrectedNotice] = useState<string | null>(null);
   const [sshValidationError, setSshValidationError] = useState<string | null>(null);
 
+  // Scan History & Trend Tracking state
+  const [enableHistoryTracking, setEnableHistoryTracking] = useState(false);
+  const [historyDatabase, setHistoryDatabase] = useState('');
+  const [historyTableName, setHistoryTableName] = useState('yachiru_scan_history');
+  const [historyWriteUsername, setHistoryWriteUsername] = useState('yachiru_history_writer');
+  const [historyWritePassword, setHistoryWritePassword] = useState(() => {
+    return sessionStorage.getItem('yachiru_history_write_password') || '';
+  });
+  const [showHistoryWritePassword, setShowHistoryWritePassword] = useState(false);
+  const [historyValidationError, setHistoryValidationError] = useState<string | null>(null);
+
   // Test Connection state
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [testResult, setTestResult] = useState<{
@@ -232,6 +244,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     }
   }, [sshPrivateKeyPassphrase]);
 
+  // Persist history write password in session storage for current tab only
+  useEffect(() => {
+    if (historyWritePassword) {
+      sessionStorage.setItem('yachiru_history_write_password', historyWritePassword);
+    } else {
+      sessionStorage.removeItem('yachiru_history_write_password');
+    }
+  }, [historyWritePassword]);
+
   const handleProviderToggle = (newProvider: AiProvider) => {
     setAiProvider(newProvider);
     setApiKeyError(null);
@@ -273,6 +294,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       setSshAuthMethod(target.sshAuthMethod || 'password');
     } else {
       setUseSshTunnel(false);
+    }
+
+    if (target.enableHistoryTracking) {
+      setEnableHistoryTracking(true);
+      setHistoryDatabase(target.historyDatabase || target.database || 'default');
+      setHistoryTableName(target.historyTableName || 'yachiru_scan_history');
+      setHistoryWriteUsername(target.historyWriteUsername || 'yachiru_history_writer');
+    } else {
+      setEnableHistoryTracking(false);
     }
 
     // Touch last used timestamp
@@ -324,6 +354,10 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         sshPort,
         sshUsername,
         sshAuthMethod,
+        enableHistoryTracking,
+        historyDatabase: historyDatabase.trim() || undefined,
+        historyTableName: historyTableName.trim() || undefined,
+        historyWriteUsername: historyWriteUsername.trim() || undefined,
       });
 
       const saved = saveProfile(cleanData, overwriteId);
@@ -602,6 +636,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         claudeApiKey: willUseAi && aiProvider === 'claude' ? claudeApiKey.trim() : undefined,
         yachiruApiKey: apiKeyRequired && yachiruApiKey.trim() ? yachiruApiKey.trim() : undefined,
         isDemo: true,
+        enableHistoryTracking: false,
       });
     } else {
       if (useSshTunnel) {
@@ -623,6 +658,18 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         }
       }
       setSshValidationError(null);
+
+      if (enableHistoryTracking) {
+        if (!historyWriteUsername.trim()) {
+          setHistoryValidationError('Dedicated write username is required for scan history tracking.');
+          return;
+        }
+        if (!historyWritePassword) {
+          setHistoryValidationError('Dedicated write password is required for scan history tracking.');
+          return;
+        }
+      }
+      setHistoryValidationError(null);
 
       const { host: cleanedHost, autoProtocol, autoPort } = sanitizeHostInput(host);
       const finalHost = cleanedHost || host.trim();
@@ -661,6 +708,11 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         openaiApiKey: willUseAi && aiProvider === 'openai' ? openaiApiKey.trim() : undefined,
         claudeApiKey: willUseAi && aiProvider === 'claude' ? claudeApiKey.trim() : undefined,
         yachiruApiKey: apiKeyRequired && yachiruApiKey.trim() ? yachiruApiKey.trim() : undefined,
+        enableHistoryTracking,
+        historyDatabase: enableHistoryTracking ? (historyDatabase.trim() || database.trim()) : undefined,
+        historyTableName: enableHistoryTracking ? (historyTableName.trim() || 'yachiru_scan_history') : undefined,
+        historyWriteUsername: enableHistoryTracking ? historyWriteUsername.trim() : undefined,
+        historyWritePassword: enableHistoryTracking ? historyWritePassword : undefined,
         isDemo: false,
         ...sshPayload,
       });
@@ -1506,6 +1558,149 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
             )}
           </div>
 
+          {/* Scan History & Trend Tracking Box */}
+          <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <input
+                  type="checkbox"
+                  id="toggle-history-tracking"
+                  checked={enableHistoryTracking}
+                  onChange={(e) => {
+                    setEnableHistoryTracking(e.target.checked);
+                    if (e.target.checked) {
+                      setHistoryValidationError(null);
+                    }
+                  }}
+                  className="w-4 h-4 rounded border-zinc-700 text-rose-500 focus:ring-rose-500 focus:ring-offset-zinc-950 cursor-pointer"
+                />
+                <label htmlFor="toggle-history-tracking" className="text-xs font-semibold text-zinc-200 cursor-pointer flex items-center gap-1.5">
+                  <History className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Enable Scan History &amp; Trend Tracking</span>
+                  <span className="text-[11px] font-normal text-zinc-400">(In-Cluster Table)</span>
+                </label>
+              </div>
+
+              <span className={`text-[11px] px-2 py-0.5 rounded font-mono ${enableHistoryTracking ? 'text-rose-400 bg-rose-500/10' : 'text-zinc-500'}`}>
+                {enableHistoryTracking ? 'History Enabled' : 'No State Saved'}
+              </span>
+            </div>
+
+            <p className="text-[11px] text-zinc-400 leading-relaxed">
+              Persist scan scores and finding titles directly to a ClickHouse table inside your own cluster. Yachiru holds zero state in its own container.
+            </p>
+
+            {enableHistoryTracking && (
+              <div className="pt-3 border-t border-zinc-800/80 space-y-3 animate-in fade-in duration-150">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-300 mb-1">
+                      History Database
+                    </label>
+                    <input
+                      type="text"
+                      id="input-history-database"
+                      value={historyDatabase}
+                      onChange={(e) => setHistoryDatabase(e.target.value)}
+                      placeholder={database || 'default'}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
+                    />
+                    <span className="text-[10px] text-zinc-500">Leave blank to use connected database ({database || 'default'})</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-300 mb-1">
+                      History Table Name
+                    </label>
+                    <input
+                      type="text"
+                      id="input-history-table-name"
+                      value={historyTableName}
+                      onChange={(e) => setHistoryTableName(e.target.value)}
+                      placeholder="yachiru_scan_history"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
+                    />
+                    <span className="text-[10px] text-zinc-500">Default: yachiru_scan_history</span>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-zinc-900/60 rounded-lg border border-zinc-800/80 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
+                      <Shield className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Dedicated Write Credentials (INSERT-only)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsSetupModalOpen(true)}
+                      className="text-[11px] text-rose-400 hover:text-rose-300 underline cursor-pointer"
+                    >
+                      Generate History Setup SQL &rarr;
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">
+                    Security requirement: Provide a dedicated user that holds <strong>only INSERT</strong> on the history table. Never provide your admin or scan credentials here.
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-300 mb-1">
+                        Write Username <span className="text-rose-400">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        id="input-history-write-username"
+                        value={historyWriteUsername}
+                        onChange={(e) => {
+                          setHistoryWriteUsername(e.target.value);
+                          if (historyValidationError) setHistoryValidationError(null);
+                        }}
+                        placeholder="yachiru_history_writer"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-300 mb-1">
+                        Write Password <span className="text-rose-400">*</span>
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={showHistoryWritePassword ? 'text' : 'password'}
+                          id="input-history-write-password"
+                          value={historyWritePassword}
+                          onChange={(e) => {
+                            setHistoryWritePassword(e.target.value);
+                            if (historyValidationError) setHistoryValidationError(null);
+                          }}
+                          placeholder="Password for write user"
+                          className="w-full bg-zinc-900 border border-zinc-800 rounded-lg pl-3 pr-9 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-rose-500 transition font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowHistoryWritePassword(!showHistoryWritePassword)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 transition cursor-pointer"
+                          title={showHistoryWritePassword ? 'Hide Password' : 'Show Password'}
+                        >
+                          {showHistoryWritePassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                      <span className="text-[10px] text-zinc-500">Stored in sessionStorage for current tab only; never saved to disk.</span>
+                    </div>
+                  </div>
+
+                  {historyValidationError && (
+                    <div className="text-xs text-rose-400 flex items-center gap-1.5 pt-1">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{historyValidationError}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Advanced Tunables Toggle */}
           <div className="pt-1">
             <button
@@ -1691,6 +1886,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       <ClickHouseUserSetupModal
         isOpen={isSetupModalOpen}
         onClose={() => setIsSetupModalOpen(false)}
+        defaultDatabase={database.trim() || 'default'}
       />
     </div>
   );

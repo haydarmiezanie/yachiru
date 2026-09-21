@@ -126,6 +126,10 @@ export interface AnalysisReport {
   tables: TableMetadata[];
   ai_narrative?: AINarrative | null;
   ai_diagnoses?: AIDiagnosis[];
+  historyWriteStatus?: {
+    success: boolean;
+    error?: string;
+  };
 }
 
 export type AiProvider = 'gemini' | 'openai' | 'claude';
@@ -164,6 +168,12 @@ export interface ConnectionConfig {
   sshPassword?: string;
   sshPrivateKey?: string;
   sshPrivateKeyPassphrase?: string;
+  // Scan History & Trend Tracking (Stored in user's ClickHouse instance)
+  enableHistoryTracking?: boolean;
+  historyDatabase?: string; // defaults to same as database
+  historyTableName?: string; // defaults to 'yachiru_scan_history'
+  historyWriteUsername?: string; // separate write user
+  historyWritePassword?: string; // SECRET — sessionStorage only, NEVER in localStorage
 }
 
 export interface SavedConnectionProfile {
@@ -179,8 +189,50 @@ export interface SavedConnectionProfile {
   sshPort?: number;
   sshUsername?: string;
   sshAuthMethod?: 'password' | 'privateKey';
+  // Optional non-secret history tracking parameters
+  enableHistoryTracking?: boolean;
+  historyDatabase?: string;
+  historyTableName?: string;
+  historyWriteUsername?: string;
   createdAt: string;
   lastUsedAt?: string;
+}
+
+export interface FindingSummaryItem {
+  category: string;
+  title: string;
+  severity: string;
+}
+
+export interface ScanHistoryRecord {
+  scan_id: string;
+  scanned_at: string;
+  target_host: string;
+  target_database: string;
+  overall_score: number;
+  overall_verdict: string;
+  category_scores: Record<string, number>;
+  finding_summary: FindingSummaryItem[];
+  clickhouse_version: string;
+}
+
+export interface ScanComparison {
+  hasComparison: boolean;
+  previousScanAt?: string;
+  currentScanAt?: string;
+  scoreDelta?: number;
+  newFindings: FindingSummaryItem[];
+  resolvedFindings: FindingSummaryItem[];
+  persistentFindings: FindingSummaryItem[];
+}
+
+export interface ScanHistoryResponse {
+  success: boolean;
+  history: ScanHistoryRecord[];
+  comparison?: ScanComparison;
+  error?: string;
+  hint?: string;
+  errorType?: 'TABLE_NOT_FOUND' | 'PERMISSION_DENIED' | 'CONNECTION_ERROR' | 'UNKNOWN';
 }
 
 export interface ModelOption {

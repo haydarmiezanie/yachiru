@@ -5,6 +5,7 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { ClickHouseClient } from '@clickhouse/client';
 import { runLiveScan, runSimulationScan } from './server/analyzer.js';
 import { openSshTunnel, OpenTunnelResult } from './server/sshTunnel.js';
+import { recordScanHistory, fetchScanHistory } from './server/history.js';
 import {
   generateNarrativeForProvider,
   generateDeterministicNarrative,
@@ -330,7 +331,35 @@ async function startServer() {
       return res.status(400).json({ error: validation.error });
     }
 
+    let sharedTunnel: OpenTunnelResult | undefined = undefined;
     try {
+      let tunnelOverride: { host: string; port: number } | undefined = undefined;
+
+      // If SSH tunnel is configured for live analysis, open it once and share between live scan & history write
+      if (config.useSshTunnel && !config.isDemo) {
+        const protocol = config.protocol || 'http';
+        let targetHost = config.host?.trim() || 'localhost';
+        targetHost = targetHost.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
+        const targetPort = Number(config.port) || (protocol === 'https' ? 8443 : 8123);
+
+        sharedTunnel = await openSshTunnel({
+          sshHost: config.sshHost!.trim(),
+          sshPort: Number(config.sshPort) || 22,
+          sshUsername: config.sshUsername!.trim(),
+          sshAuthMethod: config.sshAuthMethod || 'password',
+          sshPassword: config.sshPassword,
+          sshPrivateKey: config.sshPrivateKey,
+          sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+          targetHost,
+          targetPort,
+        });
+
+        tunnelOverride = {
+          host: sharedTunnel.localHost,
+          port: sharedTunnel.localPort,
+        };
+      }
+
       let report;
       if (config.isDemo) {
         // Run realistic simulated production ClickHouse cluster analysis
@@ -338,7 +367,7 @@ async function startServer() {
       } else {
         // Live ClickHouse analysis via official @clickhouse/client
         // Credentials are held in memory only for the duration of this request
-        report = await runLiveScan(config);
+        report = await runLiveScan(config, { tunnelOverride });
       }
 
       // If AI narrative is requested vs Without AI (Deterministic)
@@ -409,6 +438,26 @@ async function startServer() {
         );
       }
 
+      // Step 3: Record scan history in user's ClickHouse instance if enabled
+      // Non-fatal: write errors are attached to report.historyWriteStatus without breaking the scan
+      if (config.enableHistoryTracking && !config.isDemo && !report.is_demo) {
+        try {
+          const writeResult = await recordScanHistory(config, report, { tunnelOverride });
+          if (!writeResult.skipped) {
+            report.historyWriteStatus = {
+              success: writeResult.success,
+              ...(writeResult.error && { error: writeResult.error }),
+            };
+          }
+        } catch (writeErr: unknown) {
+          const writeErrMsg = writeErr instanceof Error ? writeErr.message : 'Failed to write history record';
+          report.historyWriteStatus = {
+            success: false,
+            error: writeErrMsg,
+          };
+        }
+      }
+
       res.json(report);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown connection or query error';
@@ -419,6 +468,37 @@ async function startServer() {
       res.status(500).json({
         error: errorMsg,
         hint,
+      });
+    } finally {
+      await sharedTunnel?.close();
+    }
+  });
+
+  // Step 4: Trend-reading endpoint (POST to prevent credentials leaking in query strings)
+  // Protected with same analyzeLimiter and requireApiKey as /api/analyze
+  app.post('/api/history', analyzeLimiter, requireApiKey, async (req, res) => {
+    try {
+      const config = req.body as ConnectionConfig;
+      if (!config) {
+        return res.status(400).json({ success: false, error: 'Missing connection configuration payload' });
+      }
+
+      const limit = Number(req.query.limit) || 100;
+      const historyResponse = await fetchScanHistory(config, limit);
+
+      if (!historyResponse.success) {
+        // Distinguishable error response rather than generic 500
+        return res.status(400).json(historyResponse);
+      }
+
+      res.json(historyResponse);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'Failed to retrieve scan history';
+      console.error('History query failure:', errMsg);
+      res.status(500).json({
+        success: false,
+        error: errMsg,
+        errorType: 'UNKNOWN',
       });
     }
   });

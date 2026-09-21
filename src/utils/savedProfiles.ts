@@ -61,6 +61,17 @@ function sanitizeProfileEntry(item: unknown): SavedConnectionProfile | null {
     sshAuthMethod = record.sshAuthMethod === 'privateKey' ? 'privateKey' : 'password';
   }
 
+  const enableHistoryTracking = Boolean(record.enableHistoryTracking);
+  let historyDatabase: string | undefined;
+  let historyTableName: string | undefined;
+  let historyWriteUsername: string | undefined;
+
+  if (enableHistoryTracking) {
+    historyDatabase = typeof record.historyDatabase === 'string' ? record.historyDatabase.trim() : undefined;
+    historyTableName = typeof record.historyTableName === 'string' ? record.historyTableName.trim() : undefined;
+    historyWriteUsername = typeof record.historyWriteUsername === 'string' ? record.historyWriteUsername.trim() : undefined;
+  }
+
   // Strictly construct new object literal with ONLY allowlisted non-secret fields
   return {
     id,
@@ -75,6 +86,12 @@ function sanitizeProfileEntry(item: unknown): SavedConnectionProfile | null {
     ...(sshPort !== undefined && { sshPort }),
     ...(sshUsername !== undefined && { sshUsername }),
     ...(sshAuthMethod !== undefined && { sshAuthMethod }),
+    ...(enableHistoryTracking && {
+      enableHistoryTracking: true,
+      ...(historyDatabase !== undefined && { historyDatabase }),
+      ...(historyTableName !== undefined && { historyTableName }),
+      ...(historyWriteUsername !== undefined && { historyWriteUsername }),
+    }),
     createdAt,
     ...(lastUsedAt !== undefined && { lastUsedAt }),
   };
@@ -173,6 +190,13 @@ export function saveProfile(
     newProfile.sshAuthMethod = profile.sshAuthMethod === 'privateKey' ? 'privateKey' : 'password';
   }
 
+  if (profile.enableHistoryTracking) {
+    newProfile.enableHistoryTracking = true;
+    if (profile.historyDatabase) newProfile.historyDatabase = profile.historyDatabase.trim();
+    if (profile.historyTableName) newProfile.historyTableName = profile.historyTableName.trim();
+    if (profile.historyWriteUsername) newProfile.historyWriteUsername = profile.historyWriteUsername.trim();
+  }
+
   let updatedList: SavedConnectionProfile[];
   if (existingIndex >= 0) {
     updatedList = [...existingList];
@@ -245,6 +269,10 @@ export function extractProfileFromFormState(input: {
   sshPort?: number;
   sshUsername?: string;
   sshAuthMethod?: 'password' | 'privateKey';
+  enableHistoryTracking?: boolean;
+  historyDatabase?: string;
+  historyTableName?: string;
+  historyWriteUsername?: string;
 }): Omit<SavedConnectionProfile, 'id' | 'createdAt'> {
   return {
     name: input.name.trim(),
@@ -258,5 +286,9 @@ export function extractProfileFromFormState(input: {
     sshPort: input.sshPort ? Number(input.sshPort) : 22,
     sshUsername: input.sshUsername ? input.sshUsername.trim() : undefined,
     sshAuthMethod: input.sshAuthMethod === 'privateKey' ? 'privateKey' : 'password',
+    enableHistoryTracking: Boolean(input.enableHistoryTracking),
+    historyDatabase: input.historyDatabase ? input.historyDatabase.trim() : undefined,
+    historyTableName: input.historyTableName ? input.historyTableName.trim() : undefined,
+    historyWriteUsername: input.historyWriteUsername ? input.historyWriteUsername.trim() : undefined,
   };
 }

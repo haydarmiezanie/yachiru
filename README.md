@@ -122,6 +122,64 @@ When your ClickHouse cluster resides inside a private VPC, behind a firewall, or
 
 ---
 
+## Saved Connection Profiles
+
+Yachiru allows saving and reloading named connection profiles so you don't have to re-enter hostnames, ports, databases, and usernames on every visit:
+
+- **Strict Credential Boundary**: Only non-sensitive parameters are saved to browser `localStorage` (`host`, `port`, `protocol`, `database`, `username`, `useSshTunnel`, `sshHost`, `sshPort`, `sshUsername`, `sshAuthMethod`, `enableHistoryTracking`, `historyDatabase`, `historyTableName`, `historyWriteUsername`).
+- **Never Persisted to Disk**: All secrets—including database passwords, SSH passwords, SSH private keys and passphrases, AI provider API keys, and history write passwords—are **strictly excluded** from persistent storage. Credentials remain cached exclusively in browser `sessionStorage` for the active tab and are discarded when the tab is closed.
+
+---
+
+## Scan History & Trend Tracking (In-Cluster Persistence)
+
+Yachiru tracks health score trends, category progressions, and finding regressions across scans without requiring any local state:
+
+### Zero-State Container Architecture
+Yachiru's container and server hold **zero state** (no SQLite, no local disk volumes, no cloud database accounts). All historical scan snapshots are stored in a table inside your own ClickHouse cluster.
+
+### Dual-Credential Security Architecture
+To maintain strict least-privilege security, Yachiru uses two completely separate ClickHouse accounts:
+1. **Audit & Diagnostics User**: Strictly read-only access (`SELECT`) to `system.*` metadata tables.
+2. **Dedicated History Write User**: Dedicated account with **ONLY `INSERT`** privileges on the specific history table. This account cannot read table data, alter schemas, or execute DDL.
+
+| Credential | Role / Purpose | Required Privileges |
+|---|---|---|
+| **Diagnostic User** | Cluster audit & performance checks | `GRANT SELECT ON system.*` (or required metadata tables) |
+| **History Write User** | Recording scan summaries | `GRANT INSERT ON <database>.<table_name>` ONLY |
+
+### Setup SQL for Scan History
+Click the **"Generate Read-Only & History Setup SQL"** button in the connection form or Trend View to generate ready-to-run setup scripts:
+
+```sql
+-- 1. Create the History Table (Run once as administrator)
+CREATE TABLE IF NOT EXISTS default.yachiru_scan_history (
+    scan_id UUID,
+    scanned_at DateTime DEFAULT now(),
+    target_host String,
+    target_database String,
+    overall_score UInt8,
+    overall_verdict LowCardinality(String),
+    category_scores String,
+    finding_summary String,
+    clickhouse_version LowCardinality(String)
+) ENGINE = MergeTree()
+ORDER BY (target_database, scanned_at, scan_id)
+TTL scanned_at + INTERVAL 180 DAY;
+
+-- 2. Create the Dedicated Write User (INSERT-only)
+CREATE USER IF NOT EXISTS yachiru_history_writer IDENTIFIED WITH sha256_password BY '<STRONG_WRITE_PASSWORD>';
+GRANT INSERT ON default.yachiru_scan_history TO yachiru_history_writer;
+
+-- 3. Grant SELECT on the history table to your Read-Only Diagnostic user
+GRANT SELECT ON default.yachiru_scan_history TO yachiru_readonly;
+```
+
+### Resilient & Non-Blocking Execution
+History writes are executed asynchronously and non-blocking: if the history table has not been created or the write user credentials fail, the live diagnostic scan **always succeeds** and displays the complete audit report, while surfacing a clear diagnostic notice and setup guidance.
+
+---
+
 ## Multi-Provider AI Diagnostics & Narrative
 
 AI narrative synthesis in Yachiru is **100% optional**. If no AI provider or API key is configured, Yachiru executes its complete deterministic heuristic engine, computing scores, status badges, metric thresholds, and remediation advice with zero external AI calls.

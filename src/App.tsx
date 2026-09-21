@@ -13,10 +13,12 @@ import { CategoryGrid } from './components/CategoryGrid.js';
 import { AinarrativeCard } from './components/AinarrativeCard.js';
 import { FindingsList } from './components/FindingsList.js';
 import { TableDrilldown } from './components/TableDrilldown.js';
+import { TrendView } from './components/TrendView.js';
 import { ThresholdsModal } from './components/ThresholdsModal.js';
 import { ExportModal } from './components/ExportModal.js';
 import { FeedbackModal } from './components/FeedbackModal.js';
-import { AlertCircle, FileSearch, LayoutGrid, Table } from 'lucide-react';
+import { ClickHouseUserSetupModal } from './components/ClickHouseUserSetupModal.js';
+import { AlertCircle, FileSearch, LayoutGrid, Table, History } from 'lucide-react';
 
 export default function App() {
   const [report, setReport] = useState<AnalysisReport | null>(null);
@@ -25,10 +27,11 @@ export default function App() {
   const [currentScanConfig, setCurrentScanConfig] = useState<ConnectionConfig | null>(null);
   const [error, setError] = useState<{ message: string; hint?: string } | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<CheckCategory | 'all'>('all');
-  const [activeViewTab, setActiveViewTab] = useState<'findings' | 'tables'>('findings');
+  const [activeViewTab, setActiveViewTab] = useState<'findings' | 'tables' | 'history'>('findings');
   const [isThresholdsOpen, setIsThresholdsOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
+  const [isUserSetupOpen, setIsUserSetupOpen] = useState(false);
   const [isLoadingNarrative, setIsLoadingNarrative] = useState(false);
   const [apiKeyRequired, setApiKeyRequired] = useState(false);
 
@@ -289,6 +292,19 @@ export default function App() {
                   <Table className="w-4 h-4 text-amber-400" />
                   <span>Per-Table Diagnostics ({report.tables.length})</span>
                 </button>
+
+                <button
+                  id="tab-history"
+                  onClick={() => setActiveViewTab('history')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    activeViewTab === 'history'
+                      ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <History className="w-4 h-4 text-rose-400" />
+                  <span>Scan History &amp; Trends</span>
+                </button>
               </div>
 
               <div className="hidden sm:flex items-center gap-1.5 text-xs text-zinc-500 font-mono">
@@ -314,6 +330,16 @@ export default function App() {
             {activeViewTab === 'tables' && (
               <TableDrilldown tables={report.tables} findings={report.findings} />
             )}
+
+            {/* Tab 3: Scan History & Trends */}
+            {activeViewTab === 'history' && (
+              <TrendView
+                report={report}
+                config={currentScanConfig}
+                onOpenSetupModal={() => setIsUserSetupOpen(true)}
+                apiKeyRequired={apiKeyRequired}
+              />
+            )}
           </div>
         )}
       </main>
@@ -322,6 +348,13 @@ export default function App() {
       <ThresholdsModal
         isOpen={isThresholdsOpen}
         onClose={() => setIsThresholdsOpen(false)}
+      />
+
+      {/* ClickHouse User Setup Modal (Accessible from header / report trends) */}
+      <ClickHouseUserSetupModal
+        isOpen={isUserSetupOpen}
+        onClose={() => setIsUserSetupOpen(false)}
+        defaultDatabase={report?.database_name || currentScanConfig?.database || 'default'}
       />
 
       {/* Export Modal */}

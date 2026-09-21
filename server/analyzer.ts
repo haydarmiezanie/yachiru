@@ -109,7 +109,10 @@ export function calculateScores(findings: CheckFinding[]): { categories: Categor
 }
 
 // Live ClickHouse analyzer using @clickhouse/client
-export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisReport> {
+export async function runLiveScan(
+  config: ConnectionConfig,
+  options?: { tunnelOverride?: { host: string; port: number } }
+): Promise<AnalysisReport> {
   const protocol = config.protocol || 'http';
   let host = config.host?.trim() || 'localhost';
   // Strip any accidental protocol or paths from host
@@ -140,7 +143,9 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
   let totalQueriesAnalyzed = 0;
 
   try {
-    if (config.useSshTunnel) {
+    if (options?.tunnelOverride) {
+      // Use caller-provided shared tunnel (e.g. established once in /api/analyze)
+    } else if (config.useSshTunnel) {
       tunnel = await openSshTunnel({
         sshHost: config.sshHost!.trim(),
         sshPort: Number(config.sshPort) || 22,
@@ -154,8 +159,8 @@ export async function runLiveScan(config: ConnectionConfig): Promise<AnalysisRep
       });
     }
 
-    const clientHost = tunnel ? tunnel.localHost : host;
-    const clientPort = tunnel ? tunnel.localPort : port;
+    const clientHost = options?.tunnelOverride ? options.tunnelOverride.host : (tunnel ? tunnel.localHost : host);
+    const clientPort = options?.tunnelOverride ? options.tunnelOverride.port : (tunnel ? tunnel.localPort : port);
 
     client = createClient({
       url: `${protocol}://${clientHost}:${clientPort}`,
