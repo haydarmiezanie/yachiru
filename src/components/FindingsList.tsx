@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { CheckCategory, CheckFinding, CheckSeverity } from '../types.js';
+import { CheckCategory, CheckFinding, CheckSeverity, formatCurrency } from '../types.js';
 import {
   AlertOctagon,
   AlertTriangle,
@@ -15,7 +15,11 @@ import {
   Zap,
   ListOrdered,
   Activity,
+  DollarSign,
+  Calculator,
+  TrendingDown,
 } from 'lucide-react';
+import { FindingCostDetailModal } from './FindingCostDetailModal.js';
 
 interface FindingsListProps {
   findings: CheckFinding[];
@@ -25,6 +29,7 @@ interface FindingsListProps {
   scanId?: string;
   isAiGenerated?: boolean;
   narrativeIdentity?: string;
+  initialSavingsOnly?: boolean;
 }
 
 export const FindingsList: React.FC<FindingsListProps> = ({
@@ -35,6 +40,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({
   scanId,
   isAiGenerated,
   narrativeIdentity,
+  initialSavingsOnly,
 }) => {
   const [severityFilter, setSeverityFilter] = useState<'all' | CheckSeverity>('all');
 
@@ -45,6 +51,15 @@ export const FindingsList: React.FC<FindingsListProps> = ({
   const [sourceFilter, setSourceFilter] = useState<'all' | 'ai' | 'deterministic'>(() =>
     findings.some((f) => f.is_ai_diagnosed) ? 'ai' : 'all'
   );
+  const [savingsOnlyFilter, setSavingsOnlyFilter] = useState(Boolean(initialSavingsOnly));
+
+  useEffect(() => {
+    if (initialSavingsOnly !== undefined) {
+      setSavingsOnlyFilter(initialSavingsOnly);
+    }
+  }, [initialSavingsOnly]);
+  const [sortBy, setSortBy] = useState<'default' | 'savings_desc' | 'storage_desc'>('default');
+  const [costDetailFinding, setCostDetailFinding] = useState<CheckFinding | null>(null);
   const [tableFilter, setTableFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -66,7 +81,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({
     setTimeout(() => setCopiedId(null), 2500);
   };
 
-  // Filter, deduplicate by ID, and sort: Critical first, then Warning, then Good
+  // Filter, deduplicate by ID, and sort
   const filteredFindings = useMemo(() => {
     const seenIds = new Set<string>();
     return findings
@@ -79,6 +94,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({
         if (tableFilter !== 'all' && f.table !== tableFilter) return false;
         if (sourceFilter === 'ai' && !f.is_ai_diagnosed) return false;
         if (sourceFilter === 'deterministic' && f.is_ai_diagnosed) return false;
+        if (savingsOnlyFilter && (!f.cost_impact || f.cost_impact.estimatedMonthlySavings <= 0)) return false;
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
           const matchTitle = f.title.toLowerCase().includes(q);
@@ -91,6 +107,12 @@ export const FindingsList: React.FC<FindingsListProps> = ({
         return true;
       })
       .sort((a, b) => {
+        if (sortBy === 'savings_desc') {
+          return (b.cost_impact?.estimatedMonthlySavings || 0) - (a.cost_impact?.estimatedMonthlySavings || 0);
+        }
+        if (sortBy === 'storage_desc') {
+          return (b.cost_impact?.resourceReduction?.bytes || 0) - (a.cost_impact?.resourceReduction?.bytes || 0);
+        }
         // AI findings priority if same severity
         const order: Record<CheckSeverity, number> = { critical: 0, warning: 1, good: 2 };
         if (order[a.status] !== order[b.status]) {
@@ -100,7 +122,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({
         if (!a.is_ai_diagnosed && b.is_ai_diagnosed) return 1;
         return 0;
       });
-  }, [findings, selectedCategory, severityFilter, sourceFilter, tableFilter, searchQuery]);
+  }, [findings, selectedCategory, severityFilter, sourceFilter, tableFilter, savingsOnlyFilter, sortBy, searchQuery]);
 
   const counts = useMemo(() => {
     return {
@@ -110,6 +132,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({
       critical: findings.filter((f) => f.status === 'critical').length,
       warning: findings.filter((f) => f.status === 'warning').length,
       good: findings.filter((f) => f.status === 'good').length,
+      withSavings: findings.filter((f) => f.cost_impact && f.cost_impact.estimatedMonthlySavings > 0).length,
     };
   }, [findings]);
 
@@ -215,12 +238,26 @@ export const FindingsList: React.FC<FindingsListProps> = ({
               <span>Optimal ({counts.good})</span>
             </button>
           </div>
+
+          {/* With Cost Savings Filter Toggle */}
+          <button
+            type="button"
+            onClick={() => setSavingsOnlyFilter(!savingsOnlyFilter)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border ${
+              savingsOnlyFilter
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-sm'
+                : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+            }`}
+          >
+            <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Has Potential Savings ({counts.withSavings})</span>
+          </button>
         </div>
       </div>
 
       {/* Filter Row: Search & Dropdowns */}
       <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 mb-6">
-        <div className="sm:col-span-6 relative">
+        <div className="sm:col-span-4 relative">
           <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
@@ -266,6 +303,18 @@ export const FindingsList: React.FC<FindingsListProps> = ({
             <option value="disk_space">Disk Space & Storage</option>
             <option value="system_errors">System Errors & Stability</option>
             <option value="replication_queue">Replication Queue & Retries</option>
+          </select>
+        </div>
+
+        <div className="sm:col-span-2">
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as any)}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500 font-mono transition"
+          >
+            <option value="default">Sort: Default</option>
+            <option value="savings_desc">Sort: Savings ($)</option>
+            <option value="storage_desc">Sort: Storage (GB)</option>
           </select>
         </div>
       </div>
@@ -381,6 +430,64 @@ export const FindingsList: React.FC<FindingsListProps> = ({
                   </div>
                 </div>
 
+                {/* Potential Cost Savings Callout Card */}
+                {f.cost_impact && (f.cost_impact.estimatedMonthlySavings > 0 || f.cost_impact.technicalReductionOnlyText) && (
+                  <div className="p-4 rounded-xl bg-gradient-to-r from-emerald-950/40 via-zinc-950/70 to-zinc-900 border border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 font-mono flex items-center gap-1">
+                          <DollarSign className="w-3.5 h-3.5" />
+                          <span>POTENTIAL SAVINGS</span>
+                        </span>
+                        <span className="text-zinc-600">•</span>
+                        <span
+                          className={`text-[9px] font-bold px-2 py-0.5 rounded uppercase font-mono ${
+                            f.cost_impact.confidence === 'high'
+                              ? 'text-emerald-300 bg-emerald-500/20 border border-emerald-500/30'
+                              : f.cost_impact.confidence === 'medium'
+                              ? 'text-amber-300 bg-amber-500/20 border border-amber-500/30'
+                              : 'text-zinc-400 bg-zinc-800 border border-zinc-700'
+                          }`}
+                        >
+                          CONFIDENCE: {f.cost_impact.confidence.toUpperCase()}
+                        </span>
+                      </div>
+
+                      {f.cost_impact.estimatedMonthlySavings > 0 ? (
+                        <div className="flex items-baseline gap-3 flex-wrap">
+                          <span className="text-xl font-black text-emerald-300 font-mono tracking-tight">
+                            +{formatCurrency(f.cost_impact.estimatedMonthlySavings)}
+                            <span className="text-xs font-normal text-emerald-400/80 ml-1">/ month</span>
+                          </span>
+
+                          <span className="text-xs text-zinc-300 font-medium">
+                            {f.cost_impact.resourceReduction.bytesFormatted && `${f.cost_impact.resourceReduction.bytesFormatted} storage reduction`}
+                            {f.cost_impact.resourceReduction.queryBytesScannedFormatted && `${f.cost_impact.resourceReduction.queryBytesScannedFormatted} query scan reduction`}
+                            {f.cost_impact.savingsPercentage !== undefined && (
+                              <span className="text-emerald-400 font-semibold ml-1.5 font-mono">
+                                ({f.cost_impact.savingsPercentage}% smaller)
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-zinc-300 font-mono">
+                          {f.cost_impact.technicalReductionOnlyText || 'Technical workload reduction available'}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setCostDetailFinding(f)}
+                      className="self-start sm:self-auto px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm shrink-0"
+                    >
+                      <Calculator className="w-3.5 h-3.5" />
+                      <span>View Calculation</span>
+                    </button>
+                  </div>
+                )}
+
                 {/* AI Root Cause & Risk Vector (if available) */}
                 {f.ai_root_cause && (
                   <div className="p-3 rounded-lg bg-zinc-950/60 border border-zinc-800/80 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
@@ -474,6 +581,15 @@ export const FindingsList: React.FC<FindingsListProps> = ({
             );
           })}
         </div>
+      )}
+
+      {/* Finding Cost Calculation Breakdown Modal */}
+      {costDetailFinding && (
+        <FindingCostDetailModal
+          finding={costDetailFinding}
+          isOpen={Boolean(costDetailFinding)}
+          onClose={() => setCostDetailFinding(null)}
+        />
       )}
     </div>
   );

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AINarrative, AnalysisReport, AVAILABLE_AI_MODELS, AiProvider } from '../types.js';
+import { AINarrative, AnalysisReport, AVAILABLE_AI_MODELS, AiProvider, getModelDisplayName } from '../types.js';
 import {
   Sparkles,
   AlertCircle,
@@ -421,7 +421,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 {narrative.isAiGenerated ? (
                   <>
                     <Sparkles className="w-3 h-3 text-emerald-400" />
-                    <span>{narrative.model} (AI Generated)</span>
+                    <span>{getModelDisplayName(narrative.model)} (AI Generated)</span>
                   </>
                 ) : (
                   <>
@@ -436,7 +436,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
                 ? `Synthesized via ${
                     narrative.model.startsWith('gpt-') ? 'OpenAI' :
                     narrative.model.startsWith('claude-') ? 'Anthropic Claude' : 'Google Gemini'
-                  } AI using live diagnostic metrics`
+                  } AI (${getModelDisplayName(narrative.model)}) using live diagnostic metrics`
                 : 'Deterministic evidence synthesis (strictly computed from local ClickHouse metrics without external AI calls)'}
             </p>
           </div>

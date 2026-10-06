@@ -18,6 +18,9 @@ import { ThresholdsModal } from './components/ThresholdsModal.js';
 import { ExportModal } from './components/ExportModal.js';
 import { FeedbackModal } from './components/FeedbackModal.js';
 import { ClickHouseUserSetupModal } from './components/ClickHouseUserSetupModal.js';
+import { CostSavingsSummary } from './components/CostSavingsSummary.js';
+import { PricingSettingsModal } from './components/PricingSettingsModal.js';
+import { loadCostModel, calculateFindingCostImpact, calculateReportCostSummary } from './utils/costModel.js';
 import { AlertCircle, FileSearch, LayoutGrid, Table, History } from 'lucide-react';
 
 export default function App() {
@@ -28,7 +31,9 @@ export default function App() {
   const [error, setError] = useState<{ message: string; hint?: string } | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<CheckCategory | 'all'>('all');
   const [activeViewTab, setActiveViewTab] = useState<'findings' | 'tables' | 'history'>('findings');
+  const [savingsFilterActive, setSavingsFilterActive] = useState(false);
   const [isThresholdsOpen, setIsThresholdsOpen] = useState(false);
+  const [isPricingOpen, setIsPricingOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
   const [isUserSetupOpen, setIsUserSetupOpen] = useState(false);
@@ -79,9 +84,20 @@ export default function App() {
       }
 
       const reportData: AnalysisReport = await response.json();
-      setReport(reportData);
+      const activeModel = loadCostModel();
+      const findingsWithCost = reportData.findings.map((f) => ({
+        ...f,
+        cost_impact: calculateFindingCostImpact(f, reportData.tables, activeModel),
+      }));
+      const costSummary = calculateReportCostSummary(findingsWithCost, reportData.tables, activeModel);
+      setReport({
+        ...reportData,
+        findings: findingsWithCost,
+        cost_summary: costSummary,
+      });
       setSelectedCategory('all');
       setActiveViewTab('findings');
+      setSavingsFilterActive(false);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to connect to ClickHouse cluster';
       const hint =
@@ -157,11 +173,19 @@ export default function App() {
         updatedFindings = report.findings.filter((f) => !f.is_ai_diagnosed);
       }
 
+      const activeModel = loadCostModel();
+      const findingsWithCost = updatedFindings.map((f) => ({
+        ...f,
+        cost_impact: calculateFindingCostImpact(f, report.tables, activeModel),
+      }));
+      const costSummary = calculateReportCostSummary(findingsWithCost, report.tables, activeModel);
+
       setReport({
         ...report,
         ai_narrative: narrative,
         ai_diagnoses: narrative.ai_diagnoses || [],
-        findings: updatedFindings,
+        findings: findingsWithCost,
+        cost_summary: costSummary,
       });
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : 'AI Narrative synthesis failed.');
@@ -190,6 +214,7 @@ export default function App() {
         onOpenThresholds={() => setIsThresholdsOpen(true)}
         onOpenExport={() => setIsExportOpen(true)}
         onOpenFeedback={() => setIsFeedbackOpen(true)}
+        onOpenPricingSettings={() => setIsPricingOpen(true)}
         isDemo={report?.is_demo}
       />
 
@@ -248,6 +273,18 @@ export default function App() {
           <div className="space-y-6">
             {/* Top Score & Cluster Overview */}
             <ScoreOverview report={report} />
+
+            {/* Cost Savings & ROI Estimator Summary */}
+            <CostSavingsSummary
+              report={report}
+              onOpenPricingSettings={() => setIsPricingOpen(true)}
+              onSelectFinding={() => {
+                setActiveViewTab('findings');
+                setSavingsFilterActive(true);
+                const el = document.getElementById('tab-findings');
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+              }}
+            />
 
             {/* Optional AI Narrative Card */}
             <AinarrativeCard
@@ -323,6 +360,7 @@ export default function App() {
                 scanId={report.scan_id}
                 isAiGenerated={Boolean(report.ai_narrative?.isAiGenerated)}
                 narrativeIdentity={`${report.scan_id}_${report.ai_narrative?.isAiGenerated ? 'ai' : 'noai'}_${report.ai_narrative?.model || ''}_${report.ai_narrative?.executive_summary?.slice(0, 40) || ''}`}
+                initialSavingsOnly={savingsFilterActive}
               />
             )}
 
@@ -348,6 +386,26 @@ export default function App() {
       <ThresholdsModal
         isOpen={isThresholdsOpen}
         onClose={() => setIsThresholdsOpen(false)}
+      />
+
+      {/* Cloud Cost Model & Pricing Settings Modal */}
+      <PricingSettingsModal
+        isOpen={isPricingOpen}
+        onClose={() => setIsPricingOpen(false)}
+        onCostModelUpdated={(updatedModel) => {
+          if (report) {
+            const findingsWithCost = report.findings.map((f) => ({
+              ...f,
+              cost_impact: calculateFindingCostImpact(f, report.tables, updatedModel),
+            }));
+            const costSummary = calculateReportCostSummary(findingsWithCost, report.tables, updatedModel);
+            setReport({
+              ...report,
+              findings: findingsWithCost,
+              cost_summary: costSummary,
+            });
+          }
+        }}
       />
 
       {/* ClickHouse User Setup Modal (Accessible from header / report trends) */}

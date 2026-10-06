@@ -1,6 +1,7 @@
 import { createClient, type ClickHouseClient } from '@clickhouse/client';
 import { AnalysisReport, CategoryScore, CheckFinding, ConnectionConfig, TableMetadata } from '../src/types.js';
 import { openSshTunnel, OpenTunnelResult } from './sshTunnel.js';
+import { calculateFindingCostImpact, calculateReportCostSummary, DEFAULT_COST_MODEL } from '../src/utils/costModel.js';
 
 // Hard safety validator: Ensure any query string is strictly a read-only SELECT
 export function assertReadOnlySql(sql: string): void {
@@ -894,6 +895,80 @@ export async function runLiveScan(
             is_sql_recommendation: true,
           });
         }
+
+        // Schema / Data Type Optimization: LowCardinality Candidate
+        const isLowCardCandidate =
+          col.type === 'String' &&
+          !col.type.includes('LowCardinality') &&
+          /(?:event_type|status|action|type|category|method|level|country|os|browser|role|platform|state|code|currency|tag|plan)/i.test(
+            col.name
+          );
+
+        if (isLowCardCandidate && uncomp > 20971520) {
+          findings.push({
+            id: `lowcard_candidate_${col.table}_${col.name}`,
+            category: 'compression',
+            category_name: 'Compression & Codecs',
+            title: `LowCardinality candidate on '${col.table}.${col.name}' (LowCardinality(String))`,
+            table: col.table,
+            status: 'warning',
+            metric_value: `String (estimated low cardinality domain)`,
+            threshold: 'Threshold: Categorical string columns benefit from LowCardinality dictionary encoding',
+            evidence: `Column '${col.name}' is type String using ${formatBytes(uncomp)} uncompressed (${formatBytes(comp)} compressed). Column name indicates repetitive categorical domain values. Dictionary indexing yields ~70% storage compaction.`,
+            impact: 'Storing uncompressed repeating strings without dictionary encoding wastes storage and slows down string lookups.',
+            recommendation_sql_or_text: `ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} LowCardinality(String);`,
+            is_sql_recommendation: true,
+          });
+        }
+
+        // Schema / Data Type Optimization: Numeric Type Narrowing (Int64/UInt64 on bounded columns)
+        const isNumericNarrowingCandidate =
+          (col.type === 'Int64' || col.type === 'UInt64') &&
+          /(?:status_code|http_status|year|month|day|port|retry_count|priority|version_major|duration_ms)/i.test(
+            col.name
+          );
+
+        if (isNumericNarrowingCandidate && comp > 10485760) {
+          const targetType = col.type === 'Int64' ? 'Int32' : 'UInt32';
+          findings.push({
+            id: `numeric_narrowing_${col.table}_${col.name}`,
+            category: 'compression',
+            category_name: 'Compression & Codecs',
+            title: `Oversized integer type on '${col.table}.${col.name}' (${col.type} → ${targetType})`,
+            table: col.table,
+            status: 'warning',
+            metric_value: `Current type: ${col.type} (8 bytes/val)`,
+            threshold: 'Threshold: Value ranges within 32-bit limits should use 32-bit types',
+            evidence: `Column '${col.name}' uses ${col.type} (8 bytes/value) across ${formatBytes(comp)} compressed storage. Bounded domain fits within 32-bit range. Halving raw type width yields ~40% net compressed storage compaction.`,
+            impact: '64-bit integer width for bounded data wastes 50% raw storage and increases memory bandwidth overhead.',
+            recommendation_sql_or_text: `ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
+            is_sql_recommendation: true,
+          });
+        }
+
+        // Schema / Data Type Optimization: Date/DateTime Candidate
+        const isDateCandidate =
+          col.type === 'String' &&
+          /(?:created_at|updated_at|timestamp|event_time|event_date|log_time|date_str)/i.test(col.name);
+
+        if (isDateCandidate && uncomp > 10485760) {
+          const isDateOnly = /date/i.test(col.name) && !/time/i.test(col.name);
+          const targetType = isDateOnly ? 'Date' : 'DateTime';
+          findings.push({
+            id: `date_type_candidate_${col.table}_${col.name}`,
+            category: 'compression',
+            category_name: 'Compression & Codecs',
+            title: `String temporal column on '${col.table}.${col.name}' (String → ${targetType})`,
+            table: col.table,
+            status: 'warning',
+            metric_value: `Type: String (${formatBytes(uncomp)})`,
+            threshold: `Threshold: Temporal values should use native ${targetType}`,
+            evidence: `Temporal column '${col.name}' is stored as generic String (${formatBytes(uncomp)} uncompressed). Native ClickHouse ${targetType} uses ${isDateOnly ? '2 bytes' : '4 bytes'} vs 10-19 bytes for string format (~60% compressed savings).`,
+            impact: 'Generic String dates prevent partition pruning, date-interval arithmetic, and waste ~60% storage.',
+            recommendation_sql_or_text: `ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
+            is_sql_recommendation: true,
+          });
+        }
       }
     }
 
@@ -1465,8 +1540,12 @@ export async function runLiveScan(
         good_count: findings.filter((f) => f.status === 'good').length,
       },
       categories,
-      findings,
+      findings: findings.map((f) => {
+        f.cost_impact = calculateFindingCostImpact(f, tables, DEFAULT_COST_MODEL);
+        return f;
+      }),
       tables,
+      cost_summary: calculateReportCostSummary(findings, tables, DEFAULT_COST_MODEL),
     };
   } finally {
     await client?.close();
@@ -1581,7 +1660,7 @@ export function runSimulationScan(): AnalysisReport {
       is_sql_recommendation: true,
     },
 
-    // 4. Compression Efficiency
+    // 4. Compression & Schema Efficiency
     {
       id: 'low_compression_raw_payloads',
       category: 'compression',
@@ -1594,6 +1673,48 @@ export function runSimulationScan(): AnalysisReport {
       evidence: "Column 'payload_json' is 8.4 GB uncompressed, compressed to 7.1 GB using default LZ4. Compression ratio is only 1.18x.",
       impact: 'Significant disk waste and high disk I/O when reading JSON payloads.',
       recommendation_sql_or_text: `-- Apply ZSTD compression (level 3 or 6) for JSON text payloads:\nALTER TABLE events_raw MODIFY COLUMN payload_json String CODEC(ZSTD(3));`,
+      is_sql_recommendation: true,
+    },
+    {
+      id: 'lowcard_candidate_events_raw_event_type',
+      category: 'compression',
+      category_name: 'Compression & Codecs',
+      title: "LowCardinality candidate on 'events_raw.event_type' (String → LowCardinality(String))",
+      table: 'events_raw',
+      status: 'warning',
+      metric_value: 'String (Cardinality: 17)',
+      threshold: 'Threshold: Distinct values < 10,000 benefit from LowCardinality dictionary encoding',
+      evidence: "Column 'event_type' is type String with Cardinality: 17 across 28,500,000 rows. Current size: 38 GB uncompressed (12.4 GB compressed). Replacing repetitive string instances with 1-byte dictionary keys reduces columnar footprint by ~70%.",
+      impact: "Storing repeating strings without dictionary encoding wastes storage and slows down string aggregation queries.",
+      recommendation_sql_or_text: `ALTER TABLE events_raw MODIFY COLUMN event_type LowCardinality(String);`,
+      is_sql_recommendation: true,
+    },
+    {
+      id: 'numeric_narrowing_user_audit_logs_status_code',
+      category: 'compression',
+      category_name: 'Compression & Codecs',
+      title: "Oversized integer type on 'user_audit_logs.status_code' (UInt64 → UInt32)",
+      table: 'user_audit_logs',
+      status: 'warning',
+      metric_value: 'Current type: UInt64 (8 bytes/val)',
+      threshold: 'Threshold: Value ranges within 0 to 4.29B should use UInt32 (4 bytes/val)',
+      evidence: "Column 'status_code' is stored as UInt64 (8 bytes/value) with current size: 18.2 GB uncompressed (4.8 GB compressed). Observed value range is 100 to 599. Halving the raw width from 8 to 4 bytes yields ~40% net compressed storage compaction.",
+      impact: "64-bit integer width for HTTP status codes wastes 50% raw storage and increases memory bandwidth overhead during aggregation.",
+      recommendation_sql_or_text: `ALTER TABLE user_audit_logs MODIFY COLUMN status_code UInt32;`,
+      is_sql_recommendation: true,
+    },
+    {
+      id: 'date_type_candidate_events_raw_event_date_str',
+      category: 'compression',
+      category_name: 'Compression & Codecs',
+      title: "String representation of date on 'events_raw.event_date_str' (String → Date)",
+      table: 'events_raw',
+      status: 'warning',
+      metric_value: 'Current type: String (10 bytes/val)',
+      threshold: 'Threshold: Date strings should be stored as native 2-byte Date',
+      evidence: "Column 'event_date_str' is stored as generic String ('YYYY-MM-DD', 10 bytes/value) across 28.5M rows with current size: 285 MB uncompressed (92 MB compressed). Native ClickHouse Date type requires only 2 bytes per row (~60% compressed savings).",
+      impact: "String representation prevents binary date-range partition pruning and consumes unnecessary columnar bytes.",
+      recommendation_sql_or_text: `ALTER TABLE events_raw MODIFY COLUMN event_date_str Date;`,
       is_sql_recommendation: true,
     },
     {
@@ -1663,11 +1784,12 @@ export function runSimulationScan(): AnalysisReport {
       category: 'query_performance',
       category_name: 'Query Performance & Pruning',
       title: 'High scan-to-result row ratio (342,000x read amplification)',
+      table: 'events_raw',
       status: 'critical',
       metric_value: '342,000x read amplification',
       threshold: 'Threshold: Scanned / returned ratio < 1,000x',
-      evidence: 'Query scanned 18,450,000 rows (2.4 GB read) across 4.8 seconds to return only 54 rows.\nQuery: SELECT event_type, count() FROM events_raw WHERE customer_uuid = \'e91b...\' GROUP BY event_type',
-      impact: 'Lack of skip index or ordering prefix forces full table decompression across all threads.',
+      evidence: "Current workload: 847 executions/day, 8.2 sec average duration, 4.8 TB read/day.\nQuery scanned 18,450,000 rows (2.4 GB read) across 4.8 seconds to return only 54 rows.\nQuery: SELECT event_type, count() FROM events_raw WHERE customer_uuid = 'e91b...' GROUP BY event_type",
+      impact: 'Lack of skip index or ordering prefix forces full table decompression across all threads, burning ~4.8 TB/day in unindexed scans.',
       recommendation_sql_or_text: `-- Check granule pruning with EXPLAIN:\nEXPLAIN indexes = 1\nSELECT event_type, count() FROM events_raw WHERE customer_uuid = 'e91b...' GROUP BY event_type;`,
       is_sql_recommendation: true,
     },
@@ -1908,7 +2030,11 @@ export function runSimulationScan(): AnalysisReport {
       good_count: findings.filter((f) => f.status === 'good').length,
     },
     categories,
-    findings,
+    findings: findings.map((f) => {
+      f.cost_impact = calculateFindingCostImpact(f, tables, DEFAULT_COST_MODEL);
+      return f;
+    }),
     tables,
+    cost_summary: calculateReportCostSummary(findings, tables, DEFAULT_COST_MODEL),
   };
 }

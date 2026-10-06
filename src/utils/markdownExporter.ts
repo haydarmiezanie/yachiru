@@ -1,8 +1,10 @@
-import { AnalysisReport, CheckFinding } from '../types.js';
+import { AnalysisReport, CheckFinding, getModelDisplayName, formatCurrency } from '../types.js';
+import { calculateReportCostSummary, loadCostModel } from './costModel.js';
 
 export function generateMarkdownReport(report: AnalysisReport): string {
   const timestamp = new Date(report.timestamp).toUTCString();
   const summary = report.summary;
+  const costSummary = report.cost_summary || calculateReportCostSummary(report.findings, report.tables, loadCostModel());
 
   let md = `# Yachiru — ClickHouse Database Optimization Report\n\n`;
   md += `> **Audit Generated:** ${timestamp}  \n`;
@@ -26,8 +28,21 @@ export function generateMarkdownReport(report: AnalysisReport): string {
   md += `| **Warnings** | ${summary.warning_count} |\n`;
   md += `| **Optimal Checks** | ${summary.good_count} |\n\n`;
 
+  if (costSummary && costSummary.totalMonthlySavings > 0) {
+    md += `## ${sectionNum++}. Cost Optimization & Estimated Cloud ROI\n\n`;
+    md += `| Metric | Estimated Impact |\n`;
+    md += `| :--- | :--- |\n`;
+    md += `| **Total Potential Monthly Savings** | **${formatCurrency(costSummary.totalMonthlySavings, costSummary.costModelUsed.currency)} / month** |\n`;
+    md += `| **Projected Annual ROI (Run-rate)** | **${formatCurrency(costSummary.totalAnnualSavings, costSummary.costModelUsed.currency)} / year** |\n`;
+    md += `| **Storage Cost Reduction** | ${formatCurrency(costSummary.storageMonthlySavings, costSummary.costModelUsed.currency)} / mo (${costSummary.storageBytesReducedFormatted} saved) |\n`;
+    md += `| **Query & Compute Savings** | ${formatCurrency(costSummary.queryComputeMonthlySavings, costSummary.costModelUsed.currency)} / mo (${costSummary.queryBytesScannedDailyReducedFormatted} scan pruned) |\n`;
+    md += `| **Identified Opportunities** | ${costSummary.totalOpportunitiesCount} (${costSummary.highImpactCount} high-impact) |\n\n`;
+    md += `*Assumptions: Storage @ $${costSummary.costModelUsed.storagePricePerGBMonth}/GB-mo, Query scan @ $${costSummary.costModelUsed.queryCostPerTBScanned}/TB, Compute @ $${costSummary.costModelUsed.computePricePerCPUHour}/vCPU-hr.*\n\n`;
+  }
+
   if (report.ai_narrative) {
-    md += `## ${sectionNum++}. AI Executive Narrative & Remediation Plan (${report.ai_narrative.model})\n\n`;
+    const modelTitle = getModelDisplayName(report.ai_narrative.model);
+    md += `## ${sectionNum++}. AI Executive Narrative & Remediation Plan (${modelTitle})\n\n`;
     md += `### Summary\n${report.ai_narrative.executive_summary}\n\n`;
     md += `### Prioritized Action Plan\n`;
     report.ai_narrative.top_priorities.forEach((p) => {
@@ -55,6 +70,10 @@ export function generateMarkdownReport(report: AnalysisReport): string {
     block += `- **Operational Threshold:** ${f.threshold}\n`;
     block += `- **Evidence:** ${f.evidence}\n`;
     block += `- **Technical Impact:** ${f.impact}\n`;
+    if (f.cost_impact && f.cost_impact.estimatedMonthlySavings > 0) {
+      block += `- **Potential Monthly Savings:** +${formatCurrency(f.cost_impact.estimatedMonthlySavings)} / month (Annual Run-rate: +${formatCurrency(f.cost_impact.annualProjectedSavings)}/yr, Confidence: ${f.cost_impact.confidence.toUpperCase()})\n`;
+      block += `- **Calculation Basis:** ${f.cost_impact.methodology}\n`;
+    }
     if (f.ai_root_cause) {
       block += `- **Root Cause:** ${f.ai_root_cause}\n`;
     }

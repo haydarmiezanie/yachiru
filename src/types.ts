@@ -47,6 +47,7 @@ export interface CheckFinding {
   ai_root_cause?: string;
   ai_remediation_steps?: string[];
   ai_risk_vector?: string;
+  cost_impact?: import('./utils/costModel.js').CostImpact | null;
 }
 
 export interface CategoryScore {
@@ -126,6 +127,7 @@ export interface AnalysisReport {
   tables: TableMetadata[];
   ai_narrative?: AINarrative | null;
   ai_diagnoses?: AIDiagnosis[];
+  cost_summary?: import('./utils/costModel.js').ReportCostSummary | null;
   historyWriteStatus?: {
     success: boolean;
     error?: string;
@@ -265,4 +267,36 @@ export const AVAILABLE_AI_MODELS: ModelOption[] = [
   { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', badge: 'Mythos Class (1M ctx)', provider: 'claude' },
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', badge: 'Previous Gen Sonnet (1M ctx)', provider: 'claude' },
 ];
+
+/**
+ * Returns a human-friendly display name for an AI model ID, resolving official endpoint aliases.
+ */
+export function getModelDisplayName(modelId?: string): string {
+  if (!modelId) return 'AI Model';
+  const clean = modelId.trim().toLowerCase();
+
+  // Known specific mappings
+  if (clean === 'gemini-3.1-pro' || clean === 'gemini-3.1-pro-preview') {
+    return 'Gemini 3.1 Pro';
+  }
+
+  const matched = AVAILABLE_AI_MODELS.find(
+    (m) => m.id.toLowerCase() === clean
+  );
+  if (matched) return matched.name;
+
+  return modelId;
+}
+
+export type {
+  CostModel,
+  CostConfidence,
+  CostCategory,
+  CalculationStep,
+  CostImpact,
+  RankedOpportunity,
+  ReportCostSummary,
+} from './utils/costModel.js';
+
+export { formatCurrency, formatBytes } from './utils/costModel.js';
 

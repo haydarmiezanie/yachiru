@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck, BookOpen, Download, RotateCcw, MessageSquarePlus } from 'lucide-react';
+import { ShieldCheck, BookOpen, Download, RotateCcw, MessageSquarePlus, DollarSign } from 'lucide-react';
 
 interface HeaderProps {
   hasReport: boolean;
@@ -7,6 +7,7 @@ interface HeaderProps {
   onOpenThresholds: () => void;
   onOpenExport: () => void;
   onOpenFeedback: () => void;
+  onOpenPricingSettings?: () => void;
   isDemo?: boolean;
 }
 
@@ -16,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenThresholds,
   onOpenExport,
   onOpenFeedback,
+  onOpenPricingSettings,
   isDemo,
 }) => {
   return (
@@ -61,6 +63,18 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Header Actions */}
         <div className="flex items-center gap-2 sm:gap-3">
+          {onOpenPricingSettings && (
+            <button
+              id="btn-open-pricing-settings"
+              onClick={onOpenPricingSettings}
+              className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400 hover:text-emerald-300 px-3 py-2 rounded-lg bg-emerald-950/30 hover:bg-emerald-950/50 border border-emerald-500/30 transition cursor-pointer"
+              title="Configure cloud pricing assumptions"
+            >
+              <DollarSign className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Cost Model</span>
+            </button>
+          )}
+
           <button
             id="btn-open-feedback"
             onClick={onOpenFeedback}

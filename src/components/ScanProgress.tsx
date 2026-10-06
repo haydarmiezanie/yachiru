@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { CheckCircle2, Loader2, Sparkles } from 'lucide-react';
-import { AVAILABLE_AI_MODELS } from '../types.js';
+import { AVAILABLE_AI_MODELS, getModelDisplayName } from '../types.js';
 
 interface ScanProgressProps {
   isDemo?: boolean;
@@ -29,8 +29,7 @@ export const ScanProgress: React.FC<ScanProgressProps> = ({
   const steps = useMemo(() => {
     const list = [...BASE_CLICKHOUSE_STEPS];
     if (enableAiNarrative) {
-      const modelObj = AVAILABLE_AI_MODELS.find((m) => m.id === geminiModel);
-      const modelLabel = modelObj ? modelObj.name : geminiModel;
+      const modelLabel = getModelDisplayName(geminiModel);
       list.push({
         id: 'narrative',
         title: 'Synthesizing plain-language executive narrative',
