@@ -30,6 +30,51 @@ export interface AIDiagnosis {
   is_sql_recommendation?: boolean;
 }
 
+export interface FindingMetrics {
+  /** Measured compressed storage footprint of the column or target */
+  columnCompressedBytes?: number;
+  /** Measured uncompressed storage footprint of the column or target */
+  columnUncompressedBytes?: number;
+  /** Measured compressed size of the whole table */
+  tableCompressedBytes?: number;
+  /** Measured uncompressed size of the whole table */
+  tableUncompressedBytes?: number;
+  /** Observed compression ratio from metadata (uncompressed / compressed) */
+  compressionRatio?: number;
+  /** Target column name */
+  columnName?: string;
+  /** Current column data type from system.columns */
+  columnType?: string;
+  /** Target suggested data type (e.g. LowCardinality(String), UInt32, Date) */
+  suggestedType?: string;
+  /** True if finding was triggered solely by column name heuristics without value inspection */
+  isNameOnlyCandidate?: boolean;
+  /** Distinct value count if known/observed from metadata (not user table read) */
+  distinctValues?: number;
+  /** Minimum observed value if known from metadata */
+  minValue?: number | string;
+  /** Maximum observed value if known from metadata */
+  maxValue?: number | string;
+  /** Scanned bytes per query execution from system.query_log */
+  queryReadBytes?: number;
+  /** Scanned rows per query execution from system.query_log */
+  queryReadRows?: number;
+  /** Scanned / returned rows amplification ratio */
+  queryAmplificationRatio?: number;
+  /** Query duration in milliseconds */
+  queryDurationMs?: number;
+  /** Frequency / daily execution count if known from workload metrics */
+  dailyExecutions?: number;
+  /** Daily scanned bytes if known */
+  dailyScannedBytes?: number;
+  /** Time window in hours if executions/counts are in a specific window */
+  windowHours?: number;
+  /** Memory / RAM consumption in bytes (e.g. for Memory engine) */
+  ramBytes?: number;
+  /** Fraction of server CPU time consumed (e.g. 0.18 for 18%) */
+  cpuFraction?: number;
+}
+
 export interface CheckFinding {
   id: string;
   category: CheckCategory;
@@ -48,6 +93,7 @@ export interface CheckFinding {
   ai_remediation_steps?: string[];
   ai_risk_vector?: string;
   cost_impact?: import('./utils/costModel.js').CostImpact | null;
+  metrics?: FindingMetrics;
 }
 
 export interface CategoryScore {

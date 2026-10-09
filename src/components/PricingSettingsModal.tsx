@@ -126,10 +126,10 @@ export const PricingSettingsModal: React.FC<PricingSettingsModalProps> = ({
             <div className="p-4 rounded-xl bg-zinc-900/40 border border-zinc-800/80 space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-zinc-200">
-                  Analytical Query Scanning Rate
+                  Query scan price (only if your platform bills per TB scanned; leave 0 for ClickHouse Cloud / self-hosted)
                 </label>
                 <span className="text-[11px] font-mono text-zinc-500">
-                  Default: $5.00 / TB scanned
+                  Default: $0.00 / TB scanned
                 </span>
               </div>
               <div className="relative">
@@ -149,7 +149,7 @@ export const PricingSettingsModal: React.FC<PricingSettingsModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400">
-                Applies to query scan amplification reduction (industry standard cloud query pricing).
+                Only relevant if your cloud platform bills per TB scanned (e.g. BigQuery/Athena-style pricing). Leave 0 for ClickHouse Cloud or self-hosted deployments billed on instance compute/storage.
               </p>
             </div>
 

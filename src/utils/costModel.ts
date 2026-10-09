@@ -32,7 +32,7 @@ export const DEFAULT_COST_MODEL: CostModel = {
   storagePricePerGBMonth: 0.12,
   computePricePerCPUHour: 0.048,
   computePricePerGBHour: 0.006,
-  queryCostPerTBScanned: 5.00,
+  queryCostPerTBScanned: 0, // Default to 0: ClickHouse Cloud and self-hosted bill on compute & storage, not per TB scanned
   currency: 'USD',
   isCustomPricing: false,
 };
@@ -276,38 +276,91 @@ export function calculateFindingCostImpact(
       (finding.category === 'compression' && /lowcardinality/i.test(finding.recommendation_sql_or_text)));
 
   if (isLowCardinality && finding.table) {
-    // Extract column name if available
-    const colNameMatch = finding.title.match(/['`]([^'`]+)\.([^'`]+)['`]/) || finding.evidence.match(/column ['`]([^'`]+)['`]/i);
-    const colName = colNameMatch ? colNameMatch[2] || colNameMatch[1] : 'column';
+    const colName =
+      finding.metrics?.columnName ||
+      (() => {
+        const match = finding.title.match(/['`]([^'`]+)\.([^'`]+)['`]/) || finding.evidence.match(/column ['`]([^'`]+)['`]/i);
+        return match ? match[2] || match[1] : 'column';
+      })();
 
     // Extract cardinality if observed
-    const cardMatch = finding.evidence.match(/cardinality[:\s]+(\d+)/i) || finding.evidence.match(/(\d+)\s+distinct\s+values/i);
-    const cardinality = cardMatch ? parseInt(cardMatch[1], 10) : undefined;
+    const cardinality =
+      finding.metrics?.distinctValues ??
+      (() => {
+        const cardMatch = finding.evidence.match(/cardinality[:\s]+(\d+)/i) || finding.evidence.match(/(\d+)\s+distinct\s+values/i);
+        return cardMatch ? parseInt(cardMatch[1], 10) : undefined;
+      })();
 
-    // Determine column or table size
-    let colSize: number | null = null;
-    const colSizeMatch = finding.evidence.match(/current size:\s*([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)/i) ||
-      finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*(?:uncompressed|compressed)?/i);
+    const isNameOnly =
+      finding.metrics?.isNameOnlyCandidate ??
+      (/candidate based on column name only/i.test(finding.evidence) || (cardinality === undefined && !/cardinality/i.test(finding.evidence)));
 
-    if (colSizeMatch) {
-      colSize = parseBytesFromText(`${colSizeMatch[1]} ${colSizeMatch[2]}`);
-    } else if (tableMeta && tableMeta.total_bytes_compressed > 0) {
-      // LowCardinality on a main dimension column typically represents 15-25% of table compressed bytes
-      colSize = tableMeta.total_bytes_compressed * 0.20;
+    // Determine column COMPRESSED size only - storage is billed on compressed bytes!
+    let colCompressedBytes: number | null = null;
+    if (finding.metrics?.columnCompressedBytes && finding.metrics.columnCompressedBytes > 0) {
+      colCompressedBytes = finding.metrics.columnCompressedBytes;
+    } else {
+      // Must match COMPRESSED bytes explicitly - never uncompressed!
+      const compMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|PB)\s*compressed/i);
+      if (compMatch) {
+        colCompressedBytes = parseBytesFromText(`${compMatch[1]} ${compMatch[2]}`);
+      }
     }
 
-    if (colSize && colSize > 10 * 1024 * 1024) {
-      // LowCardinality dictionary index yields 65% - 75% reduction on the string column (average 70%)
+    // If only an uncompressed figure is available, the finding is not estimable for storage cost
+    if (!colCompressedBytes) {
+      const uncompMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|PB)\s*uncompressed/i);
+      const uncompBytes = finding.metrics?.columnUncompressedBytes ?? (uncompMatch ? parseBytesFromText(`${uncompMatch[1]} ${uncompMatch[2]}`) : null);
+      if (uncompBytes) {
+        return {
+          category: 'storage',
+          estimatedMonthlySavings: 0,
+          annualProjectedSavings: 0,
+          isEstimable: false,
+          confidence: 'low',
+          confidenceReason: 'Only uncompressed footprint is known; ClickHouse storage is billed on compressed bytes. Storage cost savings cannot be calculated without compressed on-disk footprint.',
+          assumptions: [
+            `Uncompressed footprint: ${formatBytes(uncompBytes)}.`,
+            'Compressed on-disk footprint is unknown from metadata.',
+            'Storage is billed on compressed disk footprint.',
+          ],
+          methodology: 'Storage cost calculation requires compressed on-disk footprint.',
+          calculationBasis: `Column uses ${formatBytes(uncompBytes)} uncompressed. Compressed disk footprint is unknown; financial impact unavailable.`,
+          recommendedAction: `ALTER TABLE ${finding.table} MODIFY COLUMN ${colName} LowCardinality(String);`,
+          calculationSteps: [
+            { label: 'Uncompressed Size', value: formatBytes(uncompBytes) },
+            { label: 'Compressed Size', value: 'Unknown (not observed)' },
+            { label: 'Estimated Monthly Savings', value: 'Unavailable (requires compressed size)' },
+          ],
+          optimizationGroup: `table:${finding.table}:col:${colName}:schema`,
+          resourceReduction: {
+            bytes: 0,
+            bytesFormatted: '0 B',
+            percentage: 0,
+          },
+          technicalReductionOnlyText: `Column uses ${formatBytes(uncompBytes)} uncompressed. Compressed on-disk bytes unknown; financial savings cannot be calculated.`,
+          pricingSource,
+        };
+      }
+      return null;
+    }
+
+    if (colCompressedBytes && colCompressedBytes > 5 * 1024 * 1024) {
+      // Nominal point estimate calculated from compressed bytes (70% nominal compaction factor)
       const reductionPercentage = 70;
-      const reductionBytes = colSize * (reductionPercentage / 100);
+      const reductionBytes = colCompressedBytes * (reductionPercentage / 100);
       const reductionGB = reductionBytes / (1024 * 1024 * 1024);
       const monthlySavings = reductionGB * storagePricePerGB;
-      const currentMonthlyCost = (colSize / (1024 * 1024 * 1024)) * storagePricePerGB;
-      const afterMonthlyCost = ((colSize - reductionBytes) / (1024 * 1024 * 1024)) * storagePricePerGB;
+      const currentMonthlyCost = (colCompressedBytes / (1024 * 1024 * 1024)) * storagePricePerGB;
+      const afterMonthlyCost = ((colCompressedBytes - reductionBytes) / (1024 * 1024 * 1024)) * storagePricePerGB;
 
-      const isHighConfidence = cardinality !== undefined && cardinality <= 10000;
-      const minSavings = monthlySavings * 0.90;
-      const maxSavings = monthlySavings * 1.10;
+      // Honest wide low-high band for LowCardinality on-disk savings:
+      // Compressed on-disk gains are smaller/variable because LZ4/ZSTD already deduplicate repeated strings.
+      // Wide range: 20% (low) to 70% (high).
+      const minReductionBytes = colCompressedBytes * 0.20;
+      const maxReductionBytes = colCompressedBytes * 0.70;
+      const minSavings = (minReductionBytes / (1024 * 1024 * 1024)) * storagePricePerGB;
+      const maxSavings = (maxReductionBytes / (1024 * 1024 * 1024)) * storagePricePerGB;
 
       return {
         category: 'storage',
@@ -319,38 +372,40 @@ export function calculateFindingCostImpact(
         savingsRange: {
           minMonthlySavings: Math.round(minSavings * 100) / 100,
           maxMonthlySavings: Math.round(maxSavings * 100) / 100,
-          minBytesReduced: reductionBytes * 0.90,
-          maxBytesReduced: reductionBytes * 1.10,
-          minFormatted: formatBytes(reductionBytes * 0.90),
-          maxFormatted: formatBytes(reductionBytes * 1.10),
+          minBytesReduced: minReductionBytes,
+          maxBytesReduced: maxReductionBytes,
+          minFormatted: formatBytes(minReductionBytes),
+          maxFormatted: formatBytes(maxReductionBytes),
         },
         resourceReduction: {
           bytes: reductionBytes,
           bytesFormatted: formatBytes(reductionBytes),
           percentage: reductionPercentage,
         },
-        confidence: isHighConfidence ? 'high' : 'medium',
-        confidenceReason: isHighConfidence
-          ? `Column cardinality is directly observed (${cardinality} distinct values). Replacing repeated strings with 1-byte dictionary keys deterministically yields ~${reductionPercentage}% storage compaction.`
-          : 'LowCardinality replaces repeating String values with 1-2 byte dictionary keys, yielding ~70% columnar reduction.',
+        confidence: isNameOnly ? 'medium' : (cardinality && cardinality <= 10000 ? 'medium' : 'low'),
+        confidenceReason: isNameOnly
+          ? 'Candidate identified from column name convention only; cardinality was not inspected. If verified distinct count is below ~10,000, LowCardinality dictionary indexing typically yields 20%–70% compressed on-disk reduction.'
+          : (cardinality
+            ? `Column distinct count is ${cardinality.toLocaleString()} values. Replacing repeated strings with dictionary indices typically yields 20%–70% compressed on-disk reduction depending on string length and compression codec.`
+            : 'LowCardinality replaces repeating String values with dictionary keys, yielding 20%–70% compressed on-disk reduction.'),
         assumptions: [
-          `Current column footprint: ${formatBytes(colSize)}${cardinality ? ` (Cardinality: ${cardinality})` : ''}.`,
-          'LowCardinality replaces repeated string payloads with 1-2 byte integer dictionary indices.',
-          `Estimated ~${reductionPercentage}% storage reduction for this columnar dimension.`,
+          `Current column compressed footprint: ${formatBytes(colCompressedBytes)}${cardinality ? ` (Cardinality: ${cardinality})` : ''}.`,
+          isNameOnly ? 'Assumed candidate based on column name convention; cardinality was not inspected.' : 'LowCardinality replaces repeated strings with dictionary indices.',
+          'Expected on-disk compressed reduction ranges between 20% and 70% depending on string length and existing LZ4/ZSTD compression.',
           `Storage price: $${storagePricePerGB.toFixed(2)} / GB-month (Source: ${pricingSource}).`,
           'Zero data growth assumed (steady-state current footprint).',
         ],
-        methodology: `Storage reduction = Column size (${formatBytes(colSize)}) × ${reductionPercentage}% dictionary compaction factor. Monthly savings = Reduction (GB) × Storage price.`,
-        calculationBasis: `Current column: ${formatBytes(colSize)} → Estimated optimized: ${formatBytes(colSize - reductionBytes)} (~${reductionPercentage}% reduction).`,
-        recommendedAction: `ALTER TABLE ${finding.table} MODIFY COLUMN ${colName} LowCardinality(String);`,
+        methodology: `Storage reduction = Column compressed size (${formatBytes(colCompressedBytes)}) × dictionary compaction factor. Monthly savings = Reduction (GB) × Storage price.`,
+        calculationBasis: `Current column: ${formatBytes(colCompressedBytes)} compressed → Estimated optimized: ${formatBytes(colCompressedBytes - reductionBytes)} (~${reductionPercentage}% reduction, range: 20%–70%).`,
+        recommendedAction: `-- Verify cardinality first:\nSELECT uniq(${colName}) FROM ${finding.table};\n-- If uniq count < 10000:\nALTER TABLE ${finding.table} MODIFY COLUMN ${colName} LowCardinality(String);`,
         calculationSteps: [
-          { label: 'Current Column Footprint', value: formatBytes(colSize) },
-          { label: 'Observed Cardinality', value: cardinality ? `${cardinality.toLocaleString()} distinct values` : 'Categorical low cardinality' },
+          { label: 'Current Column Footprint (Compressed)', value: formatBytes(colCompressedBytes) },
+          { label: 'Observed Cardinality', value: cardinality ? `${cardinality.toLocaleString()} distinct values` : 'Uninspected (name-only heuristic)' },
           { label: 'Optimization', value: 'LowCardinality(String) Dictionary Index' },
-          { label: 'Estimated Compaction', value: `~${reductionPercentage}% reduction` },
+          { label: 'Estimated Compaction Range', value: '20%–70% on-disk reduction' },
           { label: 'Potential Storage Reduction', value: formatBytes(reductionBytes) },
           { label: 'Storage Rate', value: `$${storagePricePerGB.toFixed(2)} / GB-month`, detail: `Source: ${pricingSource}` },
-          { label: 'Estimated Monthly Savings', value: formatCurrency(monthlySavings, costModel.currency) },
+          { label: 'Estimated Monthly Savings', value: `${formatCurrency(monthlySavings, costModel.currency)} (Range: ${formatCurrency(minSavings, costModel.currency)}–${formatCurrency(maxSavings, costModel.currency)})` },
         ],
         optimizationGroup: `table:${finding.table}:col:${colName}:schema`,
         isEstimable: true,
@@ -368,20 +423,29 @@ export function calculateFindingCostImpact(
     /oversized integer/i.test(fullText);
 
   if (isNumericNarrowing && finding.table) {
-    const colNameMatch = finding.title.match(/['`]([^'`]+)\.([^'`]+)['`]/) || finding.evidence.match(/column ['`]([^'`]+)['`]/i);
-    const colName = colNameMatch ? colNameMatch[2] || colNameMatch[1] : 'column';
+    const colName =
+      finding.metrics?.columnName ||
+      (() => {
+        const match = finding.title.match(/['`]([^'`]+)\.([^'`]+)['`]/) || finding.evidence.match(/column ['`]([^'`]+)['`]/i);
+        return match ? match[2] || match[1] : 'column';
+      })();
 
     // Target type: Int32 or UInt32
-    const targetType = /uint64/i.test(fullText) ? 'UInt32' : 'Int32';
+    const targetType = finding.metrics?.suggestedType || (/uint64/i.test(fullText) ? 'UInt32' : 'Int32');
 
     let colCompressedBytes: number | null = null;
-    const compMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*compressed/i) ||
-      finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)/i);
+    if (finding.metrics?.columnCompressedBytes && finding.metrics.columnCompressedBytes > 0) {
+      colCompressedBytes = finding.metrics.columnCompressedBytes;
+    } else {
+      // Must match COMPRESSED bytes explicitly - never uncompressed!
+      const compMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|PB)\s*compressed/i);
+      if (compMatch) {
+        colCompressedBytes = parseBytesFromText(`${compMatch[1]} ${compMatch[2]}`);
+      }
+    }
 
-    if (compMatch) {
-      colCompressedBytes = parseBytesFromText(`${compMatch[1]} ${compMatch[2]}`);
-    } else if (tableMeta && tableMeta.total_bytes_compressed > 0) {
-      colCompressedBytes = tableMeta.total_bytes_compressed * 0.15;
+    if (!colCompressedBytes) {
+      return null;
     }
 
     if (colCompressedBytes && colCompressedBytes > 5 * 1024 * 1024) {
@@ -394,6 +458,10 @@ export function calculateFindingCostImpact(
       const currentMonthlyCost = (colCompressedBytes / (1024 * 1024 * 1024)) * storagePricePerGB;
       const afterMonthlyCost = ((colCompressedBytes - reductionBytes) / (1024 * 1024 * 1024)) * storagePricePerGB;
 
+      // Honest range
+      const minSavings = (colCompressedBytes * 0.25 / (1024 * 1024 * 1024)) * storagePricePerGB;
+      const maxSavings = (colCompressedBytes * 0.45 / (1024 * 1024 * 1024)) * storagePricePerGB;
+
       return {
         category: 'storage',
         currentMonthlyCost: Math.round(currentMonthlyCost * 100) / 100,
@@ -402,35 +470,36 @@ export function calculateFindingCostImpact(
         savingsPercentage: netReductionPct,
         annualProjectedSavings: Math.round(monthlySavings * 12 * 100) / 100,
         savingsRange: {
-          minMonthlySavings: Math.round(monthlySavings * 0.85 * 100) / 100,
-          maxMonthlySavings: Math.round(monthlySavings * 1.15 * 100) / 100,
-          minBytesReduced: reductionBytes * 0.85,
-          maxBytesReduced: reductionBytes * 1.15,
-          minFormatted: formatBytes(reductionBytes * 0.85),
-          maxFormatted: formatBytes(reductionBytes * 1.15),
+          minMonthlySavings: Math.round(minSavings * 100) / 100,
+          maxMonthlySavings: Math.round(maxSavings * 100) / 100,
+          minBytesReduced: colCompressedBytes * 0.25,
+          maxBytesReduced: colCompressedBytes * 0.45,
+          minFormatted: formatBytes(colCompressedBytes * 0.25),
+          maxFormatted: formatBytes(colCompressedBytes * 0.45),
         },
         resourceReduction: {
           bytes: reductionBytes,
           bytesFormatted: formatBytes(reductionBytes),
           percentage: netReductionPct,
         },
-        confidence: 'high',
-        confidenceReason: 'Observed value range provably fits within 32-bit limits. Halving raw type width from 8 bytes to 4 bytes yields ~40% net compressed storage compaction.',
+        confidence: 'low',
+        confidenceReason: 'Candidate identified from column name convention only; actual min/max values were not inspected. If verified to fit within 32-bit limits, narrowing raw type width from 8 bytes to 4 bytes can reduce storage.',
         assumptions: [
           `Current column footprint: ${formatBytes(colCompressedBytes)} compressed.`,
+          'Assumed values fit within 32-bit range based on column name heuristic; actual value range was not inspected.',
           'Raw type width reduced from 8 bytes/value (64-bit) to 4 bytes/value (32-bit) — 50% raw reduction.',
-          'Accounted for ClickHouse columnar integer compression (estimated ~40% net compressed storage reduction).',
+          'Accounted for ClickHouse columnar integer compression (estimated ~25%–45% net compressed storage reduction).',
           `Storage price: $${storagePricePerGB.toFixed(2)} / GB-month (Source: ${pricingSource}).`,
         ],
         methodology: 'Reduction = Column compressed bytes × 40% net compaction factor. Monthly savings = Reduction (GB) × Storage price.',
         calculationBasis: `Type width: 8 bytes → 4 bytes (50% raw reduction, ~40% compressed reduction). Footprint: ${formatBytes(colCompressedBytes)} → ${formatBytes(colCompressedBytes - reductionBytes)}.`,
-        recommendedAction: `ALTER TABLE ${finding.table} MODIFY COLUMN ${colName} ${targetType};`,
+        recommendedAction: `-- Verify value range first:\nSELECT min(${colName}), max(${colName}) FROM ${finding.table};\n-- If values fit in 32-bit limits:\nALTER TABLE ${finding.table} MODIFY COLUMN ${colName} ${targetType};`,
         calculationSteps: [
           { label: 'Current Column Size', value: formatBytes(colCompressedBytes) },
           { label: 'Current Type Width', value: '8 bytes (Int64 / UInt64)' },
           { label: 'Target Type Width', value: `4 bytes (${targetType})` },
           { label: 'Raw Width Reduction', value: '50% (4 bytes saved per row)' },
-          { label: 'Net Compressed Reduction', value: '~40% after columnar compression' },
+          { label: 'Net Compressed Reduction', value: '~40% after columnar compression (range 25%–45%)' },
           { label: 'Potential Storage Saved', value: formatBytes(reductionBytes) },
           { label: 'Storage Rate', value: `$${storagePricePerGB.toFixed(2)} / GB-month`, detail: `Source: ${pricingSource}` },
           { label: 'Estimated Monthly Savings', value: formatCurrency(monthlySavings, costModel.currency) },
@@ -451,23 +520,30 @@ export function calculateFindingCostImpact(
     /string date/i.test(fullText);
 
   if (isDateOptimization && finding.table) {
-    const colNameMatch = finding.title.match(/['`]([^'`]+)\.([^'`]+)['`]/) || finding.evidence.match(/column ['`]([^'`]+)['`]/i);
-    const colName = colNameMatch ? colNameMatch[2] || colNameMatch[1] : 'column';
+    const colName =
+      finding.metrics?.columnName ||
+      (() => {
+        const match = finding.title.match(/['`]([^'`]+)\.([^'`]+)['`]/) || finding.evidence.match(/column ['`]([^'`]+)['`]/i);
+        return match ? match[2] || match[1] : 'column';
+      })();
 
     let colBytes: number | null = null;
-    const bytesMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*compressed/i) ||
-      finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)/i);
+    if (finding.metrics?.columnCompressedBytes && finding.metrics.columnCompressedBytes > 0) {
+      colBytes = finding.metrics.columnCompressedBytes;
+    } else {
+      const compMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|PB)\s*compressed/i);
+      if (compMatch) {
+        colBytes = parseBytesFromText(`${compMatch[1]} ${compMatch[2]}`);
+      }
+    }
 
-    if (bytesMatch) {
-      colBytes = parseBytesFromText(`${bytesMatch[1]} ${bytesMatch[2]}`);
-    } else if (tableMeta && tableMeta.total_bytes_compressed > 0) {
-      colBytes = tableMeta.total_bytes_compressed * 0.10;
+    if (!colBytes) {
+      return null;
     }
 
     if (colBytes && colBytes > 5 * 1024 * 1024) {
       const isDateOnly = /date/i.test(finding.recommendation_sql_or_text) && !/datetime/i.test(finding.recommendation_sql_or_text);
       const targetType = isDateOnly ? 'Date' : 'DateTime';
-      // String date is 10-19 bytes; Date is 2 bytes, DateTime is 4 bytes. Compressed reduction is ~60%
       const reductionPercentage = 60;
       const reductionBytes = colBytes * (reductionPercentage / 100);
       const reductionGB = reductionBytes / (1024 * 1024 * 1024);
@@ -485,20 +561,21 @@ export function calculateFindingCostImpact(
           bytesFormatted: formatBytes(reductionBytes),
           percentage: reductionPercentage,
         },
-        confidence: 'high',
-        confidenceReason: `Converting verbose String temporal representations into native ${targetType} (2-4 bytes) eliminates string formatting overhead and enables direct binary indexing.`,
+        confidence: 'low',
+        confidenceReason: `Candidate identified from column name convention; value range was not inspected. Converting String temporal representations to native ${targetType} (2-4 bytes) can reduce storage and enable binary date indexing.`,
         assumptions: [
-          `Current column footprint: ${formatBytes(colBytes)}.`,
-          `Converting to native ${targetType} (${isDateOnly ? '2 bytes' : '4 bytes'} fixed width vs 10-19 byte String).`,
+          `Current column footprint: ${formatBytes(colBytes)} compressed.`,
+          'Candidate identified based on column name heuristic; string values were not inspected.',
+          `Converting to native ${targetType} (${isDateOnly ? '2 bytes' : '4 bytes'} fixed width vs variable String).`,
           `Estimated ~${reductionPercentage}% storage reduction.`,
           `Storage price: $${storagePricePerGB.toFixed(2)} / GB-month (Source: ${pricingSource}).`,
         ],
         methodology: `Storage reduction = Column size × ${reductionPercentage}% temporal compaction. Monthly savings = Reduction (GB) × Storage price.`,
-        calculationBasis: `String format (~19 bytes) → native ${targetType} (4 bytes). Reduction: ${formatBytes(colBytes)} → ${formatBytes(colBytes - reductionBytes)}.`,
+        calculationBasis: `String format → native ${targetType}. Reduction: ${formatBytes(colBytes)} → ${formatBytes(colBytes - reductionBytes)}.`,
         recommendedAction: `ALTER TABLE ${finding.table} MODIFY COLUMN ${colName} ${targetType};`,
         calculationSteps: [
           { label: 'Current Column Footprint', value: formatBytes(colBytes) },
-          { label: 'Current Representation', value: 'Generic String (10-19 bytes/value)' },
+          { label: 'Current Representation', value: 'Generic String' },
           { label: 'Target Native Type', value: `${targetType} (${isDateOnly ? '2 bytes' : '4 bytes'})` },
           { label: 'Estimated Compaction', value: `~${reductionPercentage}% storage reduction` },
           { label: 'Potential Storage Saved', value: formatBytes(reductionBytes) },
@@ -609,48 +686,35 @@ export function calculateFindingCostImpact(
   // 5. PRIMARY KEY / EMPTY ORDER BY (e.g. user_audit_logs with ORDER BY tuple())
   // =========================================================================
   if (finding.category === 'primary_key' && (/order by tuple\(\)/i.test(String(finding.metric_value)) || /empty order by/i.test(finding.title.toLowerCase()))) {
-    if (tableMeta && tableMeta.total_bytes_compressed > 20 * 1024 * 1024) {
-      // Sorting table data allows adjacent rows with identical values to achieve ~25% better compression,
-      // and eliminates 80-95% of full-table scan bytes on queries filtering by key
-      const storageReductionBytes = tableMeta.total_bytes_compressed * 0.25;
-      const storageMonthlySavings = (storageReductionBytes / (1024 * 1024 * 1024)) * storagePricePerGB;
-
-      return {
-        category: 'mixed',
-        currentMonthlyCost: Math.round(((tableMeta.total_bytes_compressed / (1024 * 1024 * 1024)) * storagePricePerGB) * 100) / 100,
-        estimatedMonthlyCostAfter: Math.round((((tableMeta.total_bytes_compressed - storageReductionBytes) / (1024 * 1024 * 1024)) * storagePricePerGB) * 100) / 100,
-        estimatedMonthlySavings: Math.round(storageMonthlySavings * 100) / 100,
-        savingsPercentage: 25,
-        annualProjectedSavings: Math.round(storageMonthlySavings * 12 * 100) / 100,
-        resourceReduction: {
-          bytes: storageReductionBytes,
-          bytesFormatted: formatBytes(storageReductionBytes),
-          percentage: 25,
-        },
-        confidence: 'medium',
-        confidenceReason: 'Compound sorting enables run-length/delta compression across sorted rows (~25% storage savings) and sparse index granule pruning.',
-        assumptions: [
-          `Table size: ${formatBytes(tableMeta.total_bytes_compressed)} (${tableMeta.total_rows.toLocaleString()} rows).`,
-          'Applying compound ORDER BY key groups similar data, yielding ~25% improved compression ratio.',
-          'Enables sparse indexing, preventing 100% full-table scans.',
-          `Storage pricing: $${storagePricePerGB.toFixed(2)} / GB-month (Source: ${pricingSource}).`,
-        ],
-        methodology: 'Storage reduction = Table compressed bytes × 25% compaction bonus from sorting. Monthly savings = Reduction (GB) × Storage price.',
-        calculationBasis: `Unsorted table: ${formatBytes(tableMeta.total_bytes_compressed)} → Sorted compaction: ${formatBytes(tableMeta.total_bytes_compressed - storageReductionBytes)}.`,
-        recommendedAction: `Recreate table '${finding.table}' with compound ORDER BY (e.g. tenant_id, event_time, user_id).`,
-        calculationSteps: [
-          { label: 'Current Table Footprint', value: formatBytes(tableMeta.total_bytes_compressed) },
-          { label: 'Current ORDER BY', value: 'tuple() (unsorted)' },
-          { label: 'Sorted Compaction Factor', value: '25% better compression' },
-          { label: 'Potential Storage Saved', value: formatBytes(storageReductionBytes) },
-          { label: 'Storage Rate', value: `$${storagePricePerGB.toFixed(2)} / GB-month`, detail: `Source: ${pricingSource}` },
-          { label: 'Estimated Monthly Savings', value: formatCurrency(storageMonthlySavings, costModel.currency) },
-        ],
-        optimizationGroup: `table:${finding.table}:sorting`,
-        isEstimable: true,
-        pricingSource,
-      };
-    }
+    const tableSize = tableMeta?.total_bytes_compressed || 0;
+    return {
+      category: 'mixed',
+      estimatedMonthlySavings: 0,
+      annualProjectedSavings: 0,
+      isEstimable: false,
+      confidence: 'low',
+      confidenceReason: 'Table uses unsorted ORDER BY tuple(). Compound sorting enables sparse index pruning and improves compression, but financial savings cannot be projected without an empirical sorting benchmark.',
+      assumptions: [
+        `Table size: ${formatBytes(tableSize || undefined)}.`,
+        'Compound ORDER BY allows run-length and delta compression across adjacent sorted rows.',
+        'Enables sparse primary index pruning to avoid full-table scans.',
+        'Exact compression and I/O savings depend on row ordering; financial estimate not fabricated.',
+      ],
+      methodology: 'Sorting optimization efficiency requires empirical benchmark.',
+      calculationBasis: `Table '${finding.table}' has unsorted storage. Recreating with compound ORDER BY improves compression and pruning; financial impact unavailable.`,
+      recommendedAction: `Recreate table '${finding.table}' with compound ORDER BY matching query filter columns.`,
+      calculationSteps: [
+        { label: 'Current Table Footprint', value: formatBytes(tableSize || undefined) },
+        { label: 'Current ORDER BY', value: 'tuple() (unsorted)' },
+        { label: 'Estimated Financial Impact', value: 'Technical impact only (benchmark required)' },
+      ],
+      optimizationGroup: `table:${finding.table}:sorting`,
+      resourceReduction: {
+        percentage: 25,
+      },
+      technicalReductionOnlyText: `Table uses unsorted ORDER BY tuple(). Compound sorting enables index pruning and improves compression; exact financial savings requires benchmark.`,
+      pricingSource,
+    };
   }
 
   // =========================================================================
@@ -707,123 +771,155 @@ export function calculateFindingCostImpact(
   // 7. QUERY / COMPUTE WORKLOAD SAVINGS (system.query_log)
   // =========================================================================
   if (finding.category === 'query_performance' || finding.id.includes('query_poor_pruning') || finding.id.includes('missing_skip_idx')) {
-    // Check for explicit daily workload numbers in evidence:
-    // e.g. "Current workload: 847 executions/day, 8.2 sec average, 4.8 TB read/day."
-    // or "Query scanned 18,450,000 rows (2.4 GB read) across 4.8 seconds to return only 54 rows."
     let dailyTBRead: number | null = null;
-    let executionsPerDay = 500;
-    let avgDurationSec: number | null = null;
+    let executionsPerDay: number | null = finding.metrics?.dailyExecutions ?? null;
+    let avgDurationSec: number | null = finding.metrics?.queryDurationMs ? finding.metrics.queryDurationMs / 1000 : null;
+    let perQueryBytes: number | null = finding.metrics?.queryReadBytes ?? null;
 
-    const dailyWorkloadMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*(?:read\/day|scanned\/day)/i);
+    if (finding.metrics?.dailyScannedBytes && finding.metrics.dailyScannedBytes > 0) {
+      dailyTBRead = finding.metrics.dailyScannedBytes / (1024 * 1024 * 1024 * 1024);
+    }
+
+    const dailyWorkloadMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|PB)\s*(?:read\/day|scanned\/day)/i);
     const execCountMatch = finding.evidence.match(/([\d,]+)\s*(?:executions\/day|runs\/day)/i);
     const durationMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(?:sec|seconds)\s*(?:average|avg|duration)/i);
+    const readPerQueryMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|PB)\s*read/i);
 
-    if (execCountMatch) {
+    if (!executionsPerDay && execCountMatch) {
       executionsPerDay = parseInt(execCountMatch[1].replace(/,/g, ''), 10);
     }
-    if (durationMatch) {
+    if (!avgDurationSec && durationMatch) {
       avgDurationSec = parseFloat(durationMatch[1]);
     }
-
-    if (dailyWorkloadMatch) {
-      const bytes = parseBytesFromText(`${dailyWorkloadMatch[1]} ${dailyWorkloadMatch[2]}`);
-      if (bytes) dailyTBRead = bytes / (1024 * 1024 * 1024 * 1024);
-    } else {
-      // Per-query read match
-      const readPerQueryMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*read/i);
-      if (readPerQueryMatch) {
-        const perQueryBytes = parseBytesFromText(`${readPerQueryMatch[1]} ${readPerQueryMatch[2]}`);
-        if (perQueryBytes) {
-          dailyTBRead = (perQueryBytes * executionsPerDay) / (1024 * 1024 * 1024 * 1024);
-        }
-      }
+    if (!perQueryBytes && readPerQueryMatch) {
+      perQueryBytes = parseBytesFromText(`${readPerQueryMatch[1]} ${readPerQueryMatch[2]}`);
     }
 
-    if (dailyTBRead && dailyTBRead > 0.05) { // At least 50GB scanned daily
-      // Pruning via index eliminates 40% - 90% of scanned bytes (default ~40% for broad scans, 90% for high read amplification)
-      const isHighAmp = /amplification/i.test(fullText) || /ratio\s*(?:>|over)?\s*[\d,]+x/i.test(fullText);
-      const reductionPercentage = isHighAmp ? 85 : 40;
-      const dailyTBReduced = dailyTBRead * (reductionPercentage / 100);
-      const dailyBytesReduced = dailyTBReduced * (1024 * 1024 * 1024 * 1024);
-      const monthlyTBReduced = dailyTBReduced * 30;
+    if (!dailyTBRead && dailyWorkloadMatch) {
+      const bytes = parseBytesFromText(`${dailyWorkloadMatch[1]} ${dailyWorkloadMatch[2]}`);
+      if (bytes) dailyTBRead = bytes / (1024 * 1024 * 1024 * 1024);
+    } else if (!dailyTBRead && perQueryBytes && executionsPerDay) {
+      // ONLY compute dailyTBRead if executionsPerDay is genuinely known! Never invent 500!
+      dailyTBRead = (perQueryBytes * executionsPerDay) / (1024 * 1024 * 1024 * 1024);
+    }
 
-      // Check if query price is configured (> 0)
-      if (queryPricePerTB > 0) {
-        const monthlySavings = monthlyTBReduced * queryPricePerTB;
-        const currentMonthlyCost = dailyTBRead * 30 * queryPricePerTB;
-        const afterMonthlyCost = (dailyTBRead - dailyTBReduced) * 30 * queryPricePerTB;
+    const isHighAmp = /amplification/i.test(fullText) || /ratio\s*(?:>|over)?\s*[\d,]+x/i.test(fullText);
+    const reductionPercentage = isHighAmp ? 85 : 40;
 
-        return {
-          category: 'query',
-          currentMonthlyCost: Math.round(currentMonthlyCost * 100) / 100,
-          estimatedMonthlyCostAfter: Math.round(afterMonthlyCost * 100) / 100,
-          estimatedMonthlySavings: Math.round(monthlySavings * 100) / 100,
-          savingsPercentage: reductionPercentage,
-          annualProjectedSavings: Math.round(monthlySavings * 12 * 100) / 100,
-          resourceReduction: {
-            queryBytesScannedDaily: dailyBytesReduced,
-            queryBytesScannedMonthly: dailyBytesReduced * 30,
-            queryBytesScannedFormatted: `${dailyTBReduced.toFixed(2)} TB/day`,
-            percentage: reductionPercentage,
-          },
-          confidence: 'medium',
-          confidenceReason: `Read amplification and scanned volume (${dailyTBRead.toFixed(2)} TB/day) are derived from query_log metrics. Workload frequency assumes ~${executionsPerDay.toLocaleString()} daily executions.`,
-          assumptions: [
-            `Current workload: ~${executionsPerDay.toLocaleString()} executions/day${avgDurationSec ? `, ${avgDurationSec.toFixed(1)}s avg duration` : ''}.`,
-            `Scanned data volume: ${dailyTBRead.toFixed(2)} TB read/day.`,
-            `Granule pruning / secondary indexing eliminates ~${reductionPercentage}% of unneeded block reads.`,
-            `Query scanning rate: $${queryPricePerTB.toFixed(2)} / TB scanned (Source: ${pricingSource}).`,
-          ],
-          methodology: `Reduction = Daily scanned TB (${dailyTBRead.toFixed(2)} TB) × ${reductionPercentage}% pruning factor × 30 days. Monthly savings = Scanned TB reduced × Query price/TB.`,
-          calculationBasis: `Workload: ${dailyTBRead.toFixed(2)} TB/day → Optimized: ${(dailyTBRead - dailyTBReduced).toFixed(2)} TB/day (Reduction: ${dailyTBReduced.toFixed(2)} TB/day).`,
-          recommendedAction: finding.table ? `Add skip index or compound ORDER BY on '${finding.table}' to enable granule pruning.` : 'Optimize query EXPLAIN plan and indexes.',
-          calculationSteps: [
-            { label: 'Current Workload', value: `${dailyTBRead.toFixed(2)} TB read/day` },
-            { label: 'Query Volume', value: `${executionsPerDay.toLocaleString()} executions/day` },
-            { label: 'Pruning Reduction', value: `~${reductionPercentage}% of scanned bytes` },
-            { label: 'Workload Reduction', value: `${dailyTBReduced.toFixed(2)} TB read/day` },
-            { label: 'Monthly Scanned Volume Saved', value: `${monthlyTBReduced.toFixed(2)} TB/month` },
-            { label: 'Query Scan Rate', value: `$${queryPricePerTB.toFixed(2)} / TB scanned`, detail: `Source: ${pricingSource}` },
-            { label: 'Estimated Monthly Savings', value: formatCurrency(monthlySavings, costModel.currency) },
-          ],
-          optimizationGroup: `query:${finding.id}`,
-          isEstimable: true,
-          pricingSource,
-        };
-      } else {
-        // If pricing is not configured, show technical reduction without fabricating a dollar value
+    // If daily workload is NOT known (e.g. per-query read is known, but executions/day is unknown):
+    if (dailyTBRead === null || dailyTBRead <= 0) {
+      if (perQueryBytes) {
         return {
           category: 'query',
           estimatedMonthlySavings: 0,
           annualProjectedSavings: 0,
-          savingsPercentage: reductionPercentage,
-          resourceReduction: {
-            queryBytesScannedDaily: dailyBytesReduced,
-            queryBytesScannedMonthly: dailyBytesReduced * 30,
-            queryBytesScannedFormatted: `${dailyTBReduced.toFixed(2)} TB/day`,
-            percentage: reductionPercentage,
-          },
+          isEstimable: false,
           confidence: 'low',
-          confidenceReason: 'Technical scanned bytes reduction is measured from query_log, but query scanning price is currently set to $0.',
+          confidenceReason: 'Per-query scanned volume is measured from query_log, but daily execution frequency is unknown. Financial impact cannot be computed without workload frequency.',
           assumptions: [
-            `Current workload: ${dailyTBRead.toFixed(2)} TB read/day.`,
-            `Estimated ${reductionPercentage}% reduction in scanned bytes (~${dailyTBReduced.toFixed(2)} TB/day).`,
-            'Query pricing not configured ($0.00/TB).',
+            `Scanned per query: ${formatBytes(perQueryBytes)}.`,
+            'Workload frequency (executions/day) is unknown from metadata.',
+            'No assumed execution frequency substituted.',
           ],
-          methodology: 'Technical workload reduction calculated from query log statistics.',
-          calculationBasis: `Potential reduction: ${dailyTBReduced.toFixed(2)} TB scanned/day (~${reductionPercentage}%). Estimated financial impact unavailable.`,
-          recommendedAction: 'Optimize query index pruning.',
+          methodology: 'Workload frequency required for financial projection.',
+          calculationBasis: `Query scanned ${formatBytes(perQueryBytes)}. Daily frequency is unknown, so financial impact cannot be calculated without workload volume.`,
+          recommendedAction: finding.table ? `Add skip index or compound ORDER BY on '${finding.table}' to enable granule pruning.` : 'Optimize query EXPLAIN plan and indexes.',
           calculationSteps: [
-            { label: 'Current Workload', value: `${dailyTBRead.toFixed(2)} TB read/day` },
-            { label: 'Workload Reduction', value: `${dailyTBReduced.toFixed(2)} TB/day (~${reductionPercentage}%)` },
-            { label: 'Estimated Financial Impact', value: 'Unavailable (Configure pricing in settings)' },
+            { label: 'Scanned Per Query', value: formatBytes(perQueryBytes) },
+            { label: 'Daily Execution Frequency', value: 'Unknown (not observed)' },
+            { label: 'Estimated Financial Impact', value: 'Technical impact only (frequency unknown)' },
           ],
           optimizationGroup: `query:${finding.id}`,
-          isEstimable: false,
-          technicalReductionOnlyText: `${dailyTBReduced.toFixed(2)} TB scanned/day (~${reductionPercentage}% reduction). Estimated financial impact unavailable.`,
+          resourceReduction: {
+            percentage: reductionPercentage,
+          },
+          technicalReductionOnlyText: `Query scanned ${formatBytes(perQueryBytes)}. Workload frequency is unknown; financial impact cannot be calculated without execution count.`,
           pricingSource,
         };
       }
+      return null;
+    }
+
+    // Daily TB read is known!
+    const dailyTBReduced = dailyTBRead * (reductionPercentage / 100);
+    const dailyBytesReduced = dailyTBReduced * (1024 * 1024 * 1024 * 1024);
+    const monthlyTBReduced = dailyTBReduced * 30;
+
+    if (queryPricePerTB > 0) {
+      const monthlySavings = monthlyTBReduced * queryPricePerTB;
+      const currentMonthlyCost = dailyTBRead * 30 * queryPricePerTB;
+      const afterMonthlyCost = (dailyTBRead - dailyTBReduced) * 30 * queryPricePerTB;
+
+      return {
+        category: 'query',
+        currentMonthlyCost: Math.round(currentMonthlyCost * 100) / 100,
+        estimatedMonthlyCostAfter: Math.round(afterMonthlyCost * 100) / 100,
+        estimatedMonthlySavings: Math.round(monthlySavings * 100) / 100,
+        savingsPercentage: reductionPercentage,
+        annualProjectedSavings: Math.round(monthlySavings * 12 * 100) / 100,
+        resourceReduction: {
+          queryBytesScannedDaily: dailyBytesReduced,
+          queryBytesScannedMonthly: dailyBytesReduced * 30,
+          queryBytesScannedFormatted: `${dailyTBReduced.toFixed(2)} TB/day`,
+          percentage: reductionPercentage,
+        },
+        confidence: 'medium',
+        confidenceReason: `Read amplification and scanned volume (${dailyTBRead.toFixed(2)} TB/day) are derived from query_log metrics with ${executionsPerDay ? `${executionsPerDay.toLocaleString()} daily executions` : 'measured workload'}.`,
+        assumptions: [
+          `Current workload: ${executionsPerDay ? `~${executionsPerDay.toLocaleString()} executions/day` : 'Measured workload'}${avgDurationSec ? `, ${avgDurationSec.toFixed(1)}s avg duration` : ''}.`,
+          `Scanned data volume: ${dailyTBRead.toFixed(2)} TB read/day.`,
+          `Granule pruning / secondary indexing eliminates ~${reductionPercentage}% of unneeded block reads.`,
+          `Query scanning rate: $${queryPricePerTB.toFixed(2)} / TB scanned (Source: ${pricingSource}).`,
+        ],
+        methodology: `Reduction = Daily scanned TB (${dailyTBRead.toFixed(2)} TB) × ${reductionPercentage}% pruning factor × 30 days. Monthly savings = Scanned TB reduced × Query price/TB.`,
+        calculationBasis: `Workload: ${dailyTBRead.toFixed(2)} TB/day → Optimized: ${(dailyTBRead - dailyTBReduced).toFixed(2)} TB/day (Reduction: ${dailyTBReduced.toFixed(2)} TB/day).`,
+        recommendedAction: finding.table ? `Add skip index or compound ORDER BY on '${finding.table}' to enable granule pruning.` : 'Optimize query EXPLAIN plan and indexes.',
+        calculationSteps: [
+          { label: 'Current Workload', value: `${dailyTBRead.toFixed(2)} TB read/day` },
+          { label: 'Query Volume', value: executionsPerDay ? `${executionsPerDay.toLocaleString()} executions/day` : 'Measured volume' },
+          { label: 'Pruning Reduction', value: `~${reductionPercentage}% of scanned bytes` },
+          { label: 'Workload Reduction', value: `${dailyTBReduced.toFixed(2)} TB read/day` },
+          { label: 'Monthly Scanned Volume Saved', value: `${monthlyTBReduced.toFixed(2)} TB/month` },
+          { label: 'Query Scan Rate', value: `$${queryPricePerTB.toFixed(2)} / TB scanned`, detail: `Source: ${pricingSource}` },
+          { label: 'Estimated Monthly Savings', value: formatCurrency(monthlySavings, costModel.currency) },
+        ],
+        optimizationGroup: `query:${finding.id}`,
+        isEstimable: true,
+        pricingSource,
+      };
+    } else {
+      // Query price is 0 (default for ClickHouse Cloud / self-hosted):
+      return {
+        category: 'query',
+        estimatedMonthlySavings: 0,
+        annualProjectedSavings: 0,
+        savingsPercentage: reductionPercentage,
+        resourceReduction: {
+          queryBytesScannedDaily: dailyBytesReduced,
+          queryBytesScannedMonthly: dailyBytesReduced * 30,
+          queryBytesScannedFormatted: `${dailyTBReduced.toFixed(2)} TB/day`,
+          percentage: reductionPercentage,
+        },
+        confidence: 'low',
+        confidenceReason: 'Technical scanned bytes reduction is measured from query_log, but query scanning price is currently set to $0 (default for ClickHouse Cloud/self-hosted).',
+        assumptions: [
+          `Current workload: ${dailyTBRead.toFixed(2)} TB read/day.`,
+          `Estimated ${reductionPercentage}% reduction in scanned bytes (~${dailyTBReduced.toFixed(2)} TB/day).`,
+          'Query pricing set to $0.00/TB (default). Configure per-TB rate in settings if your platform bills per scan.',
+        ],
+        methodology: 'Technical workload reduction calculated from query log statistics.',
+        calculationBasis: `Potential reduction: ${dailyTBReduced.toFixed(2)} TB scanned/day (~${reductionPercentage}%). Estimated financial impact unavailable ($0/TB scan price).`,
+        recommendedAction: finding.table ? `Add skip index or compound ORDER BY on '${finding.table}' to enable granule pruning.` : 'Optimize query EXPLAIN plan and indexes.',
+        calculationSteps: [
+          { label: 'Current Workload', value: `${dailyTBRead.toFixed(2)} TB read/day` },
+          { label: 'Workload Reduction', value: `${dailyTBReduced.toFixed(2)} TB/day (~${reductionPercentage}%)` },
+          { label: 'Estimated Financial Impact', value: 'Unavailable (Query scan price $0.00/TB)' },
+        ],
+        optimizationGroup: `query:${finding.id}`,
+        isEstimable: false,
+        technicalReductionOnlyText: `${dailyTBReduced.toFixed(2)} TB scanned/day (~${reductionPercentage}% reduction). Estimated financial impact unavailable (query scan price $0/TB).`,
+        pricingSource,
+      };
     }
   }
 
@@ -881,43 +977,33 @@ export function calculateFindingCostImpact(
     const sizeMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(MB|GB|TB)/i);
     const sizeBytes = sizeMatch ? parseBytesFromText(`${sizeMatch[1]} ${sizeMatch[2]}`) : (tableMeta ? tableMeta.total_bytes_compressed : null);
 
-    if (sizeBytes && sizeBytes > 5 * 1024 * 1024 * 1024) { // > 5GB
-      const prunedGB = (sizeBytes / (1024 * 1024 * 1024)) * 0.40;
-      const monthlySavings = prunedGB * 0.05 * storagePricePerGB;
-
-      if (monthlySavings > 0.5) {
-        return {
-          category: 'storage',
-          estimatedMonthlySavings: Math.round(monthlySavings * 100) / 100,
-          annualProjectedSavings: Math.round(monthlySavings * 12 * 100) / 100,
-          resourceReduction: {
-            bytes: sizeBytes * 0.15,
-            bytesFormatted: formatBytes(sizeBytes * 0.15),
-            percentage: 15,
-          },
-          confidence: 'low',
-          confidenceReason: 'Date partitioning enables instant zero-cost partition drops and partition directory pruning for date-range filters.',
-          assumptions: [
-            `Table volume: ${formatBytes(sizeBytes)}.`,
-            'Date partitioning (toYYYYMM) enables instant partition drops rather than row-by-row mutations.',
-            'Allows date-filtered analytical queries to skip unneeded monthly directories.',
-            `Storage price: $${storagePricePerGB.toFixed(2)} / GB-month (Source: ${pricingSource}).`,
-          ],
-          methodology: 'Estimated operational efficiency and partition prune savings.',
-          calculationBasis: `Partitioning enables instant TTL drops and directory pruning on ${formatBytes(sizeBytes)} dataset.`,
-          recommendedAction: `PARTITION BY toYYYYMM(timestamp);`,
-          calculationSteps: [
-            { label: 'Table Size', value: formatBytes(sizeBytes) },
-            { label: 'Partition Strategy', value: 'PARTITION BY toYYYYMM(date_col)' },
-            { label: 'Storage Rate', value: `$${storagePricePerGB.toFixed(2)} / GB-month`, detail: `Source: ${pricingSource}` },
-            { label: 'Estimated Monthly Savings', value: formatCurrency(monthlySavings, costModel.currency) },
-          ],
-          optimizationGroup: `table:${finding.table}:partitioning`,
-          isEstimable: true,
-          pricingSource,
-        };
-      }
-    }
+    return {
+      category: 'storage',
+      estimatedMonthlySavings: 0,
+      annualProjectedSavings: 0,
+      isEstimable: false,
+      resourceReduction: {
+        percentage: 0,
+      },
+      confidence: 'low',
+      confidenceReason: 'Date partitioning enables instant zero-cost partition drops and directory pruning, but query-pattern savings cannot be estimated without query workload logs.',
+      assumptions: [
+        `Table volume: ${formatBytes(sizeBytes || undefined)}.`,
+        'Date partitioning (toYYYYMM) enables instant partition drops rather than row-by-row mutations.',
+        'Allows date-filtered analytical queries to skip unneeded monthly directories.',
+      ],
+      methodology: 'Estimated operational efficiency and partition prune savings.',
+      calculationBasis: `Partitioning enables instant TTL drops and directory pruning on ${formatBytes(sizeBytes || undefined)} dataset. Estimated financial impact unavailable without query workload logs.`,
+      recommendedAction: `PARTITION BY toYYYYMM(timestamp);`,
+      calculationSteps: [
+        { label: 'Table Size', value: formatBytes(sizeBytes || undefined) },
+        { label: 'Partition Strategy', value: 'PARTITION BY toYYYYMM(date_col)' },
+        { label: 'Estimated Financial Impact', value: 'Technical impact only' },
+      ],
+      optimizationGroup: `table:${finding.table}:partitioning`,
+      technicalReductionOnlyText: `Partitioning enables instant partition drops and directory pruning on ${formatBytes(sizeBytes || undefined)} dataset. Estimated financial impact unavailable without query workload logs.`,
+      pricingSource,
+    };
   }
 
   // If no financial calculation could be substantiated, do not fabricate dollar values!

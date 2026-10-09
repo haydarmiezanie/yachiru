@@ -45,6 +45,44 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i] || 'PB'}`;
 }
 
+/**
+ * Splits a column name into distinct tokens on underscores, hyphens, non-alphanumeric chars,
+ * and camelCase boundaries (e.g. "report_id" -> ["report", "id"], "postBody" -> ["post", "body"]).
+ */
+export function tokenizeColumnName(name: string): string[] {
+  const separated = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  return separated.split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+/**
+ * Matches a column name against a list of target keywords by whole token or delimited subphrase.
+ * Avoids substring false positives like "report_id" matching "port" or "post_body" matching "os".
+ */
+export function matchesColumnTokens(name: string, targetTerms: string[]): boolean {
+  const lowerName = name.toLowerCase();
+  const tokens = tokenizeColumnName(name);
+  const tokenSet = new Set(tokens);
+
+  for (const term of targetTerms) {
+    const lowerTerm = term.toLowerCase();
+    if (lowerTerm.includes('_')) {
+      // Compound term like "status_code", "http_status", "event_type", "retry_count", "version_major", "duration_ms"
+      // Match if the exact compound term appears bordered by delimiters or start/end
+      const regex = new RegExp(`(^|[_\\-])${lowerTerm}([_\\-]|$)`, 'i');
+      if (regex.test(lowerName)) {
+        return true;
+      }
+    } else {
+      // Single token like "status", "country", "port", "year", "role"
+      // Must match an exact individual token, never a substring of a token!
+      if (tokenSet.has(lowerTerm)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Compute Category Scores and Overall Score
 export function calculateScores(findings: CheckFinding[]): { categories: CategoryScore[]; overall_score: number; verdict: 'Optimized' | 'Needs Tuning' | 'Critical Optimization Required' } {
   const categoryDefs: Array<{ id: CheckFinding['category']; name: string; description: string }> = [
@@ -893,16 +931,26 @@ export async function runLiveScan(
             impact: 'Suboptimal compression wastes NVMe/EBS disk space and forces queries to read more physical bytes from disk into memory buffers.',
             recommendation_sql_or_text: `-- If values have repeated cardinality, wrap with LowCardinality:\n-- Or apply ZSTD compression for text/JSON payloads:\n-- ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${col.type} CODEC(ZSTD(3));`,
             is_sql_recommendation: true,
+            metrics: {
+              columnCompressedBytes: comp,
+              columnUncompressedBytes: uncomp,
+              compressionRatio: ratio,
+              columnName: col.name,
+              columnType: col.type,
+            },
           });
         }
 
         // Schema / Data Type Optimization: LowCardinality Candidate
+        const LOW_CARD_TERMS = [
+          'event_type', 'status', 'action', 'type', 'category', 'method',
+          'level', 'country', 'os', 'browser', 'role', 'platform',
+          'state', 'code', 'currency', 'tag', 'plan'
+        ];
         const isLowCardCandidate =
           col.type === 'String' &&
           !col.type.includes('LowCardinality') &&
-          /(?:event_type|status|action|type|category|method|level|country|os|browser|role|platform|state|code|currency|tag|plan)/i.test(
-            col.name
-          );
+          matchesColumnTokens(col.name, LOW_CARD_TERMS);
 
         if (isLowCardCandidate && uncomp > 20971520) {
           findings.push({
@@ -912,24 +960,36 @@ export async function runLiveScan(
             title: `LowCardinality candidate on '${col.table}.${col.name}' (LowCardinality(String))`,
             table: col.table,
             status: 'warning',
-            metric_value: `String (estimated low cardinality domain)`,
+            metric_value: `String (${formatBytes(comp)} compressed)`,
             threshold: 'Threshold: Categorical string columns benefit from LowCardinality dictionary encoding',
-            evidence: `Column '${col.name}' is type String using ${formatBytes(uncomp)} uncompressed (${formatBytes(comp)} compressed). Column name indicates repetitive categorical domain values. Dictionary indexing yields ~70% storage compaction.`,
-            impact: 'Storing uncompressed repeating strings without dictionary encoding wastes storage and slows down string lookups.',
-            recommendation_sql_or_text: `ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} LowCardinality(String);`,
+            evidence: `Column '${col.name}' is type String using ${formatBytes(uncomp)} uncompressed (${formatBytes(comp)} compressed). Candidate based on column name only; cardinality / value range were not inspected.`,
+            impact: 'Storing repeating strings without dictionary encoding increases storage and slows down string lookups. If distinct values exceed ~10,000, LowCardinality can degrade performance instead.',
+            recommendation_sql_or_text: `-- Verify cardinality before converting (proceed only if uniq(col) is below roughly 10,000):\nSELECT uniq(${col.name}) AS distinct_values FROM ${col.table};\n\n-- If distinct_values < 10000, apply:\nALTER TABLE ${col.table} MODIFY COLUMN ${col.name} LowCardinality(String);`,
             is_sql_recommendation: true,
+            metrics: {
+              columnCompressedBytes: comp,
+              columnUncompressedBytes: uncomp,
+              compressionRatio: ratio,
+              columnName: col.name,
+              columnType: col.type,
+              suggestedType: 'LowCardinality(String)',
+              isNameOnlyCandidate: true,
+            },
           });
         }
 
         // Schema / Data Type Optimization: Numeric Type Narrowing (Int64/UInt64 on bounded columns)
+        const NUMERIC_NARROWING_TERMS = [
+          'status_code', 'http_status', 'year', 'month', 'day', 'port',
+          'retry_count', 'priority', 'version_major', 'duration_ms'
+        ];
         const isNumericNarrowingCandidate =
           (col.type === 'Int64' || col.type === 'UInt64') &&
-          /(?:status_code|http_status|year|month|day|port|retry_count|priority|version_major|duration_ms)/i.test(
-            col.name
-          );
+          matchesColumnTokens(col.name, NUMERIC_NARROWING_TERMS);
 
         if (isNumericNarrowingCandidate && comp > 10485760) {
           const targetType = col.type === 'Int64' ? 'Int32' : 'UInt32';
+          const maxAllowed = targetType === 'UInt32' ? '4,294,967,295' : '2,147,483,647';
           findings.push({
             id: `numeric_narrowing_${col.table}_${col.name}`,
             category: 'compression',
@@ -937,19 +997,31 @@ export async function runLiveScan(
             title: `Oversized integer type on '${col.table}.${col.name}' (${col.type} → ${targetType})`,
             table: col.table,
             status: 'warning',
-            metric_value: `Current type: ${col.type} (8 bytes/val)`,
+            metric_value: `Current type: ${col.type} (${formatBytes(comp)} compressed)`,
             threshold: 'Threshold: Value ranges within 32-bit limits should use 32-bit types',
-            evidence: `Column '${col.name}' uses ${col.type} (8 bytes/value) across ${formatBytes(comp)} compressed storage. Bounded domain fits within 32-bit range. Halving raw type width yields ~40% net compressed storage compaction.`,
-            impact: '64-bit integer width for bounded data wastes 50% raw storage and increases memory bandwidth overhead.',
-            recommendation_sql_or_text: `ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
+            evidence: `Column '${col.name}' uses ${col.type} (8 bytes/value) across ${formatBytes(comp)} compressed storage (${formatBytes(uncomp)} uncompressed). Candidate based on column name only; cardinality / value range were not inspected.`,
+            impact: '64-bit integer width for bounded data wastes raw storage and memory bandwidth overhead. Narrowing a 64-bit column without verifying min/max can cause integer overflow if values exceed 32-bit bounds.',
+            recommendation_sql_or_text: `-- Verify value domain before converting (proceed only if max <= ${maxAllowed} and min >= ${targetType === 'UInt32' ? 0 : '-2,147,483,648'}):\nSELECT min(${col.name}), max(${col.name}) FROM ${col.table};\n\n-- If values fit within 32-bit limits, apply:\nALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
             is_sql_recommendation: true,
+            metrics: {
+              columnCompressedBytes: comp,
+              columnUncompressedBytes: uncomp,
+              compressionRatio: ratio,
+              columnName: col.name,
+              columnType: col.type,
+              suggestedType: targetType,
+              isNameOnlyCandidate: true,
+            },
           });
         }
 
         // Schema / Data Type Optimization: Date/DateTime Candidate
+        const DATE_TERMS = [
+          'created_at', 'updated_at', 'timestamp', 'event_time', 'event_date', 'log_time', 'date_str'
+        ];
         const isDateCandidate =
           col.type === 'String' &&
-          /(?:created_at|updated_at|timestamp|event_time|event_date|log_time|date_str)/i.test(col.name);
+          matchesColumnTokens(col.name, DATE_TERMS);
 
         if (isDateCandidate && uncomp > 10485760) {
           const isDateOnly = /date/i.test(col.name) && !/time/i.test(col.name);
@@ -963,10 +1035,19 @@ export async function runLiveScan(
             status: 'warning',
             metric_value: `Type: String (${formatBytes(uncomp)})`,
             threshold: `Threshold: Temporal values should use native ${targetType}`,
-            evidence: `Temporal column '${col.name}' is stored as generic String (${formatBytes(uncomp)} uncompressed). Native ClickHouse ${targetType} uses ${isDateOnly ? '2 bytes' : '4 bytes'} vs 10-19 bytes for string format (~60% compressed savings).`,
+            evidence: `Temporal column '${col.name}' is stored as generic String (${formatBytes(uncomp)} uncompressed, ${formatBytes(comp)} compressed). Candidate based on column name only; value range was not inspected.`,
             impact: 'Generic String dates prevent partition pruning, date-interval arithmetic, and waste ~60% storage.',
-            recommendation_sql_or_text: `ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
+            recommendation_sql_or_text: `-- Verify temporal format before converting:\nSELECT min(${col.name}), max(${col.name}) FROM ${col.table};\n\n-- If format is valid date string, apply:\nALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
             is_sql_recommendation: true,
+            metrics: {
+              columnCompressedBytes: comp,
+              columnUncompressedBytes: uncomp,
+              compressionRatio: ratio,
+              columnName: col.name,
+              columnType: col.type,
+              suggestedType: targetType,
+              isNameOnlyCandidate: true,
+            },
           });
         }
       }
@@ -1674,6 +1755,13 @@ export function runSimulationScan(): AnalysisReport {
       impact: 'Significant disk waste and high disk I/O when reading JSON payloads.',
       recommendation_sql_or_text: `-- Apply ZSTD compression (level 3 or 6) for JSON text payloads:\nALTER TABLE events_raw MODIFY COLUMN payload_json String CODEC(ZSTD(3));`,
       is_sql_recommendation: true,
+      metrics: {
+        columnCompressedBytes: 7.1 * 1024 * 1024 * 1024,
+        columnUncompressedBytes: 8.4 * 1024 * 1024 * 1024,
+        compressionRatio: 1.18,
+        columnName: 'payload_json',
+        columnType: 'String',
+      },
     },
     {
       id: 'lowcard_candidate_events_raw_event_type',
@@ -1688,6 +1776,15 @@ export function runSimulationScan(): AnalysisReport {
       impact: "Storing repeating strings without dictionary encoding wastes storage and slows down string aggregation queries.",
       recommendation_sql_or_text: `ALTER TABLE events_raw MODIFY COLUMN event_type LowCardinality(String);`,
       is_sql_recommendation: true,
+      metrics: {
+        columnCompressedBytes: 12.4 * 1024 * 1024 * 1024,
+        columnUncompressedBytes: 38 * 1024 * 1024 * 1024,
+        distinctValues: 17,
+        isNameOnlyCandidate: false,
+        columnName: 'event_type',
+        columnType: 'String',
+        suggestedType: 'LowCardinality(String)',
+      },
     },
     {
       id: 'numeric_narrowing_user_audit_logs_status_code',
@@ -1702,6 +1799,16 @@ export function runSimulationScan(): AnalysisReport {
       impact: "64-bit integer width for HTTP status codes wastes 50% raw storage and increases memory bandwidth overhead during aggregation.",
       recommendation_sql_or_text: `ALTER TABLE user_audit_logs MODIFY COLUMN status_code UInt32;`,
       is_sql_recommendation: true,
+      metrics: {
+        columnCompressedBytes: 4.8 * 1024 * 1024 * 1024,
+        columnUncompressedBytes: 18.2 * 1024 * 1024 * 1024,
+        minValue: 100,
+        maxValue: 599,
+        isNameOnlyCandidate: false,
+        columnName: 'status_code',
+        columnType: 'UInt64',
+        suggestedType: 'UInt32',
+      },
     },
     {
       id: 'date_type_candidate_events_raw_event_date_str',
@@ -1716,6 +1823,14 @@ export function runSimulationScan(): AnalysisReport {
       impact: "String representation prevents binary date-range partition pruning and consumes unnecessary columnar bytes.",
       recommendation_sql_or_text: `ALTER TABLE events_raw MODIFY COLUMN event_date_str Date;`,
       is_sql_recommendation: true,
+      metrics: {
+        columnCompressedBytes: 92 * 1024 * 1024,
+        columnUncompressedBytes: 285 * 1024 * 1024,
+        isNameOnlyCandidate: false,
+        columnName: 'event_date_str',
+        columnType: 'String',
+        suggestedType: 'Date',
+      },
     },
     {
       id: 'healthy_compression_metrics',
@@ -1746,6 +1861,9 @@ export function runSimulationScan(): AnalysisReport {
       impact: 'Data is lost entirely upon ClickHouse server restart. Memory tables do not support secondary indexes or column compression.',
       recommendation_sql_or_text: `-- Migrate to MergeTree or EmbeddedRocksDB if key-value lookup is required:\nCREATE TABLE session_cache_mt (\n    session_id UUID,\n    user_id UInt64,\n    last_active DateTime\n)\nENGINE = MergeTree()\nORDER BY session_id;`,
       is_sql_recommendation: true,
+      metrics: {
+        ramBytes: 1.8 * 1024 * 1024 * 1024,
+      },
     },
     {
       id: 'engine_healthy_events_raw',
@@ -1792,6 +1910,14 @@ export function runSimulationScan(): AnalysisReport {
       impact: 'Lack of skip index or ordering prefix forces full table decompression across all threads, burning ~4.8 TB/day in unindexed scans.',
       recommendation_sql_or_text: `-- Check granule pruning with EXPLAIN:\nEXPLAIN indexes = 1\nSELECT event_type, count() FROM events_raw WHERE customer_uuid = 'e91b...' GROUP BY event_type;`,
       is_sql_recommendation: true,
+      metrics: {
+        dailyExecutions: 847,
+        queryDurationMs: 8200,
+        dailyScannedBytes: 4.8 * 1024 * 1024 * 1024 * 1024,
+        queryReadBytes: 2.4 * 1024 * 1024 * 1024,
+        queryReadRows: 18450000,
+        queryAmplificationRatio: 342000,
+      },
     },
     {
       id: 'query_mv_candidate',
@@ -1805,6 +1931,11 @@ export function runSimulationScan(): AnalysisReport {
       impact: 'Redundant real-time aggregation increases server load and increases P99 latency for dashboard users.',
       recommendation_sql_or_text: `-- Pre-aggregate with a Materialized View using SummingMergeTree:\nCREATE MATERIALIZED VIEW mv_hourly_events\nENGINE = SummingMergeTree()\nORDER BY (event_date, event_hour, event_type)\nAS SELECT toDate(event_time) AS event_date, toHour(event_time) AS event_hour, event_type, count() AS total_count\nFROM events_raw GROUP BY event_date, event_hour, event_type;`,
       is_sql_recommendation: true,
+      metrics: {
+        cpuFraction: 0.18,
+        queryDurationMs: 14200,
+        ramBytes: 4.2 * 1024 * 1024 * 1024,
+      },
     },
 
     // 8. Replication & Distributed Health
