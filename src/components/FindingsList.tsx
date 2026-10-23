@@ -18,6 +18,7 @@ import {
   DollarSign,
   Calculator,
   TrendingDown,
+  FileCheck2,
 } from 'lucide-react';
 import { FindingCostDetailModal } from './FindingCostDetailModal.js';
 
@@ -30,6 +31,7 @@ interface FindingsListProps {
   isAiGenerated?: boolean;
   narrativeIdentity?: string;
   initialSavingsOnly?: boolean;
+  onStartVerification?: (finding: CheckFinding) => void;
 }
 
 export const FindingsList: React.FC<FindingsListProps> = ({
@@ -41,6 +43,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({
   isAiGenerated,
   narrativeIdentity,
   initialSavingsOnly,
+  onStartVerification,
 }) => {
   const [severityFilter, setSeverityFilter] = useState<'all' | CheckSeverity>('all');
 
@@ -477,14 +480,27 @@ export const FindingsList: React.FC<FindingsListProps> = ({
                       )}
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => setCostDetailFinding(f)}
-                      className="self-start sm:self-auto px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm shrink-0"
-                    >
-                      <Calculator className="w-3.5 h-3.5" />
-                      <span>View Calculation</span>
-                    </button>
+                    <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setCostDetailFinding(f)}
+                        className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                      >
+                        <Calculator className="w-3.5 h-3.5" />
+                        <span>View Calculation</span>
+                      </button>
+
+                      {onStartVerification && (
+                        <button
+                          type="button"
+                          onClick={() => onStartVerification(f)}
+                          className="px-3 py-1.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/35 border border-rose-500/40 text-rose-300 hover:text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                        >
+                          <FileCheck2 className="w-3.5 h-3.5 text-rose-400" />
+                          <span>Start Verification</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -575,6 +591,20 @@ export const FindingsList: React.FC<FindingsListProps> = ({
                         {f.recommendation_sql_or_text}
                       </p>
                     )}
+                  </div>
+                )}
+
+                {/* Finding Action Bar: Start Verification for non-cost findings */}
+                {onStartVerification && (!f.cost_impact || f.cost_impact.estimatedMonthlySavings <= 0) && (
+                  <div className="pt-2 flex items-center justify-end border-t border-zinc-800/60">
+                    <button
+                      type="button"
+                      onClick={() => onStartVerification(f)}
+                      className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700 text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                    >
+                      <FileCheck2 className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Start Verification</span>
+                    </button>
                   </div>
                 )}
               </div>

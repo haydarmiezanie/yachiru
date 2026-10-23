@@ -5,6 +5,7 @@ export type CheckCategory =
   | 'primary_key'
   | 'partitioning'
   | 'compression'
+  | 'schema_type'
   | 'table_engine'
   | 'skip_indices'
   | 'query_performance'
@@ -332,6 +333,149 @@ export function getModelDisplayName(modelId?: string): string {
   if (matched) return matched.name;
 
   return modelId;
+}
+
+// ---------------------------------------------------------------------------
+// Before / After Verification Data Models
+// ---------------------------------------------------------------------------
+
+export type VerificationStatus =
+  | 'pending_baseline'
+  | 'baseline_captured'
+  | 'remediation_in_progress'
+  | 'awaiting_verification'
+  | 'verified'
+  | 'partially_verified'
+  | 'not_improved'
+  | 'regression_detected'
+  | 'inconclusive'
+  | 'cancelled';
+
+export type MetricResultStatus =
+  | 'improved'
+  | 'unchanged'
+  | 'regressed'
+  | 'not_comparable'
+  | 'insufficient_data';
+
+export type TargetOutcomeStatus =
+  | 'target_achieved'
+  | 'within_expected_range'
+  | 'below_expected_improvement'
+  | 'no_measurable_improvement'
+  | 'regression_detected'
+  | 'inconclusive'
+  | 'no_target_set';
+
+export interface MetricComparisonItem {
+  metricKey: string;
+  label: string;
+  unit: string;
+  beforeValue: number | null;
+  afterValue: number | null;
+  absoluteChange: number | null;
+  percentageChange: number | null;
+  higherIsBetter: boolean;
+  status: MetricResultStatus;
+  formattedBefore: string;
+  formattedAfter: string;
+  formattedChange: string;
+  caveat?: string;
+}
+
+export interface VerificationComparability {
+  isComparable: boolean;
+  confidence: 'high' | 'medium' | 'low';
+  confidenceReasons: string[];
+  confoundingFactors: string[];
+  caveats: string[];
+}
+
+export interface ExpectedImpactRange {
+  metricKey: string;
+  minPercentage?: number;
+  maxPercentage?: number;
+  description: string;
+  targetAchievedStatus?: TargetOutcomeStatus;
+}
+
+export interface VerificationChecklistItem {
+  id: string;
+  label: string;
+  completed: boolean;
+  completedAt?: string;
+}
+
+export interface VerificationSession {
+  id: string;
+  workspaceId: string;
+  targetHost: string;
+  targetDatabase: string;
+  targetTable?: string;
+  targetColumn?: string;
+  findingId: string;
+  findingTitle: string;
+  findingCategory: CheckCategory;
+  findingSeverity: CheckSeverity;
+  recommendationSqlOrText: string;
+  isSqlRecommendation: boolean;
+  riskLevel: 'low' | 'medium' | 'high';
+  rollbackGuidance?: string;
+
+  baselineScanId: string;
+  baselineCapturedAt: string;
+  baselineMetrics: Record<string, number | string | null | undefined>;
+  baselineTableMeta?: TableMetadata;
+
+  afterScanId?: string;
+  verifiedAt?: string;
+  afterMetrics?: Record<string, number | string | null | undefined>;
+  afterTableMeta?: TableMetadata;
+
+  status: VerificationStatus;
+  metricComparisons: MetricComparisonItem[];
+  comparability: VerificationComparability;
+  expectedImpact?: ExpectedImpactRange;
+  measuredImpactSummary?: {
+    storageReductionBytes?: number;
+    storageReductionPercentage?: number;
+    queryDurationReductionMs?: number;
+    queryDurationReductionPercentage?: number;
+    summaryText: string;
+    overallOutcome: 'verified' | 'partially_verified' | 'not_improved' | 'regression_detected' | 'inconclusive' | 'finding_resolved';
+    findingResolved?: boolean;
+  };
+  financialImpact?: {
+    estimatedMonthlySavings: number;
+    pricingModelApplied: {
+      storagePricePerGBMonth: number;
+      computePricePerCPUHour: number;
+      queryCostPerTBScanned: number;
+    };
+    caveat: string;
+  };
+  checklist: VerificationChecklistItem[];
+  createdAt: string;
+  updatedAt: string;
+  notes?: string;
+}
+
+export interface VerificationListResponse {
+  success: boolean;
+  sessions: VerificationSession[];
+  summary: {
+    totalSessions: number;
+    verifiedCount: number;
+    partiallyVerifiedCount: number;
+    inProgressCount: number;
+    inconclusiveCount: number;
+    regressedCount: number;
+    notImprovedCount: number;
+    totalConfirmedStorageReductionBytes: number;
+    avgQueryLatencyReductionPct: number | null;
+    totalVerifiedMonthlySavings: number;
+  };
+  error?: string;
 }
 
 export type {

@@ -297,6 +297,7 @@ export function calculateFindingCostImpact(
 
     // Determine column COMPRESSED size only - storage is billed on compressed bytes!
     let colCompressedBytes: number | null = null;
+    let usedRegexFallback = false;
     if (finding.metrics?.columnCompressedBytes && finding.metrics.columnCompressedBytes > 0) {
       colCompressedBytes = finding.metrics.columnCompressedBytes;
     } else {
@@ -304,6 +305,7 @@ export function calculateFindingCostImpact(
       const compMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|PB)\s*compressed/i);
       if (compMatch) {
         colCompressedBytes = parseBytesFromText(`${compMatch[1]} ${compMatch[2]}`);
+        usedRegexFallback = true;
       }
     }
 
@@ -382,12 +384,14 @@ export function calculateFindingCostImpact(
           bytesFormatted: formatBytes(reductionBytes),
           percentage: reductionPercentage,
         },
-        confidence: isNameOnly ? 'medium' : (cardinality && cardinality <= 10000 ? 'medium' : 'low'),
-        confidenceReason: isNameOnly
-          ? 'Candidate identified from column name convention only; cardinality was not inspected. If verified distinct count is below ~10,000, LowCardinality dictionary indexing typically yields 20%–70% compressed on-disk reduction.'
-          : (cardinality
-            ? `Column distinct count is ${cardinality.toLocaleString()} values. Replacing repeated strings with dictionary indices typically yields 20%–70% compressed on-disk reduction depending on string length and compression codec.`
-            : 'LowCardinality replaces repeating String values with dictionary keys, yielding 20%–70% compressed on-disk reduction.'),
+        confidence: usedRegexFallback ? 'low' : (isNameOnly ? 'medium' : (cardinality && cardinality <= 10000 ? 'medium' : 'low')),
+        confidenceReason: usedRegexFallback
+          ? 'Column compressed footprint was parsed from evidence text regex fallback; confidence capped at low.'
+          : (isNameOnly
+            ? 'Candidate identified from column name convention only; cardinality was not inspected. If verified distinct count is below ~10,000, LowCardinality dictionary indexing typically yields 20%–70% compressed on-disk reduction.'
+            : (cardinality
+              ? `Column distinct count is ${cardinality.toLocaleString()} values. Replacing repeated strings with dictionary indices typically yields 20%–70% compressed on-disk reduction depending on string length and compression codec.`
+              : 'LowCardinality replaces repeating String values with dictionary keys, yielding 20%–70% compressed on-disk reduction.')),
         assumptions: [
           `Current column compressed footprint: ${formatBytes(colCompressedBytes)}${cardinality ? ` (Cardinality: ${cardinality})` : ''}.`,
           isNameOnly ? 'Assumed candidate based on column name convention; cardinality was not inspected.' : 'LowCardinality replaces repeated strings with dictionary indices.',
@@ -595,16 +599,27 @@ export function calculateFindingCostImpact(
   if (finding.category === 'compression' || finding.id.includes('compression') || finding.id.includes('low_compression')) {
     let uncompressedBytes: number | null = null;
     let compressedBytes: number | null = null;
+    let usedRegexFallback = false;
 
-    const uncompMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*uncompressed/i);
-    const compMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*compressed/i);
-
-    if (uncompMatch && compMatch) {
-      uncompressedBytes = parseBytesFromText(`${uncompMatch[1]} ${uncompMatch[2]}`);
-      compressedBytes = parseBytesFromText(`${compMatch[1]} ${compMatch[2]}`);
+    if (
+      finding.metrics?.columnCompressedBytes &&
+      finding.metrics?.columnUncompressedBytes &&
+      finding.metrics.columnCompressedBytes > 0 &&
+      finding.metrics.columnUncompressedBytes > 0
+    ) {
+      compressedBytes = finding.metrics.columnCompressedBytes;
+      uncompressedBytes = finding.metrics.columnUncompressedBytes;
     } else if (tableMeta && tableMeta.total_bytes_uncompressed > 0 && tableMeta.total_bytes_compressed > 0) {
       uncompressedBytes = tableMeta.total_bytes_uncompressed;
       compressedBytes = tableMeta.total_bytes_compressed;
+    } else {
+      const uncompMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*uncompressed/i);
+      const compMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*compressed/i);
+      if (uncompMatch && compMatch) {
+        uncompressedBytes = parseBytesFromText(`${uncompMatch[1]} ${uncompMatch[2]}`);
+        compressedBytes = parseBytesFromText(`${compMatch[1]} ${compMatch[2]}`);
+        usedRegexFallback = true;
+      }
     }
 
     if (uncompressedBytes && compressedBytes && compressedBytes > 0 && uncompressedBytes >= compressedBytes) {
@@ -654,8 +669,10 @@ export function calculateFindingCostImpact(
             bytesFormatted: formatBytes(potentialReductionBytes),
             percentage: savingsPct,
           },
-          confidence: 'medium',
-          confidenceReason: `Observed current uncompressed (${formatBytes(uncompressedBytes)}) and compressed (${formatBytes(compressedBytes)}) sizes are directly measured. Target compression ratio (~${targetRatio.toFixed(1)}x) is derived from ClickHouse ZSTD columnar benchmarks.`,
+          confidence: usedRegexFallback ? 'low' : 'medium',
+          confidenceReason: usedRegexFallback
+            ? 'Column compression metrics were parsed from evidence text regex fallback; confidence capped at low.'
+            : `Observed current uncompressed (${formatBytes(uncompressedBytes)}) and compressed (${formatBytes(compressedBytes)}) sizes are directly measured. Target compression ratio (~${targetRatio.toFixed(1)}x) is derived from ClickHouse ZSTD columnar benchmarks.`,
           assumptions: [
             `Current storage: ${formatBytes(compressedBytes)} (observed compression ratio: ${currentRatio.toFixed(2)}x).`,
             `Expected compression ratio with ZSTD(3): ~${targetRatio.toFixed(1)}x (range: ${minTargetRatio.toFixed(1)}x–${maxTargetRatio.toFixed(1)}x).`,
@@ -721,8 +738,20 @@ export function calculateFindingCostImpact(
   // 6. MEMORY ENGINE MISUSE (e.g. session_cache in RAM)
   // =========================================================================
   if (finding.category === 'table_engine' && /Memory/i.test(String(finding.metric_value)) && /RAM/i.test(finding.evidence)) {
-    const ramMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(MB|GB)\s*RAM/i);
-    const ramBytes = ramMatch ? parseBytesFromText(`${ramMatch[1]} ${ramMatch[2]}`) : (tableMeta ? tableMeta.total_bytes_uncompressed : null);
+    let ramBytes: number | null = null;
+    let usedRegexFallback = false;
+
+    if (finding.metrics?.ramBytes && finding.metrics.ramBytes > 0) {
+      ramBytes = finding.metrics.ramBytes;
+    } else if (tableMeta && tableMeta.total_bytes_uncompressed > 0) {
+      ramBytes = tableMeta.total_bytes_uncompressed;
+    } else {
+      const ramMatch = finding.evidence.match(/([\d,]+(?:\.\d+)?)\s*(MB|GB)\s*RAM/i);
+      if (ramMatch) {
+        ramBytes = parseBytesFromText(`${ramMatch[1]} ${ramMatch[2]}`);
+        usedRegexFallback = true;
+      }
+    }
 
     if (ramBytes && ramBytes > 50 * 1024 * 1024) {
       const ramGB = ramBytes / (1024 * 1024 * 1024);
@@ -744,8 +773,10 @@ export function calculateFindingCostImpact(
           bytesFormatted: `${ramGB.toFixed(1)} GB RAM freed`,
           percentage: 85,
         },
-        confidence: 'high',
-        confidenceReason: 'Memory table RAM allocation is directly measured. Freeing RAM directly reduces host sizing tier requirements.',
+        confidence: usedRegexFallback ? 'low' : 'medium',
+        confidenceReason: usedRegexFallback
+          ? 'Memory table RAM footprint was extracted via text pattern fallback; confidence capped at low.'
+          : 'Memory table RAM allocation is directly measured. Freeing RAM directly reduces host sizing tier requirements.',
         assumptions: [
           `RAM consumed: ${ramGB.toFixed(2)} GB uncompressed in ClickHouse memory.`,
           `Host RAM pricing: $${computePricePerGBRAM.toFixed(3)} / GB-hour ($${(computePricePerGBRAM * 730).toFixed(2)}/GB-month).`,
@@ -775,6 +806,7 @@ export function calculateFindingCostImpact(
     let executionsPerDay: number | null = finding.metrics?.dailyExecutions ?? null;
     let avgDurationSec: number | null = finding.metrics?.queryDurationMs ? finding.metrics.queryDurationMs / 1000 : null;
     let perQueryBytes: number | null = finding.metrics?.queryReadBytes ?? null;
+    let usedRegexFallback = false;
 
     if (finding.metrics?.dailyScannedBytes && finding.metrics.dailyScannedBytes > 0) {
       dailyTBRead = finding.metrics.dailyScannedBytes / (1024 * 1024 * 1024 * 1024);
@@ -787,17 +819,23 @@ export function calculateFindingCostImpact(
 
     if (!executionsPerDay && execCountMatch) {
       executionsPerDay = parseInt(execCountMatch[1].replace(/,/g, ''), 10);
+      usedRegexFallback = true;
     }
     if (!avgDurationSec && durationMatch) {
       avgDurationSec = parseFloat(durationMatch[1]);
+      usedRegexFallback = true;
     }
     if (!perQueryBytes && readPerQueryMatch) {
       perQueryBytes = parseBytesFromText(`${readPerQueryMatch[1]} ${readPerQueryMatch[2]}`);
+      usedRegexFallback = true;
     }
 
     if (!dailyTBRead && dailyWorkloadMatch) {
       const bytes = parseBytesFromText(`${dailyWorkloadMatch[1]} ${dailyWorkloadMatch[2]}`);
-      if (bytes) dailyTBRead = bytes / (1024 * 1024 * 1024 * 1024);
+      if (bytes) {
+        dailyTBRead = bytes / (1024 * 1024 * 1024 * 1024);
+        usedRegexFallback = true;
+      }
     } else if (!dailyTBRead && perQueryBytes && executionsPerDay) {
       // ONLY compute dailyTBRead if executionsPerDay is genuinely known! Never invent 500!
       dailyTBRead = (perQueryBytes * executionsPerDay) / (1024 * 1024 * 1024 * 1024);
@@ -863,8 +901,10 @@ export function calculateFindingCostImpact(
           queryBytesScannedFormatted: `${dailyTBReduced.toFixed(2)} TB/day`,
           percentage: reductionPercentage,
         },
-        confidence: 'medium',
-        confidenceReason: `Read amplification and scanned volume (${dailyTBRead.toFixed(2)} TB/day) are derived from query_log metrics with ${executionsPerDay ? `${executionsPerDay.toLocaleString()} daily executions` : 'measured workload'}.`,
+        confidence: usedRegexFallback ? 'low' : 'medium',
+        confidenceReason: usedRegexFallback
+          ? 'Query scan volume was extracted via evidence regex fallback; confidence capped at low.'
+          : `Read amplification and scanned volume (${dailyTBRead.toFixed(2)} TB/day) are derived from query_log metrics with ${executionsPerDay ? `${executionsPerDay.toLocaleString()} daily executions` : 'measured workload'}.`,
         assumptions: [
           `Current workload: ${executionsPerDay ? `~${executionsPerDay.toLocaleString()} executions/day` : 'Measured workload'}${avgDurationSec ? `, ${avgDurationSec.toFixed(1)}s avg duration` : ''}.`,
           `Scanned data volume: ${dailyTBRead.toFixed(2)} TB read/day.`,

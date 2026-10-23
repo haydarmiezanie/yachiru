@@ -2169,3 +2169,115 @@ export function runSimulationScan(): AnalysisReport {
     cost_summary: calculateReportCostSummary(findings, tables, DEFAULT_COST_MODEL),
   };
 }
+
+/**
+ * Executes a targeted, read-only query against system.columns for a single column
+ * to measure post-remediation storage and type changes without reading user table data.
+ */
+export async function queryTargetColumnTelemetry(
+  config: ConnectionConfig,
+  database: string,
+  table: string,
+  column: string
+): Promise<{
+  name: string;
+  type: string;
+  data_compressed_bytes: number;
+  data_uncompressed_bytes: number;
+  compression_codec?: string;
+} | null> {
+  if (config.isDemo) {
+    if (table.toLowerCase() === 'events_raw' && column.toLowerCase() === 'payload_json') {
+      return {
+        name: 'payload_json',
+        type: 'String',
+        data_compressed_bytes: 307 * 1024 * 1024 * 1024,
+        data_uncompressed_bytes: 505 * 1024 * 1024 * 1024,
+        compression_codec: 'CODEC(ZSTD(6))',
+      };
+    }
+    return null;
+  }
+
+  let tunnel: OpenTunnelResult | undefined;
+  let client: ClickHouseClient | undefined;
+
+  try {
+    const protocol = config.protocol || 'http';
+    let host = config.host?.trim() || 'localhost';
+    host = host.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '');
+    const port = config.port || (protocol === 'https' ? 8443 : 8123);
+    const username = config.username || 'default';
+    const password = config.password || '';
+
+    if (config.useSshTunnel) {
+      tunnel = await openSshTunnel({
+        sshHost: config.sshHost!.trim(),
+        sshPort: Number(config.sshPort) || 22,
+        sshUsername: config.sshUsername!.trim(),
+        sshAuthMethod: config.sshAuthMethod || 'password',
+        sshPassword: config.sshPassword,
+        sshPrivateKey: config.sshPrivateKey,
+        sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+        targetHost: host,
+        targetPort: port,
+      });
+    }
+
+    const clientHost = tunnel ? tunnel.localHost : host;
+    const clientPort = tunnel ? tunnel.localPort : port;
+
+    client = createClient({
+      url: `${protocol}://${clientHost}:${clientPort}`,
+      username,
+      password,
+      database,
+      clickhouse_settings: {
+        max_execution_time: 10,
+        readonly: '2',
+      },
+    });
+
+    const colQuery = `
+      SELECT
+        name,
+        type,
+        data_compressed_bytes,
+        data_uncompressed_bytes,
+        compression_codec
+      FROM system.columns
+      WHERE database = '${database.replace(/'/g, "\\'")}'
+        AND table = '${table.replace(/'/g, "\\'")}'
+        AND name = '${column.replace(/'/g, "\\'")}'
+      LIMIT 1
+    `;
+    assertReadOnlySql(colQuery);
+
+    const colRes = await client.query({
+      query: colQuery,
+      format: 'JSONEachRow',
+    });
+    const rows = (await colRes.json()) as Array<{
+      name: string;
+      type: string;
+      data_compressed_bytes: string | number;
+      data_uncompressed_bytes: string | number;
+      compression_codec?: string;
+    }>;
+
+    if (rows && rows.length > 0) {
+      const row = rows[0];
+      return {
+        name: row.name,
+        type: row.type,
+        data_compressed_bytes: Number(row.data_compressed_bytes) || 0,
+        data_uncompressed_bytes: Number(row.data_uncompressed_bytes) || 0,
+        compression_codec: row.compression_codec,
+      };
+    }
+    return null;
+  } finally {
+    await client?.close();
+    await tunnel?.close();
+  }
+}

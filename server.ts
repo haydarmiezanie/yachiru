@@ -3,9 +3,24 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { ClickHouseClient } from '@clickhouse/client';
-import { runLiveScan, runSimulationScan } from './server/analyzer.js';
+import { runLiveScan, runSimulationScan, queryTargetColumnTelemetry } from './server/analyzer.js';
 import { openSshTunnel, OpenTunnelResult } from './server/sshTunnel.js';
 import { recordScanHistory, fetchScanHistory } from './server/history.js';
+import {
+  listVerifications,
+  getVerification,
+  createVerification,
+  patchVerification,
+  applyVerificationResult,
+  deleteVerification,
+  getDataDir,
+} from './server/verificationStore.js';
+import {
+  compareVerificationSession,
+  extractAfterMetricsForSession,
+} from './src/utils/verificationEngine.js';
+import { DEFAULT_COST_MODEL } from './src/utils/costModel.js';
+import { buildSummaryResponse } from './src/utils/verificationClient.js';
 import {
   generateNarrativeForProvider,
   generateDeterministicNarrative,
@@ -13,7 +28,7 @@ import {
   openaiSystemKeyState,
   claudeSystemKeyState,
 } from './server/narrator.js';
-import { ConnectionConfig, AiProvider } from './src/types.js';
+import { ConnectionConfig, AiProvider, AnalysisReport } from './src/types.js';
 
 export function classifyConnectionError(errorMsg: string): { hint: string } {
   // Check SSH tunnel specific errors first
@@ -503,6 +518,200 @@ async function startServer() {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Before / After Verification Endpoints
+  // -------------------------------------------------------------------------
+
+  // List all verifications
+  app.get('/api/verifications', requireApiKey, (req, res) => {
+    try {
+      const host = typeof req.query.host === 'string' ? req.query.host : undefined;
+      const database = typeof req.query.database === 'string' ? req.query.database : undefined;
+      const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+
+      const sessions = listVerifications({ host, database, workspaceId });
+      const response = buildSummaryResponse(sessions);
+      res.json(response);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to list verification sessions';
+      res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  // Create new verification session with baseline (mass-assignment protected & rate limited)
+  app.post('/api/verifications', analyzeLimiter, requireApiKey, (req, res) => {
+    try {
+      const payloadStr = JSON.stringify(req.body);
+      if (payloadStr.length > 65536) {
+        return res.status(400).json({ error: 'Payload exceeds maximum allowed size of 64KB' });
+      }
+
+      const created = createVerification(req.body);
+      res.status(201).json(created);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to create verification session';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  // Get single verification session
+  app.get('/api/verifications/:id', requireApiKey, (req, res) => {
+    try {
+      const session = getVerification(req.params.id);
+      if (!session) {
+        return res.status(404).json({ error: `Verification session '${req.params.id}' not found` });
+      }
+      res.json(session);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to fetch verification session';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // Update session (checklist, status transition, notes) - client mass assignment protected
+  app.patch('/api/verifications/:id', analyzeLimiter, requireApiKey, (req, res) => {
+    try {
+      const payloadStr = JSON.stringify(req.body);
+      if (payloadStr.length > 65536) {
+        return res.status(400).json({ error: 'Payload exceeds maximum allowed size of 64KB' });
+      }
+
+      const updated = patchVerification(req.params.id, req.body);
+      res.json(updated);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to update verification session';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  // Re-scan and verify session: Server executes the scan itself using validated connection config
+  app.post('/api/verifications/:id/verify', analyzeLimiter, requireApiKey, async (req, res) => {
+    try {
+      const session = getVerification(req.params.id);
+      if (!session) {
+        return res.status(404).json({ error: `Verification session '${req.params.id}' not found` });
+      }
+
+      // Security: Client-supplied afterReport is strictly rejected to prevent forged verdicts
+      if (req.body.afterReport !== undefined) {
+        return res.status(400).json({
+          error: 'Client-supplied afterReport is rejected. Verification scans must be run by the server via connectionConfig.',
+        });
+      }
+
+      const connectionConfig: ConnectionConfig = req.body.connectionConfig;
+      if (!connectionConfig) {
+        return res.status(400).json({ error: 'connectionConfig is required for verification.' });
+      }
+
+      const validation = validateConnectionConfig(connectionConfig);
+      if (validation.error) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      // Enforce target match (host and database must equal the session target)
+      const configHost = (connectionConfig.host || '').trim().toLowerCase();
+      const configDb = (connectionConfig.database || 'default').trim().toLowerCase();
+      const sessionHost = (session.targetHost || '').trim().toLowerCase();
+      const sessionDb = (session.targetDatabase || 'default').trim().toLowerCase();
+
+      if (!connectionConfig.isDemo && (configHost !== sessionHost || configDb !== sessionDb)) {
+        return res.status(409).json({
+          error: `Connection target (${configHost} / ${configDb}) does not match verification session target (${sessionHost} / ${sessionDb}).`,
+        });
+      }
+
+      // Run fresh verification scan on the server
+      let afterReport: AnalysisReport;
+      try {
+        if (connectionConfig.isDemo) {
+          afterReport = runSimulationScan();
+        } else {
+          afterReport = await runLiveScan(connectionConfig);
+        }
+      } catch (scanErr: unknown) {
+        const errMsg = scanErr instanceof Error ? scanErr.message : 'Unknown error during scan';
+        console.warn('Verification scan failed:', errMsg);
+        const { hint } = classifyConnectionError(errMsg);
+        return res.status(400).json({ error: errMsg, hint });
+      }
+
+      // If targeted finding disappeared, query system.columns for post-remediation column telemetry
+      let columnTelemetry: any = null;
+      if (session.targetTable && session.targetColumn) {
+        const hasMatchingFinding = afterReport.findings.some(
+          (f) =>
+            f.id === session.findingId ||
+            (f.category === session.findingCategory &&
+              f.table?.toLowerCase() === session.targetTable?.toLowerCase() &&
+              f.metrics?.columnName?.toLowerCase() === session.targetColumn?.toLowerCase())
+        );
+
+        if (!hasMatchingFinding) {
+          try {
+            columnTelemetry = await queryTargetColumnTelemetry(
+              connectionConfig,
+              session.targetDatabase,
+              session.targetTable,
+              session.targetColumn
+            );
+          } catch (colErr) {
+            console.warn('Failed to query targeted column telemetry:', colErr);
+          }
+        }
+      }
+
+      const { afterMetrics, afterTableMeta, findingResolved, categoryCheckDidNotRun, tableMissing } =
+        extractAfterMetricsForSession(session, afterReport, columnTelemetry);
+
+      const comparison = compareVerificationSession(
+        session,
+        afterReport.scan_id,
+        afterMetrics,
+        afterTableMeta,
+        DEFAULT_COST_MODEL,
+        { findingResolved, categoryCheckDidNotRun, tableMissing }
+      );
+
+      const updatedChecklist = session.checklist.map((item) => {
+        if (item.id === 'step_run_rescan') {
+          return { ...item, completed: true, completedAt: new Date().toISOString() };
+        }
+        return item;
+      });
+
+      const verified = applyVerificationResult(session.id, {
+        afterScanId: afterReport.scan_id,
+        verifiedAt: new Date().toISOString(),
+        afterMetrics,
+        afterTableMeta,
+        status: comparison.status,
+        metricComparisons: comparison.metricComparisons,
+        comparability: comparison.comparability,
+        expectedImpact: comparison.expectedImpact,
+        measuredImpactSummary: comparison.measuredImpactSummary,
+        financialImpact: comparison.financialImpact,
+        checklist: updatedChecklist,
+      });
+
+      res.json(verified);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to verify session';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // Delete verification session (rate limited)
+  app.delete('/api/verifications/:id', analyzeLimiter, requireApiKey, (req, res) => {
+    try {
+      const deleted = deleteVerification(req.params.id);
+      res.json({ success: deleted });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to delete verification session';
+      res.status(500).json({ error: msg });
+    }
+  });
+
   // Narrative generation on-demand for existing report
   app.post('/api/narrate', requireApiKey, async (req, res) => {
     const {
@@ -571,7 +780,14 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Yachiru] Server running at http://0.0.0.0:${PORT}`);
+    console.log(`[Yachiru] Verification store directory: ${getDataDir()}`);
+    if (!YACHIRU_API_KEY) {
+      console.warn(
+        '[Yachiru] WARNING: YACHIRU_API_KEY is not set. API authentication is disabled; API routes are open to unauthenticated callers. Set YACHIRU_API_KEY in production.'
+      );
+    }
   });
 }
 
 startServer();
+

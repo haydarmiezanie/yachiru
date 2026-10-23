@@ -237,8 +237,9 @@ All environment variables are declared in `.env.example`:
 | `OPENAI_API_KEY` | Optional | API key for OpenAI narrative synthesis. Used when OpenAI is selected and no UI key is provided. |
 | `CLAUDE_API_KEY` | Optional | API key for Anthropic Claude narrative synthesis. Used when Claude is selected and no UI key is provided. |
 | `APP_URL` | Optional | Public URL where Yachiru is hosted; used for OAuth callbacks, API links, and Cloud Run discovery. |
-| `YACHIRU_API_KEY` | Optional | When set, locks `/api/analyze`, `/api/narrate`, `/api/test-connection`, and `/api/system-key-reset` behind Bearer token authentication. Leave unset for open local use. |
+| `YACHIRU_API_KEY` | Optional | When set, locks `/api/analyze`, `/api/narrate`, `/api/test-connection`, `/api/verifications`, and `/api/system-key-reset` behind Bearer token authentication. If unset, a startup warning is logged; strongly recommended in production environments. |
 | `YACHIRU_RATE_LIMIT_PER_MINUTE` | Optional | Maximum allowed requests per minute for analysis and test-connection endpoints (default: `30`). |
+| `YACHIRU_DATA_DIR` | Optional | Filesystem directory path for storing before/after verification sessions (default: `./data`). Configured as a volume in Docker Compose. |
 
 ---
 

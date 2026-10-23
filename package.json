@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
     "generate-api-key": "node scripts/generate-api-key.cjs"
   },
   "dependencies": {

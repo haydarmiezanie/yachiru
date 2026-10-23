@@ -15,6 +15,7 @@ import {
   AlertOctagon,
   ListOrdered,
   ChevronRight,
+  Binary,
 } from 'lucide-react';
 
 interface CategoryGridProps {
@@ -28,6 +29,7 @@ const CATEGORY_ICONS: Record<CheckCategory, React.ElementType> = {
   primary_key: Key,
   partitioning: FolderTree,
   compression: FileArchive,
+  schema_type: Binary,
   table_engine: Cpu,
   skip_indices: Search,
   query_performance: Activity,

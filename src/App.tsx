@@ -14,6 +14,8 @@ import { AinarrativeCard } from './components/AinarrativeCard.js';
 import { FindingsList } from './components/FindingsList.js';
 import { TableDrilldown } from './components/TableDrilldown.js';
 import { TrendView } from './components/TrendView.js';
+import { VerificationDashboard } from './components/VerificationDashboard.js';
+import { VerificationDetailModal } from './components/VerificationDetailModal.js';
 import { ThresholdsModal } from './components/ThresholdsModal.js';
 import { ExportModal } from './components/ExportModal.js';
 import { FeedbackModal } from './components/FeedbackModal.js';
@@ -21,7 +23,9 @@ import { ClickHouseUserSetupModal } from './components/ClickHouseUserSetupModal.
 import { CostSavingsSummary } from './components/CostSavingsSummary.js';
 import { PricingSettingsModal } from './components/PricingSettingsModal.js';
 import { loadCostModel, calculateFindingCostImpact, calculateReportCostSummary } from './utils/costModel.js';
-import { AlertCircle, FileSearch, LayoutGrid, Table, History } from 'lucide-react';
+import { createVerificationSession } from './utils/verificationClient.js';
+import { CheckFinding, VerificationSession } from './types.js';
+import { AlertCircle, FileSearch, LayoutGrid, Table, History, FileCheck2 } from 'lucide-react';
 
 export default function App() {
   const [report, setReport] = useState<AnalysisReport | null>(null);
@@ -30,7 +34,9 @@ export default function App() {
   const [currentScanConfig, setCurrentScanConfig] = useState<ConnectionConfig | null>(null);
   const [error, setError] = useState<{ message: string; hint?: string } | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<CheckCategory | 'all'>('all');
-  const [activeViewTab, setActiveViewTab] = useState<'findings' | 'tables' | 'history'>('findings');
+  const [activeViewTab, setActiveViewTab] = useState<'findings' | 'tables' | 'verifications' | 'history'>('findings');
+  const [activeVerificationSession, setActiveVerificationSession] = useState<VerificationSession | null>(null);
+  const [isVerifyingScan, setIsVerifyingScan] = useState(false);
   const [savingsFilterActive, setSavingsFilterActive] = useState(false);
   const [isThresholdsOpen, setIsThresholdsOpen] = useState(false);
   const [isPricingOpen, setIsPricingOpen] = useState(false);
@@ -109,6 +115,58 @@ export default function App() {
       });
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleStartVerification = async (finding: CheckFinding) => {
+    if (!report) return;
+    try {
+      const session = await createVerificationSession({
+        finding,
+        report,
+        config: currentScanConfig,
+      });
+      setActiveVerificationSession(session);
+      setActiveViewTab('verifications');
+    } catch (err) {
+      console.warn('Failed to start verification session:', err);
+    }
+  };
+
+  const handleRunVerificationReScan = async (): Promise<AnalysisReport | null> => {
+    if (!currentScanConfig) return null;
+    setIsVerifyingScan(true);
+    try {
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: getAuthHeaders(currentScanConfig.yachiruApiKey),
+        body: JSON.stringify(currentScanConfig),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server responded with status ${response.status}`);
+      }
+
+      const reportData: AnalysisReport = await response.json();
+      const activeModel = loadCostModel();
+      const findingsWithCost = reportData.findings.map((f) => ({
+        ...f,
+        cost_impact: calculateFindingCostImpact(f, reportData.tables, activeModel),
+      }));
+      const costSummary = calculateReportCostSummary(findingsWithCost, reportData.tables, activeModel);
+      const updatedReport = {
+        ...reportData,
+        findings: findingsWithCost,
+        cost_summary: costSummary,
+      };
+      setReport(updatedReport);
+      return updatedReport;
+    } catch (err: unknown) {
+      console.error('Re-scan verification error:', err);
+      return null;
+    } finally {
+      setIsVerifyingScan(false);
     }
   };
 
@@ -331,6 +389,19 @@ export default function App() {
                 </button>
 
                 <button
+                  id="tab-verifications"
+                  onClick={() => setActiveViewTab('verifications')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+                    activeViewTab === 'verifications'
+                      ? 'bg-zinc-800 text-white shadow-sm border border-zinc-700'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <FileCheck2 className="w-4 h-4 text-emerald-400" />
+                  <span>Before / After Verification</span>
+                </button>
+
+                <button
                   id="tab-history"
                   onClick={() => setActiveViewTab('history')}
                   className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
@@ -361,6 +432,7 @@ export default function App() {
                 isAiGenerated={Boolean(report.ai_narrative?.isAiGenerated)}
                 narrativeIdentity={`${report.scan_id}_${report.ai_narrative?.isAiGenerated ? 'ai' : 'noai'}_${report.ai_narrative?.model || ''}_${report.ai_narrative?.executive_summary?.slice(0, 40) || ''}`}
                 initialSavingsOnly={savingsFilterActive}
+                onStartVerification={handleStartVerification}
               />
             )}
 
@@ -369,7 +441,17 @@ export default function App() {
               <TableDrilldown tables={report.tables} findings={report.findings} />
             )}
 
-            {/* Tab 3: Scan History & Trends */}
+            {/* Tab 3: Before / After Verification Engine */}
+            {activeViewTab === 'verifications' && (
+              <VerificationDashboard
+                report={report}
+                config={currentScanConfig}
+                onNavigateToFindings={() => setActiveViewTab('findings')}
+                onRunReScan={handleRunVerificationReScan}
+              />
+            )}
+
+            {/* Tab 4: Scan History & Trends */}
             {activeViewTab === 'history' && (
               <TrendView
                 report={report}
@@ -381,6 +463,27 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Verification Detail Modal if active session */}
+      {activeVerificationSession && (
+        <VerificationDetailModal
+          session={activeVerificationSession}
+          isOpen={Boolean(activeVerificationSession)}
+          onClose={() => setActiveVerificationSession(null)}
+          onSessionUpdated={(updated) => setActiveVerificationSession(updated)}
+          currentReport={report}
+          config={currentScanConfig}
+          onRunScanAndVerify={async (s) => {
+            const fresh = await handleRunVerificationReScan();
+            if (fresh) {
+              const { verifySessionWithScan } = await import('./utils/verificationClient.js');
+              const verified = await verifySessionWithScan(s, fresh);
+              setActiveVerificationSession(verified);
+            }
+          }}
+          isVerifyingScan={isVerifyingScan}
+        />
+      )}
 
       {/* Thresholds & Mechanics Modal */}
       <ThresholdsModal
