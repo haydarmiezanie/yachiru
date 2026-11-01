@@ -3,12 +3,64 @@ import { AnalysisReport, CategoryScore, CheckFinding, ConnectionConfig, TableMet
 import { openSshTunnel, OpenTunnelResult } from './sshTunnel.js';
 import { calculateFindingCostImpact, calculateReportCostSummary, DEFAULT_COST_MODEL } from '../src/utils/costModel.js';
 
+/**
+ * Safely strips single-quoted string literals, backtick identifiers, and SQL comments before
+ * inspecting SQL for forbidden mutating keywords. This prevents false positives
+ * when legitimate database/table names contain substring keywords (e.g. 'create-db',
+ * 'drop_logs', 'insert-stream') while strictly ensuring no actual DDL/DML statements
+ * can be smuggled outside string boundaries.
+ */
+export function stripLiteralsAndComments(sql: string): string {
+  return sql
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+    .replace(/--.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+/**
+ * Safely escapes any string for inclusion inside a ClickHouse single-quoted string literal ('...').
+ *
+ * Order of replacement is critical:
+ * 1. Backslashes ('\') MUST be replaced first with '\\' to prevent quote-escaping bypasses.
+ * 2. Single quotes ("'") are replaced with "\'".
+ * 3. Control characters (null byte, newline, carriage return, tab) are escaped.
+ */
+export function escapeSqlString(str: string): string {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\0/g, '\\0')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}
+
+/**
+ * Safely escapes and wraps an identifier (database name, table name, column name)
+ * in ClickHouse backticks (`...`).
+ */
+export function escapeSqlIdentifier(ident: string): string {
+  if (typeof ident !== 'string' || ident.length === 0) {
+    throw new Error('ClickHouse identifier cannot be empty');
+  }
+  if (ident.includes('\0')) {
+    throw new Error('ClickHouse identifier cannot contain null bytes');
+  }
+  const escaped = ident.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+  return `\`${escaped}\``;
+}
+
 // Hard safety validator: Ensure any query string is strictly a read-only SELECT
 export function assertReadOnlySql(sql: string): void {
   const trimmed = sql.trim();
   if (!/^SELECT\b/i.test(trimmed) && !/^SHOW\b/i.test(trimmed) && !/^DESCRIBE\b/i.test(trimmed)) {
     throw new Error(`SECURITY EXCEPTION: Only SELECT/SHOW statements are allowed. Attempted: ${sql.substring(0, 40)}...`);
   }
+
+  // Strip literals and comments before analyzing keywords to prevent false positives from names like 'create-db'
+  const codeOnly = stripLiteralsAndComments(trimmed);
 
   // Double-check for forbidden mutating commands
   const forbiddenPatterns = [
@@ -30,7 +82,7 @@ export function assertReadOnlySql(sql: string): void {
   ];
 
   for (const pattern of forbiddenPatterns) {
-    if (pattern.test(trimmed)) {
+    if (pattern.test(codeOnly)) {
       throw new Error(`SECURITY EXCEPTION: Mutating SQL keyword detected. Query blocked.`);
     }
   }
@@ -43,6 +95,181 @@ export function formatBytes(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i] || 'PB'}`;
+}
+
+/**
+ * Privacy & PII Sanitizer: Single-scan tokenizer that scrubs raw query literals,
+ * filter parameters, negative numbers, heredocs, array elements, and sensitive constants.
+ *
+ * Literals and heredocs are parsed before comments so closing quotes/delimiters are not eaten.
+ * Numeric literals (including negatives and function/array arguments) are redacted unless
+ * accompanied by diagnostic metric units (e.g. 'rows', 'GB', 'seconds').
+ */
+export function sanitizeQueryForPrivacy(sql: string): string {
+  if (!sql || typeof sql !== 'string') return '';
+
+  const output: string[] = [];
+  const len = sql.length;
+  let i = 0;
+
+  const isIdentifierChar = (c: string) => /[a-zA-Z0-9_]/.test(c);
+
+  while (i < len) {
+    const ch = sql[i];
+    const next = i + 1 < len ? sql[i + 1] : '';
+
+    // 1. Dollar-quoted heredoc ($$...$$ or $tag$...$tag$)
+    if (ch === '$') {
+      const matchTag = sql.slice(i).match(/^\$([a-zA-Z0-9_]*)\$/);
+      if (matchTag) {
+        const fullTag = matchTag[0];
+        const endTagIndex = sql.indexOf(fullTag, i + fullTag.length);
+        if (endTagIndex !== -1) {
+          output.push(`${fullTag}[REDACTED]${fullTag}`);
+          i = endTagIndex + fullTag.length;
+          continue;
+        } else {
+          output.push(`${fullTag}[REDACTED]${fullTag}`);
+          break;
+        }
+      }
+    }
+
+    // 2. Single-quoted string literal ('...') - Handles escapes (\' and '') and unterminated literals
+    if (ch === "'") {
+      let j = i + 1;
+      while (j < len) {
+        if (sql[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === "'") {
+          if (j + 1 < len && sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j++;
+          break;
+        }
+        j++;
+      }
+      output.push("'[REDACTED]'");
+      i = j;
+      continue;
+    }
+
+    // 3. Double-quoted string literal ("...") - Handles escapes and unterminated literals
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < len) {
+        if (sql[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === '"') {
+          if (j + 1 < len && sql[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j++;
+          break;
+        }
+        j++;
+      }
+      output.push('"[REDACTED]"');
+      i = j;
+      continue;
+    }
+
+    // 4. Single-line comment (-- or #)
+    if ((ch === '-' && next === '-') || ch === '#') {
+      const newlineIndex = sql.indexOf('\n', i);
+      if (newlineIndex === -1) {
+        break;
+      }
+      i = newlineIndex;
+      continue;
+    }
+
+    // 5. Multi-line comment (/* ... */)
+    if (ch === '/' && next === '*') {
+      const endComment = sql.indexOf('*/', i + 2);
+      if (endComment === -1) {
+        break;
+      }
+      i = endComment + 2;
+      continue;
+    }
+
+    // 6. Email address check
+    const emailMatch = sql.slice(i).match(/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/);
+    if (emailMatch && (i === 0 || !isIdentifierChar(sql[i - 1]))) {
+      output.push('[REDACTED_EMAIL]');
+      i += emailMatch[0].length;
+      continue;
+    }
+
+    // 7. UUID check (e.g. e91b1234-abcd-5678-ef01-23456789abcd)
+    const uuidSlice = sql.slice(i, i + 36);
+    if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/.test(uuidSlice) && (i === 0 || !isIdentifierChar(sql[i - 1]))) {
+      output.push('[REDACTED_UUID]');
+      i += 36;
+      continue;
+    }
+
+    // 8. IPv4 address check (e.g. 10.20.30.40)
+    const ipMatch = sql.slice(i).match(/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/);
+    if (ipMatch && (i === 0 || !isIdentifierChar(sql[i - 1]))) {
+      output.push('[REDACTED_IP]');
+      i += ipMatch[0].length;
+      continue;
+    }
+
+    // 9. Hex literal (0x123abc or 32+ hex characters)
+    if (ch === '0' && (next === 'x' || next === 'X') && (i === 0 || !isIdentifierChar(sql[i - 1]))) {
+      const hexMatch = sql.slice(i).match(/^0[xX][0-9a-fA-F]+/);
+      if (hexMatch) {
+        output.push('[REDACTED_HEX]');
+        i += hexMatch[0].length;
+        continue;
+      }
+    }
+    const longHexMatch = sql.slice(i).match(/^[0-9a-fA-F]{32,64}\b/);
+    if (longHexMatch && (i === 0 || !isIdentifierChar(sql[i - 1]))) {
+      output.push('[REDACTED_HASH]');
+      i += longHexMatch[0].length;
+      continue;
+    }
+
+    // 10. Numeric literals (positive, negative, decimal, in arrays [1, 2], function args (123), etc.)
+    const prevChar = i > 0 ? sql[i - 1] : ' ';
+    const isNegativeSign = ch === '-' && /[0-9]/.test(next);
+    const isDigitStart = /[0-9]/.test(ch);
+
+    if ((isDigitStart || isNegativeSign) && !isIdentifierChar(prevChar)) {
+      const numMatch = sql.slice(i).match(/^-?\d+(?:,\d{3})*(?:\.\d+)?(?:[eE][+-]?\d+)?\b/);
+      if (numMatch) {
+        const afterNum = sql.slice(i + numMatch[0].length).trimStart();
+        const isMetricUnit = /^(?:rows?|bytes?|b|kb|mb|gb|tb|pb|s|sec|seconds?|ms|mins?|minutes?|hours?|hrs?|h|days?|executions?(?:\/day)?|x|%|parts?)\b/i.test(afterNum);
+        if (isMetricUnit) {
+          output.push(numMatch[0]);
+        } else {
+          output.push('[NUM]');
+        }
+        i += numMatch[0].length;
+        continue;
+      }
+    }
+
+    // Default: copy verbatim
+    output.push(ch);
+    i++;
+  }
+
+  return output.join('')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n/g, '\n')
+    .trim();
 }
 
 /**
@@ -193,6 +420,8 @@ export async function runLiveScan(
         sshPassword: config.sshPassword,
         sshPrivateKey: config.sshPrivateKey,
         sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+        sshHostKeyFingerprint: config.sshHostKeyFingerprint?.trim(),
+        strictHostKeyChecking: config.strictHostKeyChecking,
         targetHost: host,
         targetPort: port,
       });
@@ -257,7 +486,7 @@ export async function runLiveScan(
         sorting_key,
         partition_key
       FROM system.tables
-      WHERE database = '${database.replace(/'/g, "\\'")}'
+      WHERE database = '${escapeSqlString(database)}'
         AND is_temporary = 0
       ORDER BY total_bytes DESC
       LIMIT 500
@@ -311,7 +540,9 @@ export async function runLiveScan(
 
     let queryLogAvailable = false;
     let queryStats: Array<{
-      query: string;
+      normalized_query?: string;
+      normalized_query_hash?: string;
+      tables?: string[];
       query_duration_ms: number;
       memory_usage: number;
       read_rows: number;
@@ -397,7 +628,7 @@ export async function runLiveScan(
             max(bytes_on_disk) AS max_part_size,
             avg(bytes_on_disk) AS avg_part_size
           FROM system.parts
-          WHERE database = '${database.replace(/'/g, "\\'")}'
+          WHERE database = '${escapeSqlString(database)}'
             AND active = 1
           GROUP BY table
         `;
@@ -421,7 +652,7 @@ export async function runLiveScan(
             data_uncompressed_bytes,
             compression_codec
           FROM system.columns
-          WHERE database = '${database.replace(/'/g, "\\'")}'
+          WHERE database = '${escapeSqlString(database)}'
           ORDER BY data_uncompressed_bytes DESC
           LIMIT 200
         `;
@@ -444,7 +675,7 @@ export async function runLiveScan(
             expr,
             granularity
           FROM system.data_skipping_indices
-          WHERE database = '${database.replace(/'/g, "\\'")}'
+          WHERE database = '${escapeSqlString(database)}'
         `;
         assertReadOnlySql(skipIdxQuery);
         const skipRes = await client.query({
@@ -455,11 +686,13 @@ export async function runLiveScan(
         return (await skipRes.json()) as typeof skipData;
       })(),
 
-      // system.query_log
+      // system.query_log (never selects raw query text; selects normalizeQuery, normalized_query_hash, tables)
       (async () => {
-        const qlogQuery = `
+        const qlogQueryWithNormalize = `
           SELECT
-            query,
+            normalizeQuery(query) AS normalized_query,
+            normalized_query_hash,
+            tables,
             query_duration_ms,
             memory_usage,
             read_rows,
@@ -475,13 +708,42 @@ export async function runLiveScan(
           ORDER BY query_duration_ms DESC
           LIMIT 40
         `;
-        assertReadOnlySql(qlogQuery);
-        const qRes = await client.query({
-          query: qlogQuery,
-          format: 'JSONEachRow',
-          clickhouse_settings: { max_execution_time: 6 },
-        });
-        return (await qRes.json()) as typeof queryStats;
+        assertReadOnlySql(qlogQueryWithNormalize);
+        try {
+          const qRes = await client.query({
+            query: qlogQueryWithNormalize,
+            format: 'JSONEachRow',
+            clickhouse_settings: { max_execution_time: 6 },
+          });
+          return (await qRes.json()) as typeof queryStats;
+        } catch {
+          // If normalizeQuery is not supported on this ClickHouse version, fallback to metrics without query text
+          const qlogQueryFallback = `
+            SELECT
+              tables,
+              query_duration_ms,
+              memory_usage,
+              read_rows,
+              read_bytes,
+              result_rows,
+              round(read_rows / greatest(result_rows, 1), 1) AS ratio
+            FROM system.query_log
+            WHERE type = 'QueryFinish'
+              AND event_date >= today() - 1
+              AND query NOT LIKE '%system.%'
+              AND query NOT LIKE '%SHOW%'
+              AND query NOT LIKE '%DESCRIBE%'
+            ORDER BY query_duration_ms DESC
+            LIMIT 40
+          `;
+          assertReadOnlySql(qlogQueryFallback);
+          const qFallbackRes = await client.query({
+            query: qlogQueryFallback,
+            format: 'JSONEachRow',
+            clickhouse_settings: { max_execution_time: 6 },
+          });
+          return (await qFallbackRes.json()) as typeof queryStats;
+        }
       })(),
 
       // system.replicas
@@ -493,7 +755,7 @@ export async function runLiveScan(
             absolute_delay,
             queue_size
           FROM system.replicas
-          WHERE database = '${database.replace(/'/g, "\\'")}'
+          WHERE database = '${escapeSqlString(database)}'
         `;
         assertReadOnlySql(repQuery);
         const rRes = await client.query({
@@ -509,7 +771,7 @@ export async function runLiveScan(
         const distQuery = `
           SELECT *
           FROM system.distribution_queue
-          WHERE database = '${database.replace(/'/g, "\\'")}'
+          WHERE database = '${escapeSqlString(database)}'
           LIMIT 100
         `;
         assertReadOnlySql(distQuery);
@@ -557,7 +819,7 @@ export async function runLiveScan(
             parts_to_do,
             latest_fail_reason
           FROM system.mutations
-          WHERE database = '${database.replace(/'/g, "\\'")}' AND is_done = 0
+          WHERE database = '${escapeSqlString(database)}' AND is_done = 0
         `;
         assertReadOnlySql(mutationsQuery);
         const mRes = await client.query({
@@ -629,7 +891,7 @@ export async function runLiveScan(
         const repQueueQuery = `
           SELECT database, table, node_name, type, create_time, num_tries, last_exception
           FROM system.replication_queue
-          WHERE database = '${database.replace(/'/g, "\\'")}'
+          WHERE database = '${escapeSqlString(database)}'
         `;
         assertReadOnlySql(repQueueQuery);
         const rqRes = await client.query({
@@ -887,7 +1149,7 @@ export async function runLiveScan(
           threshold: 'Threshold: Tables > 15M rows / 5GB benefit from date partitioning',
           evidence: `Table '${tableName}' holds ${formatBytes(compressedBytes)} in a single monolithic partition.`,
           impact: 'Dropping old data requires expensive DELETE mutations instead of instantaneous DROP PARTITION operations. Date range queries cannot prune entire partition directories.',
-          recommendation_sql_or_text: `-- Consider partitioning by month to enable fast data lifecycle management:\nPARTITION BY toYYYYMM(timestamp)\n-- This also enables zero-cost drops: ALTER TABLE ${tableName} DROP PARTITION '202301';`,
+          recommendation_sql_or_text: `-- Consider partitioning by month to enable fast data lifecycle management:\nPARTITION BY toYYYYMM(timestamp)\n-- This also enables zero-cost drops: ALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(tableName)} DROP PARTITION '202301';`,
           is_sql_recommendation: true,
         });
       } else {
@@ -929,7 +1191,7 @@ export async function runLiveScan(
             threshold: 'Threshold: ≥ 1.5x for String/Array columns',
             evidence: `Column '${col.name}' uses ${formatBytes(uncomp)} uncompressed vs ${formatBytes(comp)} compressed with codec '${codec}'.`,
             impact: 'Suboptimal compression wastes NVMe/EBS disk space and forces queries to read more physical bytes from disk into memory buffers.',
-            recommendation_sql_or_text: `-- If values have repeated cardinality, wrap with LowCardinality:\n-- Or apply ZSTD compression for text/JSON payloads:\n-- ALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${col.type} CODEC(ZSTD(3));`,
+            recommendation_sql_or_text: `-- If values have repeated cardinality, wrap with LowCardinality:\n-- Or apply ZSTD compression for text/JSON payloads:\n-- ALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(col.table)} MODIFY COLUMN ${escapeSqlIdentifier(col.name)} ${col.type} CODEC(ZSTD(3));`,
             is_sql_recommendation: true,
             metrics: {
               columnCompressedBytes: comp,
@@ -964,7 +1226,7 @@ export async function runLiveScan(
             threshold: 'Threshold: Categorical string columns benefit from LowCardinality dictionary encoding',
             evidence: `Column '${col.name}' is type String using ${formatBytes(uncomp)} uncompressed (${formatBytes(comp)} compressed). Candidate based on column name only; cardinality / value range were not inspected.`,
             impact: 'Storing repeating strings without dictionary encoding increases storage and slows down string lookups. If distinct values exceed ~10,000, LowCardinality can degrade performance instead.',
-            recommendation_sql_or_text: `-- Verify cardinality before converting (proceed only if uniq(col) is below roughly 10,000):\nSELECT uniq(${col.name}) AS distinct_values FROM ${col.table};\n\n-- If distinct_values < 10000, apply:\nALTER TABLE ${col.table} MODIFY COLUMN ${col.name} LowCardinality(String);`,
+            recommendation_sql_or_text: `-- Verify cardinality before converting (proceed only if uniq(col) is below roughly 10,000):\nSELECT uniq(${escapeSqlIdentifier(col.name)}) AS distinct_values FROM ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(col.table)};\n\n-- If distinct_values < 10000, apply:\nALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(col.table)} MODIFY COLUMN ${escapeSqlIdentifier(col.name)} LowCardinality(String);`,
             is_sql_recommendation: true,
             metrics: {
               columnCompressedBytes: comp,
@@ -1001,7 +1263,7 @@ export async function runLiveScan(
             threshold: 'Threshold: Value ranges within 32-bit limits should use 32-bit types',
             evidence: `Column '${col.name}' uses ${col.type} (8 bytes/value) across ${formatBytes(comp)} compressed storage (${formatBytes(uncomp)} uncompressed). Candidate based on column name only; cardinality / value range were not inspected.`,
             impact: '64-bit integer width for bounded data wastes raw storage and memory bandwidth overhead. Narrowing a 64-bit column without verifying min/max can cause integer overflow if values exceed 32-bit bounds.',
-            recommendation_sql_or_text: `-- Verify value domain before converting (proceed only if max <= ${maxAllowed} and min >= ${targetType === 'UInt32' ? 0 : '-2,147,483,648'}):\nSELECT min(${col.name}), max(${col.name}) FROM ${col.table};\n\n-- If values fit within 32-bit limits, apply:\nALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
+            recommendation_sql_or_text: `-- Verify value domain before converting (proceed only if max <= ${maxAllowed} and min >= ${targetType === 'UInt32' ? 0 : '-2,147,483,648'}):\nSELECT min(${escapeSqlIdentifier(col.name)}), max(${escapeSqlIdentifier(col.name)}) FROM ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(col.table)};\n\n-- If values fit within 32-bit limits, apply:\nALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(col.table)} MODIFY COLUMN ${escapeSqlIdentifier(col.name)} ${targetType};`,
             is_sql_recommendation: true,
             metrics: {
               columnCompressedBytes: comp,
@@ -1037,7 +1299,7 @@ export async function runLiveScan(
             threshold: `Threshold: Temporal values should use native ${targetType}`,
             evidence: `Temporal column '${col.name}' is stored as generic String (${formatBytes(uncomp)} uncompressed, ${formatBytes(comp)} compressed). Candidate based on column name only; value range was not inspected.`,
             impact: 'Generic String dates prevent partition pruning, date-interval arithmetic, and waste ~60% storage.',
-            recommendation_sql_or_text: `-- Verify temporal format before converting:\nSELECT min(${col.name}), max(${col.name}) FROM ${col.table};\n\n-- If format is valid date string, apply:\nALTER TABLE ${col.table} MODIFY COLUMN ${col.name} ${targetType};`,
+            recommendation_sql_or_text: `-- Verify temporal format before converting:\nSELECT min(${escapeSqlIdentifier(col.name)}), max(${escapeSqlIdentifier(col.name)}) FROM ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(col.table)};\n\n-- If format is valid date string, apply:\nALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(col.table)} MODIFY COLUMN ${escapeSqlIdentifier(col.name)} ${targetType};`,
             is_sql_recommendation: true,
             metrics: {
               columnCompressedBytes: comp,
@@ -1070,7 +1332,7 @@ export async function runLiveScan(
           threshold: 'Threshold: Tables > 50k rows should use MergeTree-family',
           evidence: `Table '${t.name}' contains ${rows.toLocaleString()} rows using engine '${t.engine}'.`,
           impact: 'Non-MergeTree engines (such as Log, TinyLog, or Memory) do not support sparse primary indexes, data skipping indexes, parallel multithreaded scans, or column-level compression.',
-          recommendation_sql_or_text: `-- Migrate table to MergeTree engine:\nCREATE TABLE ${t.name}_mergetree AS ${t.name}\nENGINE = MergeTree()\nORDER BY (primary_id);`,
+          recommendation_sql_or_text: `-- Migrate table to MergeTree engine:\nCREATE TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(t.name + '_mergetree')} AS ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(t.name)}\nENGINE = MergeTree()\nORDER BY (primary_id);`,
           is_sql_recommendation: true,
         });
       } else if (isMergeTree) {
@@ -1107,7 +1369,7 @@ export async function runLiveScan(
           threshold: 'Threshold: Tables > 1M rows with high-cardinality filters benefit from skip indices',
           evidence: `Table contains ${rows.toLocaleString()} rows but has no minmax, set, or bloom_filter indices defined in system.data_skipping_indices.`,
           impact: 'Queries filtering on non-primary-key columns must scan all granules in the table.',
-          recommendation_sql_or_text: `-- Example: Add a bloom filter or minmax index on frequently filtered secondary column:\n-- ALTER TABLE ${t.name} ADD INDEX idx_user_id user_id TYPE bloom_filter(0.01) GRANULARITY 4;`,
+          recommendation_sql_or_text: `-- Example: Add a bloom filter or minmax index on frequently filtered secondary column:\n-- ALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(t.name)} ADD INDEX idx_user_id \`user_id\` TYPE bloom_filter(0.01) GRANULARITY 4;`,
           is_sql_recommendation: true,
         });
       } else if (count > 0) {
@@ -1133,6 +1395,13 @@ export async function runLiveScan(
       const highRatioQueries = queryStats.filter((q) => Number(q.ratio || 0) > 5000 && Number(q.read_rows || 0) > 200000);
       if (highRatioQueries.length > 0) {
         const worst = highRatioQueries[0];
+        const targetTables = Array.isArray(worst.tables) && worst.tables.length > 0
+          ? worst.tables.map((t) => escapeSqlIdentifier(t)).join(', ')
+          : 'unspecified';
+        const hasNormalized = typeof worst.normalized_query === 'string' && worst.normalized_query.trim() !== '';
+        const sanitizedPattern = hasNormalized ? sanitizeQueryForPrivacy(worst.normalized_query!) : '';
+        const querySnippet = sanitizedPattern.length > 160 ? `${sanitizedPattern.slice(0, 160)}...` : sanitizedPattern;
+
         findings.push({
           id: 'query_poor_pruning',
           category: 'query_performance',
@@ -1141,9 +1410,13 @@ export async function runLiveScan(
           status: 'critical',
           metric_value: `${Number(worst.ratio).toLocaleString()}x read amplification`,
           threshold: 'Threshold: Scanned / returned ratio < 1,000x for point/filter queries',
-          evidence: `Query read ${Number(worst.read_rows).toLocaleString()} rows (${formatBytes(Number(worst.read_bytes))}) to return only ${Number(worst.result_rows)} rows.\nSample query: ${worst.query.slice(0, 140)}...`,
+          evidence: hasNormalized
+            ? `Query read ${Number(worst.read_rows).toLocaleString()} rows (${formatBytes(Number(worst.read_bytes))}) to return only ${Number(worst.result_rows)} rows (${Number(worst.ratio).toLocaleString()}x amplification).\nSanitized query pattern: ${querySnippet}`
+            : `Query read ${Number(worst.read_rows).toLocaleString()} rows (${formatBytes(Number(worst.read_bytes))}) to return only ${Number(worst.result_rows)} rows (${Number(worst.ratio).toLocaleString()}x amplification) scanning tables: ${targetTables}. Query text omitted (server normalization unavailable).`,
           impact: 'Full table scanning due to unindexed WHERE conditions burns memory bandwidth and evicts cached blocks.',
-          recommendation_sql_or_text: `-- Inspect query EXPLAIN output to verify index pruning:\nEXPLAIN indexes = 1\n${worst.query};`,
+          recommendation_sql_or_text: hasNormalized
+            ? `-- Inspect query EXPLAIN output to verify index pruning on target table (parameters redacted for privacy):\nEXPLAIN indexes = 1\n${sanitizedPattern};`
+            : `-- Inspect query EXPLAIN output to verify index pruning on target table:\nEXPLAIN indexes = 1 SELECT ... FROM ${targetTables} WHERE ...;`,
           is_sql_recommendation: true,
         });
       }
@@ -1297,6 +1570,9 @@ export async function runLiveScan(
         const ageHours = !isNaN(createTimeMs) ? Math.max(0, (Date.now() - createTimeMs) / (1000 * 60 * 60)) : 0;
         const hasFailReason = Boolean(m.latest_fail_reason && m.latest_fail_reason.trim() !== '');
 
+        const mutationType = (m.command || '').trim().split(/\s+/)[0]?.toUpperCase() || 'MUTATION';
+        const qualifiedTable = `${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(m.table)}`;
+
         if (hasFailReason) {
           problemMutationsCount++;
           findings.push({
@@ -1308,9 +1584,9 @@ export async function runLiveScan(
             status: 'critical',
             metric_value: `Parts to do: ${m.parts_to_do}`,
             threshold: 'Threshold: 0 failing mutations',
-            evidence: `Mutation ID '${m.mutation_id}' on table '${m.table}' failed with reason: ${m.latest_fail_reason}.\nCommand: ${m.command} (started: ${m.create_time}, parts remaining: ${m.parts_to_do}).`,
+            evidence: `Mutation ID '${m.mutation_id}' on table '${qualifiedTable}' (${mutationType}) failed with reason: ${m.latest_fail_reason}.\nParts remaining: ${m.parts_to_do}. Predicate expression omitted for privacy compliance.`,
             impact: 'Stuck or failing mutations block subsequent ALTER/UPDATE commands and consume background merge threads.',
-            recommendation_sql_or_text: `-- Inspect stuck mutation:\nSELECT * FROM system.mutations WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${m.table.replace(/'/g, "\\'")}';\n-- KILL MUTATION WHERE database = '${database.replace(/'/g, "\\'")}' AND mutation_id = '${m.mutation_id}';`,
+            recommendation_sql_or_text: `-- Inspect stuck mutation:\nSELECT * FROM system.mutations WHERE database = '${escapeSqlString(database)}' AND table = '${escapeSqlString(m.table)}';\n-- KILL MUTATION WHERE database = '${escapeSqlString(database)}' AND mutation_id = '${escapeSqlString(m.mutation_id)}';`,
             is_sql_recommendation: true,
           });
         } else if (ageHours >= mutationCriticalAgeHours) {
@@ -1324,9 +1600,9 @@ export async function runLiveScan(
             status: 'critical',
             metric_value: `${ageHours.toFixed(1)}h runtime`,
             threshold: `Threshold: < ${mutationCriticalAgeHours}h runtime`,
-            evidence: `Mutation ID '${m.mutation_id}' has been executing for ${ageHours.toFixed(1)} hours (started: ${m.create_time}).\nParts remaining: ${m.parts_to_do}.\nCommand: ${m.command}`,
+            evidence: `Mutation ID '${m.mutation_id}' on table '${qualifiedTable}' (${mutationType}) has been executing for ${ageHours.toFixed(1)} hours (started: ${m.create_time}).\nParts remaining: ${m.parts_to_do}. Predicate expression omitted for privacy compliance.`,
             impact: 'Long-running table mutations cause high disk I/O load and keep unmerged parts active across replicas.',
-            recommendation_sql_or_text: `-- Check mutation progress in system.mutations:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${m.table.replace(/'/g, "\\'")}';`,
+            recommendation_sql_or_text: `-- Check mutation progress in system.mutations:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE database = '${escapeSqlString(database)}' AND table = '${escapeSqlString(m.table)}';`,
             is_sql_recommendation: true,
           });
         } else if (ageHours >= mutationWarningAgeHours) {
@@ -1340,9 +1616,9 @@ export async function runLiveScan(
             status: 'warning',
             metric_value: `${ageHours.toFixed(1)}h runtime`,
             threshold: `Threshold: < ${mutationWarningAgeHours}h runtime`,
-            evidence: `Mutation ID '${m.mutation_id}' has been executing for ${ageHours.toFixed(1)} hours (started: ${m.create_time}).\nParts remaining: ${m.parts_to_do}.\nCommand: ${m.command}`,
+            evidence: `Mutation ID '${m.mutation_id}' on table '${qualifiedTable}' (${mutationType}) has been executing for ${ageHours.toFixed(1)} hours (started: ${m.create_time}).\nParts remaining: ${m.parts_to_do}. Predicate expression omitted for privacy compliance.`,
             impact: 'Extended mutation runtimes compete with real-time background merges.',
-            recommendation_sql_or_text: `-- Monitor mutation progress:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${m.table.replace(/'/g, "\\'")}';`,
+            recommendation_sql_or_text: `-- Monitor mutation progress:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE database = '${escapeSqlString(database)}' AND table = '${escapeSqlString(m.table)}';`,
             is_sql_recommendation: true,
           });
         }
@@ -1511,7 +1787,7 @@ export async function runLiveScan(
             threshold: `Threshold: < ${repQueueMaxRetries} retries with 0 exceptions`,
             evidence: `Replication action '${rq.type}' on node '${rq.node_name}' has failed ${tries} times (created: ${rq.create_time}).\nException: ${rq.last_exception}`,
             impact: 'Failed replication queue tasks block subsequent part syncs, leading to replica divergence and stale queries.',
-            recommendation_sql_or_text: `-- Inspect stuck task in replication_queue:\nSELECT type, num_tries, last_exception, create_time FROM system.replication_queue WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${rq.table.replace(/'/g, "\\'")}' ORDER BY num_tries DESC LIMIT 5;`,
+            recommendation_sql_or_text: `-- Inspect stuck task in replication_queue:\nSELECT type, num_tries, last_exception, create_time FROM system.replication_queue WHERE database = '${escapeSqlString(database)}' AND table = '${escapeSqlString(rq.table)}' ORDER BY num_tries DESC LIMIT 5;`,
             is_sql_recommendation: true,
           });
         }
@@ -1537,7 +1813,7 @@ export async function runLiveScan(
             threshold: `Threshold: ≤ ${repQueueWarningSize} tasks`,
             evidence: `Table '${tableName}' has ${count} pending actions in system.replication_queue. Replica synchronization is lagging.`,
             impact: 'High replication backlog delays data visibility on read replicas.',
-            recommendation_sql_or_text: `-- Check queue tasks distribution:\nSELECT type, count() FROM system.replication_queue WHERE database = '${database.replace(/'/g, "\\'")}' AND table = '${tableName.replace(/'/g, "\\'")}' GROUP BY type;`,
+            recommendation_sql_or_text: `-- Check queue tasks distribution:\nSELECT type, count() FROM system.replication_queue WHERE database = '${escapeSqlString(database)}' AND table = '${escapeSqlString(tableName)}' GROUP BY type;`,
             is_sql_recommendation: true,
           });
         }
@@ -1906,9 +2182,9 @@ export function runSimulationScan(): AnalysisReport {
       status: 'critical',
       metric_value: '342,000x read amplification',
       threshold: 'Threshold: Scanned / returned ratio < 1,000x',
-      evidence: "Current workload: 847 executions/day, 8.2 sec average duration, 4.8 TB read/day.\nQuery scanned 18,450,000 rows (2.4 GB read) across 4.8 seconds to return only 54 rows.\nQuery: SELECT event_type, count() FROM events_raw WHERE customer_uuid = 'e91b...' GROUP BY event_type",
+      evidence: "Current workload: 847 executions/day, 8.2 sec average duration, 4.8 TB read/day.\nQuery scanned 18,450,000 rows (2.4 GB read) across 4.8 seconds to return only 54 rows.\nSanitized query pattern: SELECT event_type, count() FROM events_raw WHERE customer_uuid = '[REDACTED]' GROUP BY event_type",
       impact: 'Lack of skip index or ordering prefix forces full table decompression across all threads, burning ~4.8 TB/day in unindexed scans.',
-      recommendation_sql_or_text: `-- Check granule pruning with EXPLAIN:\nEXPLAIN indexes = 1\nSELECT event_type, count() FROM events_raw WHERE customer_uuid = 'e91b...' GROUP BY event_type;`,
+      recommendation_sql_or_text: `-- Check granule pruning with EXPLAIN (parameters redacted for privacy):\nEXPLAIN indexes = 1\nSELECT event_type, count() FROM events_raw WHERE customer_uuid = '[REDACTED]' GROUP BY event_type;`,
       is_sql_recommendation: true,
       metrics: {
         dailyExecutions: 847,
@@ -1992,7 +2268,7 @@ export function runSimulationScan(): AnalysisReport {
       status: 'warning',
       metric_value: '2.4h runtime (84 parts remaining)',
       threshold: 'Threshold: < 1.0h runtime',
-      evidence: "Mutation 'mutation_48291' (UPDATE status = 'archived' WHERE event_time < '2023-01-01') has been running for 2.4 hours across 84 remaining unmerged parts.",
+      evidence: "Mutation 'mutation_48291' (UPDATE status = '[REDACTED]' WHERE event_time < '[REDACTED]') has been running for 2.4 hours across 84 remaining unmerged parts.",
       impact: 'Extended mutation runtimes compete with real-time background merges and elevate disk write amplification.',
       recommendation_sql_or_text: `-- Check mutation progress in system.mutations:\nSELECT mutation_id, command, parts_to_do, is_done FROM system.mutations WHERE table = 'events_raw';`,
       is_sql_recommendation: true,
@@ -2219,6 +2495,8 @@ export async function queryTargetColumnTelemetry(
         sshPassword: config.sshPassword,
         sshPrivateKey: config.sshPrivateKey,
         sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+        sshHostKeyFingerprint: config.sshHostKeyFingerprint?.trim(),
+        strictHostKeyChecking: config.strictHostKeyChecking,
         targetHost: host,
         targetPort: port,
       });
@@ -2246,9 +2524,9 @@ export async function queryTargetColumnTelemetry(
         data_uncompressed_bytes,
         compression_codec
       FROM system.columns
-      WHERE database = '${database.replace(/'/g, "\\'")}'
-        AND table = '${table.replace(/'/g, "\\'")}'
-        AND name = '${column.replace(/'/g, "\\'")}'
+      WHERE database = '${escapeSqlString(database)}'
+        AND table = '${escapeSqlString(table)}'
+        AND name = '${escapeSqlString(column)}'
       LIMIT 1
     `;
     assertReadOnlySql(colQuery);

@@ -8,20 +8,14 @@ import {
   FindingSummaryItem,
 } from '../src/types.js';
 import { openSshTunnel, OpenTunnelResult } from './sshTunnel.js';
-import { assertReadOnlySql } from './analyzer.js';
+import { assertReadOnlySql, escapeSqlString, escapeSqlIdentifier } from './analyzer.js';
 
 /**
  * Validates ClickHouse SQL identifier (database / table name) to prevent SQL injection.
+ * Supports standard ClickHouse alphanumeric identifiers with underscores and hyphens.
  */
 export function isValidIdentifier(ident: string): boolean {
-  return /^[a-zA-Z0-9_]+$/.test(ident);
-}
-
-/**
- * Escapes a single-quoted ClickHouse SQL string literal.
- */
-function escapeSqlString(str: string): string {
-  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  return typeof ident === 'string' && /^[a-zA-Z0-9_\-]+$/.test(ident) && ident.length > 0 && ident.length <= 255;
 }
 
 /**
@@ -313,6 +307,8 @@ export async function recordScanHistory(
         sshPassword: config.sshPassword,
         sshPrivateKey: config.sshPrivateKey,
         sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+        sshHostKeyFingerprint: config.sshHostKeyFingerprint?.trim(),
+        strictHostKeyChecking: config.strictHostKeyChecking,
         targetHost: host,
         targetPort: port,
       });
@@ -361,7 +357,7 @@ export async function recordScanHistory(
     };
 
     await writeClient.insert({
-      table: `${targetDb}.${targetTable}`,
+      table: `${escapeSqlIdentifier(targetDb)}.${escapeSqlIdentifier(targetTable)}`,
       values: [row],
       format: 'JSONEachRow',
     });
@@ -436,6 +432,8 @@ export async function fetchScanHistory(
         sshPassword: config.sshPassword,
         sshPrivateKey: config.sshPrivateKey,
         sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+        sshHostKeyFingerprint: config.sshHostKeyFingerprint?.trim(),
+        strictHostKeyChecking: config.strictHostKeyChecking,
         targetHost: host,
         targetPort: port,
       });
@@ -471,7 +469,7 @@ export async function fetchScanHistory(
         category_scores,
         finding_summary,
         clickhouse_version
-      FROM ${targetDb}.${targetTable}
+      FROM ${escapeSqlIdentifier(targetDb)}.${escapeSqlIdentifier(targetTable)}
       WHERE target_host = '${targetHostFilter}'
         AND target_database = '${targetDbFilter}'
       ORDER BY scanned_at ASC
@@ -563,7 +561,7 @@ export async function fetchScanHistory(
         history: [],
         errorType: 'PERMISSION_DENIED',
         error: `User "${config.username}" lacks SELECT privilege on "${targetDb}.${targetTable}".`,
-        hint: `Run the following command as an administrator: GRANT SELECT ON ${targetDb}.${targetTable} TO ${config.username};`,
+        hint: `Run the following command as an administrator: GRANT SELECT ON ${escapeSqlIdentifier(targetDb)}.${escapeSqlIdentifier(targetTable)} TO ${escapeSqlIdentifier(config.username)};`,
       };
     }
 

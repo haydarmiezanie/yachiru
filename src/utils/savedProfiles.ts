@@ -52,6 +52,7 @@ function sanitizeProfileEntry(item: unknown): SavedConnectionProfile | null {
   let sshPort: number | undefined;
   let sshUsername: string | undefined;
   let sshAuthMethod: 'password' | 'privateKey' | undefined;
+  let sshHostKeyFingerprint: string | undefined;
 
   if (useSshTunnel) {
     sshHost = typeof record.sshHost === 'string' ? record.sshHost.trim() : undefined;
@@ -59,6 +60,7 @@ function sanitizeProfileEntry(item: unknown): SavedConnectionProfile | null {
     sshPort = Number.isFinite(rawSshPort) && rawSshPort > 0 ? rawSshPort : 22;
     sshUsername = typeof record.sshUsername === 'string' ? record.sshUsername.trim() : undefined;
     sshAuthMethod = record.sshAuthMethod === 'privateKey' ? 'privateKey' : 'password';
+    sshHostKeyFingerprint = typeof record.sshHostKeyFingerprint === 'string' ? record.sshHostKeyFingerprint.trim() : undefined;
   }
 
   const enableHistoryTracking = Boolean(record.enableHistoryTracking);
@@ -86,6 +88,7 @@ function sanitizeProfileEntry(item: unknown): SavedConnectionProfile | null {
     ...(sshPort !== undefined && { sshPort }),
     ...(sshUsername !== undefined && { sshUsername }),
     ...(sshAuthMethod !== undefined && { sshAuthMethod }),
+    ...(sshHostKeyFingerprint !== undefined && { sshHostKeyFingerprint }),
     ...(enableHistoryTracking && {
       enableHistoryTracking: true,
       ...(historyDatabase !== undefined && { historyDatabase }),
@@ -188,6 +191,7 @@ export function saveProfile(
     newProfile.sshPort = Number(profile.sshPort) || 22;
     if (profile.sshUsername) newProfile.sshUsername = profile.sshUsername.trim();
     newProfile.sshAuthMethod = profile.sshAuthMethod === 'privateKey' ? 'privateKey' : 'password';
+    if (profile.sshHostKeyFingerprint) newProfile.sshHostKeyFingerprint = profile.sshHostKeyFingerprint.trim();
   }
 
   if (profile.enableHistoryTracking) {
@@ -269,6 +273,7 @@ export function extractProfileFromFormState(input: {
   sshPort?: number;
   sshUsername?: string;
   sshAuthMethod?: 'password' | 'privateKey';
+  sshHostKeyFingerprint?: string;
   enableHistoryTracking?: boolean;
   historyDatabase?: string;
   historyTableName?: string;
@@ -286,6 +291,7 @@ export function extractProfileFromFormState(input: {
     sshPort: input.sshPort ? Number(input.sshPort) : 22,
     sshUsername: input.sshUsername ? input.sshUsername.trim() : undefined,
     sshAuthMethod: input.sshAuthMethod === 'privateKey' ? 'privateKey' : 'password',
+    sshHostKeyFingerprint: input.sshHostKeyFingerprint ? input.sshHostKeyFingerprint.trim() : undefined,
     enableHistoryTracking: Boolean(input.enableHistoryTracking),
     historyDatabase: input.historyDatabase ? input.historyDatabase.trim() : undefined,
     historyTableName: input.historyTableName ? input.historyTableName.trim() : undefined,

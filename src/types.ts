@@ -217,6 +217,8 @@ export interface ConnectionConfig {
   sshPassword?: string;
   sshPrivateKey?: string;
   sshPrivateKeyPassphrase?: string;
+  sshHostKeyFingerprint?: string; // OpenSSH SHA256, hex SHA256, MD5, or public key to pin
+  strictHostKeyChecking?: boolean;
   // Scan History & Trend Tracking (Stored in user's ClickHouse instance)
   enableHistoryTracking?: boolean;
   historyDatabase?: string; // defaults to same as database
@@ -238,6 +240,7 @@ export interface SavedConnectionProfile {
   sshPort?: number;
   sshUsername?: string;
   sshAuthMethod?: 'password' | 'privateKey';
+  sshHostKeyFingerprint?: string;
   // Optional non-secret history tracking parameters
   enableHistoryTracking?: boolean;
   historyDatabase?: string;
@@ -293,12 +296,11 @@ export interface ModelOption {
 
 export const AVAILABLE_AI_MODELS: ModelOption[] = [
   // Google Gemini models
-  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', badge: 'Fast & Hybrid', provider: 'gemini' },
-  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', badge: 'Balanced', provider: 'gemini' },
+  { id: 'gemini-4-argon', name: 'Gemini 4 Argon', badge: 'Flagship (Next-Gen)', provider: 'gemini' },
+  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', badge: 'Balanced & Default', provider: 'gemini' },
+  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', badge: 'Ultra-Fast & Efficient', provider: 'gemini' },
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', badge: 'High Reasoning', provider: 'gemini' },
   { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', badge: 'High Throughput', provider: 'gemini' },
-  { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite', badge: 'Ultra-Fast', provider: 'gemini' },
-  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', badge: 'Low Latency', provider: 'gemini' },
 
   // OpenAI models
   { id: 'gpt-6-astra', name: 'GPT-6 Astra', badge: 'Flagship (1.05M ctx)', provider: 'openai' },
@@ -325,6 +327,12 @@ export function getModelDisplayName(modelId?: string): string {
   // Known specific mappings
   if (clean === 'gemini-3.1-pro' || clean === 'gemini-3.1-pro-preview') {
     return 'Gemini 3.1 Pro';
+  }
+  if (clean === 'gemini-4-argon' || clean === 'gemini-4.0-argon' || clean.includes('argon')) {
+    return 'Gemini 4 Argon';
+  }
+  if (clean === 'gemini-3.5-flash-lite' || clean.includes('3.5-flash-lite') || clean.includes('3.5-lite')) {
+    return 'Gemini 3.5 Flash Lite';
   }
 
   const matched = AVAILABLE_AI_MODELS.find(

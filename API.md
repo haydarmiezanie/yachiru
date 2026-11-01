@@ -4,11 +4,15 @@ Yachiru provides REST API endpoints to run automated ClickHouse health audits, v
 
 ---
 
-## 1. Authentication (`YACHIRU_API_KEY`)
+## 1. Authentication (`YACHIRU_API_KEY` / `YACHIRU_REQUIRE_API_KEY`)
 
-By default, `YACHIRU_API_KEY` is **unset**, allowing open access for local and browser-only workflows.
+By default for local development, `YACHIRU_API_KEY` is **unset**, allowing open access.
 
-When `YACHIRU_API_KEY` is set in the server's environment:
+In deployment:
+- **Set `YACHIRU_API_KEY`**: Configure a strong secret in your environment or `.env` file.
+- **Set `YACHIRU_REQUIRE_API_KEY="true"`**: Strongly recommended for production deployments. If `YACHIRU_API_KEY` is missing, an ephemeral 32-byte key is automatically generated on server boot to prevent endpoints from ever opening unprotected.
+
+When authentication is active:
 - Endpoints marked **Auth Required** must receive the key via `Authorization: Bearer <key>` or `X-Yachiru-Api-Key: <key>`.
 - Missing or invalid keys return HTTP `401 Unauthorized`:
   ```json
@@ -26,12 +30,13 @@ npm run generate-api-key
 
 ## 2. Rate Limiting
 
-Requests to `/api/analyze` and `/api/test-connection` are throttled using standard headers (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`).
-- **Limit**: Default 30 requests/minute per client identity (configurable via `YACHIRU_RATE_LIMIT_PER_MINUTE`).
+Requests to expensive diagnostic endpoints (`/api/analyze`, `/api/test-connection`, `/api/verifications`) and AI synthesis (`/api/narrate`) are throttled using standard headers (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`).
+- **Analysis Limit**: Default 30 requests/minute per client identity (configurable via `YACHIRU_RATE_LIMIT_PER_MINUTE`).
+- **Narrate Limit**: Default 15 requests/minute per client identity (configurable via `YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE`) to conserve LLM quota.
 - **Exceeded**: Returns HTTP `429 Too Many Requests`:
   ```json
   {
-    "error": "Too many analysis requests. Please wait before retrying."
+    "error": "Too many requests. Please wait before retrying."
   }
   ```
 
@@ -113,13 +118,23 @@ Performs a fast connectivity check and retrieves basic version and uptime metada
 #### Request Body (`ConnectionConfig`)
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `host` | `string` | Yes (unless `isDemo: true`) | Hostname/IP of ClickHouse server. |
+| `host` | `string` | Yes (unless `isDemo: true`) | Hostname/IP of ClickHouse server (or as reachable from bastion). |
 | `port` | `number` | No | Port (1-65535, defaults to 8123 HTTP or 8443 HTTPS). |
 | `protocol` | `'http' \| 'https'` | No | Connection protocol (default `'http'`). |
 | `username` | `string` | No | ClickHouse user (default `'default'`). |
 | `password` | `string` | No | ClickHouse password (default `''`). |
 | `database` | `string` | No | Target database name (default `'default'`). |
 | `isDemo` | `boolean` | No | Set to `true` to test against realistic mock cluster without a real host. |
+| `useSshTunnel` | `boolean` | No | Set to `true` to tunnel traffic via an SSH bastion host. |
+| `sshHost` | `string` | Conditional | Bastion host IP or domain name (required when `useSshTunnel` is `true`). |
+| `sshPort` | `number` | No | Bastion SSH port (defaults to 22). |
+| `sshUsername` | `string` | Conditional | Bastion SSH username (required when `useSshTunnel` is `true`). |
+| `sshAuthMethod` | `'password' \| 'privateKey'` | No | Bastion authentication method (defaults to `'password'`). |
+| `sshPassword` | `string` | Conditional | SSH password when `sshAuthMethod === 'password'`. |
+| `sshPrivateKey` | `string` | Conditional | PEM private key when `sshAuthMethod === 'privateKey'`. |
+| `sshPrivateKeyPassphrase` | `string` | No | Optional passphrase to decrypt encrypted private key. |
+| `sshHostKeyFingerprint` | `string` | No | Expected bastion host key fingerprint (OpenSSH `SHA256:...`, hex `SHA256:...`, MD5 `aa:bb:...`, or public key). Protects against MITM attacks. |
+| `strictHostKeyChecking` | `boolean` | No | If `true`, aborts connection if no host key fingerprint is configured. Overrides `YACHIRU_SSH_STRICT_HOST_KEY`. |
 
 #### Request Example
 ```bash
@@ -289,7 +304,7 @@ Abbreviated `AnalysisReport` payload:
 Synthesizes executive diagnoses and prioritized action items from an existing `AnalysisReport` using Gemini or OpenAI.
 
 - **Authentication**: Required when `YACHIRU_API_KEY` is set.
-- **Rate Limited**: No.
+- **Rate Limited**: Yes (default 15 requests/minute, configurable via `YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE`).
 
 #### Request Body
 | Field | Type | Required | Description |

@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { ClickHouseClient } from '@clickhouse/client';
@@ -28,13 +29,19 @@ import {
   openaiSystemKeyState,
   claudeSystemKeyState,
 } from './server/narrator.js';
-import { ConnectionConfig, AiProvider, AnalysisReport } from './src/types.js';
+import { isStrictHostKeyChecking, matchesExpectedHostKey } from './server/sshTunnel.js';
+import { ConnectionConfig, AiProvider, AnalysisReport, AVAILABLE_AI_MODELS } from './src/types.js';
 
 export function classifyConnectionError(errorMsg: string): { hint: string } {
   // Check SSH tunnel specific errors first
   const isSsh = /ssh|bastion|all configured authentication methods failed|channel open failure|administratively prohibited|host key|handshake|passphrase|privatekey/i.test(errorMsg);
 
   if (isSsh) {
+    if (/host key verification failed|mitm|host denied \(verification failed\)|host key mismatch|remote server presented/i.test(errorMsg)) {
+      return {
+        hint: 'SSH host key verification failed: The remote bastion presented a host key that does not match the configured fingerprint, or strict checking is enabled without a pinned key. If you did not change bastion hosts, this may indicate a Man-In-The-Middle (MITM) attack. If the key change was planned, update the expected SSH Host Key Fingerprint in your connection settings.',
+      };
+    }
     if (/auth|all configured authentication methods failed|password|key|passphrase|denied/i.test(errorMsg)) {
       return {
         hint: 'Could not establish the SSH tunnel: SSH authentication failed. Verify the bastion SSH username, password, or private key (and passphrase, if encrypted).',
@@ -86,16 +93,62 @@ export function classifyConnectionError(errorMsg: string): { hint: string } {
   };
 }
 
-const YACHIRU_API_KEY = process.env.YACHIRU_API_KEY?.trim() || null;
+let YACHIRU_API_KEY = process.env.YACHIRU_API_KEY?.trim() || null;
+const YACHIRU_REQUIRE_API_KEY =
+  process.env.YACHIRU_REQUIRE_API_KEY === 'true' || process.env.REQUIRE_API_KEY === 'true';
 
-function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
-  if (!YACHIRU_API_KEY) return next(); // feature disabled, behave exactly as today
+/**
+ * Constant-time API key comparison using SHA-256 digests and crypto.timingSafeEqual.
+ * Prevents length leaks and timing side-channel attacks.
+ */
+export function compareApiKeys(provided?: string | null, expected?: string | null): boolean {
+  if (!provided || !expected) return false;
+  const hashProvided = crypto.createHash('sha256').update(provided).digest();
+  const hashExpected = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(hashProvided, hashExpected);
+}
+
+export function isEnforcedApiKeyValid(req: express.Request): boolean {
+  if (!YACHIRU_API_KEY) return false;
   const header = req.headers['authorization'];
   const bearerToken = header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined;
   const altHeader = (req.headers['x-yachiru-api-key'] as string | undefined)?.trim();
   const provided = bearerToken || altHeader;
-  if (!provided || provided !== YACHIRU_API_KEY) {
-    return res.status(401).json({ error: 'Missing or invalid API key. Provide it via "Authorization: Bearer <key>" or "X-Yachiru-Api-Key: <key>".' });
+  return compareApiKeys(provided, YACHIRU_API_KEY);
+}
+
+export function checkApiKeyStartupConfig(): void {
+  const isProd = process.env.NODE_ENV === 'production';
+  const allowOpenApi = process.env.YACHIRU_ALLOW_OPEN_API === 'true';
+
+  if (!YACHIRU_API_KEY) {
+    if (YACHIRU_REQUIRE_API_KEY) {
+      console.error(
+        '[Yachiru Security FATAL] YACHIRU_REQUIRE_API_KEY=true is active, but YACHIRU_API_KEY was not set. Refusing to start.'
+      );
+      console.error(
+        '[Yachiru Security FATAL] Set YACHIRU_API_KEY in your environment, or generate one using "npm run generate-api-key".'
+      );
+      process.exit(1);
+    }
+    if (isProd && !allowOpenApi) {
+      console.error(
+        '[Yachiru Security FATAL] In production (NODE_ENV=production), API key enforcement is mandatory by default.'
+      );
+      console.error(
+        '[Yachiru Security FATAL] Set YACHIRU_API_KEY in your deployment environment, or explicitly set YACHIRU_ALLOW_OPEN_API=true to run without authentication.'
+      );
+      process.exit(1);
+    }
+  }
+}
+
+function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!YACHIRU_API_KEY) return next(); // feature disabled, behave as open
+  if (!isEnforcedApiKeyValid(req)) {
+    return res.status(401).json({
+      error: 'Missing or invalid API key. Provide it via "Authorization: Bearer <key>" or "X-Yachiru-Api-Key: <key>".',
+    });
   }
   next();
 }
@@ -126,7 +179,17 @@ function validateConnectionConfig(config: ConnectionConfig): { error?: string } 
     }
   }
 
-  // 4. SSH Tunnel validation when useSshTunnel is true
+  // 4. database validation if provided
+  if (config.database !== undefined && config.database !== null && String(config.database).trim() !== '') {
+    if (typeof config.database !== 'string') {
+      return { error: 'database must be a string if provided.' };
+    }
+    if (config.database.includes('\0')) {
+      return { error: 'database cannot contain null bytes.' };
+    }
+  }
+
+  // 5. SSH Tunnel validation when useSshTunnel is true
   if (config?.useSshTunnel === true) {
     if (typeof config.sshHost !== 'string' || config.sshHost.trim() === '') {
       return { error: 'sshHost is required and must be a non-empty string when SSH tunnel is enabled.' };
@@ -152,6 +215,15 @@ function validateConnectionConfig(config: ConnectionConfig): { error?: string } 
     } else {
       return { error: "sshAuthMethod must be 'password' or 'privateKey'." };
     }
+    if (config.sshHostKeyFingerprint !== undefined && config.sshHostKeyFingerprint !== null) {
+      if (typeof config.sshHostKeyFingerprint !== 'string') {
+        return { error: 'sshHostKeyFingerprint must be a string.' };
+      }
+    }
+    const isStrict = isStrictHostKeyChecking({ strictHostKeyChecking: config.strictHostKeyChecking });
+    if (isStrict && (!config.sshHostKeyFingerprint || config.sshHostKeyFingerprint.trim() === '')) {
+      return { error: 'Strict host key checking is enabled, but sshHostKeyFingerprint was not provided.' };
+    }
   }
 
   return {};
@@ -162,25 +234,42 @@ const analyzeLimiter = rateLimit({
   limit: Number(process.env.YACHIRU_RATE_LIMIT_PER_MINUTE) || 30,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    // Prefer the API key as the rate-limit identity when auth is enabled, so one
-    // caller can't be starved by another IP behind the same NAT/proxy; fall back to
-    // IP when no key is configured.
-    const header = req.headers['authorization'];
-    const bearerToken = header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined;
-    const altHeader = req.headers['x-yachiru-api-key'] as string | undefined;
-    const apiKeyIdentity = bearerToken || altHeader;
-    if (apiKeyIdentity) return apiKeyIdentity;
-    return ipKeyGenerator(req.ip ?? '127.0.0.1');
-  },
+  keyGenerator: (req) => ipKeyGenerator(req.ip ?? '127.0.0.1'),
   message: { error: 'Too many analysis requests. Please wait before retrying.' },
+});
+
+const narrateLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: Number(process.env.YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE) || 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => ipKeyGenerator(req.ip ?? '127.0.0.1'),
+  message: {
+    error: 'Too many narrative requests. Please wait before retrying to conserve LLM quota.',
+  },
 });
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
-  // JSON parser for connection payloads
+  // Configurable reverse proxy trust (hop count or boolean, default off)
+  const trustProxyEnv = process.env.YACHIRU_TRUST_PROXY?.trim();
+  if (trustProxyEnv !== undefined && trustProxyEnv !== '') {
+    const hopCount = Number(trustProxyEnv);
+    if (!Number.isNaN(hopCount)) {
+      app.set('trust proxy', hopCount);
+    } else if (trustProxyEnv.toLowerCase() === 'true' || trustProxyEnv.toLowerCase() === 'false') {
+      app.set('trust proxy', trustProxyEnv.toLowerCase() === 'true');
+    } else {
+      app.set('trust proxy', trustProxyEnv);
+    }
+  }
+
+  // Mount 1MB limit specifically on /api/narrate to prevent large payload LLM abuse (returns 413)
+  app.use('/api/narrate', express.json({ limit: '1mb' }));
+
+  // General JSON parser for other endpoints (connection payloads, reports)
   app.use(express.json({ limit: '10mb' }));
 
   // Favicon fallback route
@@ -188,26 +277,31 @@ async function startServer() {
     res.redirect(302, '/favicon.svg');
   });
 
-  // Health endpoint
+  // Health endpoint: status and apiKeyRequired are always public;
+  // Provider keys and internal system status are protected behind API key authentication.
   app.get('/api/health', (req, res) => {
+    const isAuthed = !YACHIRU_API_KEY || isEnforcedApiKeyValid(req);
     res.json({
       status: 'ok',
       service: 'Yachiru ClickHouse Analyzer',
       apiKeyRequired: Boolean(YACHIRU_API_KEY),
-      hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
-      hasOpenAiApiKey: Boolean(process.env.OPENAI_API_KEY),
-      hasClaudeApiKey: Boolean(process.env.CLAUDE_API_KEY),
-      defaultModel: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
-      geminiSystemKeyState: geminiSystemKeyState.getStatus(),
-      openaiSystemKeyState: openaiSystemKeyState.getStatus(),
-      claudeSystemKeyState: claudeSystemKeyState.getStatus(),
-      // Backward compatibility
-      systemKeyState: geminiSystemKeyState.getStatus(),
+      ...(isAuthed
+        ? {
+            hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
+            hasOpenAiApiKey: Boolean(process.env.OPENAI_API_KEY),
+            hasClaudeApiKey: Boolean(process.env.CLAUDE_API_KEY),
+            defaultModel: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+            geminiSystemKeyState: geminiSystemKeyState.getStatus(),
+            openaiSystemKeyState: openaiSystemKeyState.getStatus(),
+            claudeSystemKeyState: claudeSystemKeyState.getStatus(),
+            systemKeyState: geminiSystemKeyState.getStatus(),
+          }
+        : {}),
     });
   });
 
-  // System key status endpoint
-  app.get('/api/system-key-status', (req, res) => {
+  // System key status endpoint (protected behind API key)
+  app.get('/api/system-key-status', requireApiKey, (req, res) => {
     const provider = (req.query.provider as string)?.toLowerCase();
     if (provider === 'openai') {
       return res.json(openaiSystemKeyState.getStatus());
@@ -272,6 +366,8 @@ async function startServer() {
           sshPassword: config.sshPassword,
           sshPrivateKey: config.sshPrivateKey,
           sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+          sshHostKeyFingerprint: config.sshHostKeyFingerprint?.trim(),
+          strictHostKeyChecking: config.strictHostKeyChecking,
           targetHost: host,
           targetPort: port,
         });
@@ -304,6 +400,11 @@ async function startServer() {
       const versionRows = (await versionResult.json()) as Array<{ ver: string }>;
       const clickhouseVersion = versionRows[0]?.ver || 'OK';
 
+      let pinMatches: boolean | undefined = undefined;
+      if (tunnel?.serverHostKey && config.sshHostKeyFingerprint) {
+        pinMatches = matchesExpectedHostKey(config.sshHostKeyFingerprint, tunnel.serverHostKey);
+      }
+
       // Quick permissions check: attempt to read 1 row from system.build_options or system.tables
       try {
         await client.query({
@@ -315,6 +416,8 @@ async function startServer() {
           success: false,
           error: `Connected to ClickHouse v${clickhouseVersion}, but lack SELECT permissions on system.* tables.`,
           hint: 'Please ensure your database user has SELECT grants on system.* tables (e.g. system.parts, system.columns, system.tables).',
+          serverHostKey: tunnel?.serverHostKey,
+          pinMatches,
         });
       }
 
@@ -322,15 +425,23 @@ async function startServer() {
         success: true,
         version: clickhouseVersion,
         message: `Successfully connected to ClickHouse v${clickhouseVersion} at ${host}:${port}`,
+        serverHostKey: tunnel?.serverHostKey,
+        pinMatches,
       });
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : 'Unknown connection error';
       console.warn('Test connection failure:', errMsg);
       const { hint } = classifyConnectionError(errMsg);
+      let pinMatches: boolean | undefined = undefined;
+      if (tunnel?.serverHostKey && config.sshHostKeyFingerprint) {
+        pinMatches = matchesExpectedHostKey(config.sshHostKeyFingerprint, tunnel.serverHostKey);
+      }
       res.status(400).json({
         success: false,
         error: errMsg,
         hint,
+        serverHostKey: tunnel?.serverHostKey,
+        pinMatches,
       });
     } finally {
       await client?.close();
@@ -365,6 +476,8 @@ async function startServer() {
           sshPassword: config.sshPassword,
           sshPrivateKey: config.sshPrivateKey,
           sshPrivateKeyPassphrase: config.sshPrivateKeyPassphrase,
+          sshHostKeyFingerprint: config.sshHostKeyFingerprint?.trim(),
+          strictHostKeyChecking: config.strictHostKeyChecking,
           targetHost,
           targetPort,
         });
@@ -402,7 +515,8 @@ async function startServer() {
             activeApiKey,
             {
               enableAiNarrative: true,
-              allowSystemKeyFallback: true,
+              allowSystemKeyFallback:
+                process.env.YACHIRU_ALLOW_SYSTEM_LLM_KEY === 'true' && isEnforcedApiKeyValid(req),
             }
           );
           report.ai_narrative = narrative;
@@ -712,8 +826,8 @@ async function startServer() {
     }
   });
 
-  // Narrative generation on-demand for existing report
-  app.post('/api/narrate', requireApiKey, async (req, res) => {
+  // Narrative generation on-demand for existing report (rate-limited to prevent LLM quota exhaustion)
+  app.post('/api/narrate', narrateLimiter, requireApiKey, async (req, res) => {
     const {
       report,
       provider: reqProvider,
@@ -722,23 +836,57 @@ async function startServer() {
       openaiApiKey,
       claudeApiKey,
       enableAiNarrative,
-      allowSystemKeyFallback,
-    } = req.body;
+    } = req.body || {};
 
-    if (!report) {
-      return res.status(400).json({ error: 'Missing report payload' });
+    if (!report || typeof report !== 'object') {
+      return res.status(400).json({ error: 'Missing or invalid report payload' });
+    }
+
+    // Validate report shape: string scan_id and findings array with max 250 items
+    if (typeof report.scan_id !== 'string' || !report.scan_id.trim()) {
+      return res.status(400).json({ error: 'Invalid report shape: scan_id must be a non-empty string.' });
+    }
+    if (!Array.isArray(report.findings) || report.findings.length > 250) {
+      return res.status(400).json({
+        error: 'Invalid report shape: findings must be an array with at most 250 items.',
+      });
+    }
+
+    // Determine provider from explicit body or infer from model ID
+    const provider: AiProvider = reqProvider || (
+      model?.startsWith('gpt-') ? 'openai' :
+      model?.startsWith('claude-') ? 'claude' : 'gemini'
+    );
+
+    // Validate model against AVAILABLE_AI_MODELS for the chosen provider (400 if unknown)
+    if (model && typeof model === 'string' && model.trim() !== '') {
+      const cleanModel = model.trim().toLowerCase();
+      const isValid = AVAILABLE_AI_MODELS.some(
+        (m) => m.provider === provider && m.id.toLowerCase() === cleanModel
+      );
+      if (!isValid) {
+        return res.status(400).json({
+          error: `Unknown or unsupported model '${model}' for provider '${provider}'.`,
+        });
+      }
+    }
+
+    // Server decides whether system keys may be used, never the client:
+    // Only when YACHIRU_ALLOW_SYSTEM_LLM_KEY=true AND request passed requireApiKey with enforcement active
+    const systemKeyAllowed =
+      process.env.YACHIRU_ALLOW_SYSTEM_LLM_KEY === 'true' && isEnforcedApiKeyValid(req);
+
+    const apiKey = provider === 'openai' ? openaiApiKey : provider === 'claude' ? claudeApiKey : geminiApiKey;
+
+    // With a system key configured and no opt-in, an unauthenticated call without its own key is rejected
+    if (!apiKey && !systemKeyAllowed) {
+      return res.status(401).json({
+        error: 'System LLM keys are disabled for unauthenticated or external requests. Please provide your own AI API key.',
+      });
     }
 
     try {
       const isAiRequested = enableAiNarrative !== false;
-      const canUseSystemFallback = allowSystemKeyFallback ?? isAiRequested;
-
-      // Determine provider from explicit body or infer from model ID
-      const provider: AiProvider = reqProvider || (
-        model?.startsWith('gpt-') ? 'openai' :
-        model?.startsWith('claude-') ? 'claude' : 'gemini'
-      );
-      const apiKey = provider === 'openai' ? openaiApiKey : provider === 'claude' ? claudeApiKey : geminiApiKey;
 
       const narrative = await generateNarrativeForProvider(
         report,
@@ -747,7 +895,7 @@ async function startServer() {
         apiKey,
         {
           enableAiNarrative: isAiRequested,
-          allowSystemKeyFallback: canUseSystemFallback,
+          allowSystemKeyFallback: systemKeyAllowed,
         }
       );
 
@@ -781,13 +929,21 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Yachiru] Server running at http://0.0.0.0:${PORT}`);
     console.log(`[Yachiru] Verification store directory: ${getDataDir()}`);
-    if (!YACHIRU_API_KEY) {
+    if (YACHIRU_API_KEY) {
+      console.log(
+        '[Yachiru Security] API authentication is ENABLED. Protected routes require "Authorization: Bearer <key>".'
+      );
+    } else {
       console.warn(
-        '[Yachiru] WARNING: YACHIRU_API_KEY is not set. API authentication is disabled; API routes are open to unauthenticated callers. Set YACHIRU_API_KEY in production.'
+        '[Yachiru Security] WARNING: YACHIRU_API_KEY is not set. API authentication is disabled; API routes (/api/analyze, /api/verifications, /api/test-connection) are open to unauthenticated callers. To lock down the API in deployment, set YACHIRU_API_KEY or set YACHIRU_REQUIRE_API_KEY=true.'
       );
     }
   });
 }
 
-startServer();
+const isTestRunner = process.env.NODE_ENV === 'test' || process.argv.some((arg) => arg.includes('test'));
+if (!isTestRunner) {
+  checkApiKeyStartupConfig();
+  startServer();
+}
 

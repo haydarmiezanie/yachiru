@@ -8,7 +8,21 @@ Yachiru is an automated health audit and performance diagnostics analyzer for Cl
 
 The repository includes a multi-stage `Dockerfile` and ready-to-run `docker-compose.yml` that builds and runs Yachiru on port `3000`.
 
-### 1. Build and Run
+### 1. Configure API Key & Environment (Recommended for Deployment)
+To secure your deployment and prevent API endpoints from being exposed without authentication:
+```bash
+# Copy example configuration
+cp .env.example .env
+
+# Generate a cryptographically secure 32-byte API key
+npm run generate-api-key
+
+# Set YACHIRU_API_KEY in your .env file:
+# YACHIRU_API_KEY="<your-generated-key>"
+# YACHIRU_REQUIRE_API_KEY="true"
+```
+
+### 2. Build and Run
 ```bash
 docker compose up --build
 ```
@@ -18,20 +32,24 @@ Or run detached in the background:
 docker compose up -d --build
 ```
 
-### 2. Access the Web Interface
+### 3. Access the Web Interface
 Open your browser at:
 **[http://localhost:3000](http://localhost:3000)**
 
-### 3. Zero-Setup Simulation
+When `YACHIRU_API_KEY` is configured, the web interface automatically detects that API key authentication is required and provides an API key input in the connection modal.
+
+### 4. Zero-Setup Simulation
 If you want to explore Yachiru without connecting to a live cluster, click **"Simulate Production Scan"** on the home page. This runs the full diagnostic rule engine against realistic production telemetry, demonstrating part health visualizations, primary key pruning checks, and AI narratives.
 
-### 4. Standalone Docker Run (Without Compose)
+### 5. Standalone Docker Run (Without Compose)
 ```bash
 # Build image
 docker build -t yachiru-analyzer .
 
-# Run container (with host network mapping enabled)
+# Run container with API Key authentication enabled
 docker run -d -p 3000:3000 \
+  -e YACHIRU_API_KEY="<YOUR_SECRET_API_KEY>" \
+  -e YACHIRU_REQUIRE_API_KEY="true" \
   --add-host=host.docker.internal:host-gateway \
   --name yachiru-app yachiru-analyzer
 ```
@@ -49,7 +67,12 @@ Yachiru is designed from the ground up with a **strict read-only, zero-data-acce
 
 1. **Client-Side Read-Only Enforcement**: Every query sent to ClickHouse passes through `assertReadOnlySql()`. Yachiru strictly issues `SELECT` queries against ClickHouse system metadata tables (`system.*`). It will never execute or accept mutating SQL statements (`INSERT`, `UPDATE`, `ALTER`, `DROP`, `TRUNCATE`, or `KILL`).
 2. **Zero Table Data Access**: Yachiru never reads application data or column values from user tables (`<database>.*` is never queried).
-3. **Two-Tier Privilege Structure**:
+3. **Query Log & Mutation Parameter Privacy Sanitization**: While ClickHouse `system.query_log` and `system.mutations` capture historical SQL executions across the server, Yachiru strips user parameters, row values, PII, and literals before sending evidence to diagnostic displays or external LLM providers:
+   - For `system.query_log`, Yachiru selects ClickHouse's server-side `normalizeQuery(query)` (which replaces query literals with `?` at the AST level) and `normalized_query_hash`. If server-side normalization is unsupported, query text is omitted entirely.
+   - For `system.mutations`, only mutation action types (e.g. `UPDATE`, `DELETE`) and targeted tables are reported; mutation predicate and command expressions are not forwarded.
+   - Defense-in-depth tokenization filter (`sanitizeQueryForPrivacy` / `sanitizeEvidenceForLLM`): Quoted string literals (including escaped quotes and heredocs), numeric constants, negative numbers, array/function arguments, UUIDs, IP addresses, and developer comments are scrubbed. Unterminated literals from log truncation are redacted through end of input.
+   - LLM narrative payloads receive strictly normalized query patterns, schema definitions, and operational aggregate metrics (e.g. scanned rows, read bytes, duration, amplification ratio). Known limitation: unquoted alphanumeric tokens or column alias names matching sensitive strings cannot be distinguished from schema identifiers by regex filters alone.
+4. **Two-Tier Privilege Structure**:
    - **Required Grants**: The core diagnostic checks require `SELECT` access on 5 system metadata tables:
      - `system.tables`
      - `system.parts`
@@ -64,10 +87,10 @@ Yachiru is designed from the ground up with a **strict read-only, zero-data-acce
      - `system.disks` (enables Storage Volume Headroom and Disk Space checks)
      - `system.errors` (enables System Error Rate and Exception spike checks)
      - `system.replication_queue` (enables Replication Queue Backlog and Retry checks)
-4. **Server-Level Read-Only Setting (`readonly = 2`)**:
+5. **Server-Level Read-Only Setting (`readonly = 2`)**:
    It is recommended to enforce read-only status on the user profile via `SETTINGS readonly = 2, max_execution_time = 30`.
    > **Note on `readonly = 2` vs `readonly = 1`**: ClickHouse setting `readonly = 1` rejects all per-query setting overrides, which breaks diagnostic execution (Yachiru sets defensive per-query execution timeouts such as `max_execution_time`). Setting `readonly = 2` safely blocks all mutations while allowing required per-query read settings and timeouts.
-5. **Cross-Database Metadata Scope Notice**:
+6. **Cross-Database Metadata Scope Notice**:
    Because ClickHouse grants `SELECT` at the table level rather than scoped to one logical database, a user granted access to these `system.*` tables can see metadata (table names, sizes, schema column names, and part counts) for **every database on that ClickHouse server**, not only the target database being analyzed. It still cannot read table contents or modify anything. If your environment requires complete segregation where the existence of other databases is obscured, you must provision isolated cluster roles or nodes through your infrastructure.
 
 ### In-App Read-Only Setup SQL Generator
@@ -117,8 +140,11 @@ When your ClickHouse cluster resides inside a private VPC, behind a firewall, or
   - **Password Auth**: Bastion username and password.
   - **Private Key (PEM)**: OpenSSH or RSA PEM private key with optional decryption passphrase.
 - **Ephemeral Port Forwarding**: Yachiru binds an OS-assigned ephemeral loopback port, establishes the encrypted SSH tunnel, runs the scan, and tears down the connection immediately upon completion.
-- **Mandatory Host Key Notice**:
-  > This version of Yachiru does not verify the bastion's SSH host key (no known-hosts pinning or Trust On First Use / TOFU verification is implemented). Traffic over the tunnel is encrypted using standard SSH cryptographic ciphers, but you should ensure the bastion hostname and network routing are trusted.
+- **Host Key Verification & MITM Protection**:
+  - Yachiru supports cryptographic SSH host key pinning using OpenSSH SHA256 fingerprints (`SHA256:...`), hex SHA256, MD5 colons (`MD5:aa:bb:...`), or raw public keys.
+  - In production (`NODE_ENV=production`), **strict host key verification is enforced by default**; connections without a matching pinned fingerprint are rejected with HTTP 400. Operators can explicitly allow unverified connections by setting `YACHIRU_SSH_STRICT_HOST_KEY="false"`.
+  - In non-production environments, connections default to permissive mode, allowing users to test connection reachability, view the remote bastion's cryptographic fingerprint in the UI, and pin it with 1 click.
+  - The server policy is an absolute floor: clients can request stricter checking (`strictHostKeyChecking: true`), but can never relax an active server-enforced policy.
 
 ---
 
@@ -135,8 +161,9 @@ Yachiru allows saving and reloading named connection profiles so you don't have 
 
 Yachiru tracks health score trends, category progressions, and finding regressions across scans without requiring any local state:
 
-### Zero-State Container Architecture
-Yachiru's container and server hold **zero state** (no SQLite, no local disk volumes, no cloud database accounts). All historical scan snapshots are stored in a table inside your own ClickHouse cluster.
+### Storage & Persistence Model
+- **Scan History Snapshots**: Stored directly in your ClickHouse cluster (`default.yachiru_scan_history`). Yachiru does not require an external SQL database or cloud service to track performance trends.
+- **Before/After Verification Sessions**: Stored in a lightweight JSON store on the server filesystem (`data/verifications.json`), configured via `YACHIRU_DATA_DIR` (mapped to `/app/data` volume in Docker Compose).
 
 ### Dual-Credential Security Architecture
 To maintain strict least-privilege security, Yachiru uses two completely separate ClickHouse accounts:
@@ -220,7 +247,7 @@ Every check, connection test, and narrative diagnosis can be run headlessly outs
 
 - **Endpoints**: `/api/health`, `/api/test-connection`, `/api/analyze`, `/api/narrate`, and `/api/system-key-status`.
 - **Authentication**: Unauthenticated by default for local and UI workflows. When `YACHIRU_API_KEY` is configured in the environment, API requests require `Authorization: Bearer <key>` or `X-Yachiru-Api-Key: <key>`.
-- **Rate Limiting**: Automated requests to `/api/analyze` and `/api/test-connection` are throttled (default 30 requests/minute per client, configurable via `YACHIRU_RATE_LIMIT_PER_MINUTE`).
+- **Rate Limiting**: Automated requests to `/api/analyze`, `/api/test-connection`, and `/api/verifications` are throttled (default 30 req/min, configurable via `YACHIRU_RATE_LIMIT_PER_MINUTE`). LLM narrative synthesis (`/api/narrate`) is throttled separately (default 15 req/min, configurable via `YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE`) to conserve AI quotas.
 
 For full request/response JSON schemas, error codes, and copy-paste CI `curl` bash scripts, see **[API.md](API.md)**.
 
@@ -232,14 +259,20 @@ All environment variables are declared in `.env.example`:
 
 | Variable | Required / Optional | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | Optional | API key for Google Gemini narrative synthesis. Used as the server-wide default if not supplied in the UI. |
+| `GEMINI_API_KEY` | Optional | API key for Google Gemini narrative synthesis. |
 | `GEMINI_MODEL` | Optional | Default Gemini model ID for narrative generation (defaults to `gemini-3.8-flash`). |
-| `OPENAI_API_KEY` | Optional | API key for OpenAI narrative synthesis. Used when OpenAI is selected and no UI key is provided. |
-| `CLAUDE_API_KEY` | Optional | API key for Anthropic Claude narrative synthesis. Used when Claude is selected and no UI key is provided. |
-| `APP_URL` | Optional | Public URL where Yachiru is hosted; used for OAuth callbacks, API links, and Cloud Run discovery. |
-| `YACHIRU_API_KEY` | Optional | When set, locks `/api/analyze`, `/api/narrate`, `/api/test-connection`, `/api/verifications`, and `/api/system-key-reset` behind Bearer token authentication. If unset, a startup warning is logged; strongly recommended in production environments. |
-| `YACHIRU_RATE_LIMIT_PER_MINUTE` | Optional | Maximum allowed requests per minute for analysis and test-connection endpoints (default: `30`). |
-| `YACHIRU_DATA_DIR` | Optional | Filesystem directory path for storing before/after verification sessions (default: `./data`). Configured as a volume in Docker Compose. |
+| `OPENAI_API_KEY` | Optional | API key for OpenAI narrative synthesis. |
+| `CLAUDE_API_KEY` | Optional | API key for Anthropic Claude narrative synthesis. |
+| `APP_URL` | Optional | Public URL where Yachiru is hosted; used for discovery and self-referential links. |
+| `YACHIRU_API_KEY` | Required in Production | When set, locks `/api/analyze`, `/api/narrate`, `/api/test-connection`, `/api/verifications`, `/api/history`, and `/api/system-key-status` behind Bearer token authentication. In production (`NODE_ENV=production`), required by default. |
+| `YACHIRU_REQUIRE_API_KEY` | Optional | Explicitly enforces API key requirement regardless of environment. If true and `YACHIRU_API_KEY` is unset, the server fails fast and refuses to boot. |
+| `YACHIRU_ALLOW_OPEN_API` | Optional | Explicit override to allow running in `NODE_ENV=production` without an API key (defaults to `false`). |
+| `YACHIRU_ALLOW_SYSTEM_LLM_KEY` | Optional | When `true`, allows authenticated API requests to use server-configured LLM keys for `/api/narrate`. Defaults to `false` to protect operator quota. |
+| `YACHIRU_TRUST_PROXY` | Optional | Configures reverse proxy trust for client IP rate limiting (`app.set('trust proxy', N)`). Set to hop count (e.g. `1`) or `true` when deployed behind a proxy/ALB/Cloudflare. |
+| `YACHIRU_RATE_LIMIT_PER_MINUTE` | Optional | Maximum allowed requests per minute per IP for analysis and test-connection endpoints (default: `30`). |
+| `YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE` | Optional | Maximum allowed requests per minute per IP for LLM narrative synthesis (`/api/narrate`) (default: `15`). |
+| `YACHIRU_DATA_DIR` | Optional | Filesystem directory path for storing before/after verification sessions (default: `./data`). Mapped to `/app/data` volume in Docker Compose. |
+| `YACHIRU_SSH_STRICT_HOST_KEY` | Optional | Enforces strict SSH host key checking. In production, defaults to `true` (unpinned or mismatched bastion connections rejected). In non-production, defaults to `false`. Can be explicitly set to `true` or `false`. |
 
 ---
 

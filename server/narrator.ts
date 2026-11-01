@@ -2,6 +2,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { AINarrative, AnalysisReport, AiProvider } from '../src/types.js';
+import { sanitizeQueryForPrivacy } from './analyzer.js';
 
 // Default TTL for system API key depletion status (10 minutes)
 const SYSTEM_KEY_DEPLETION_TTL_MS = 10 * 60 * 1000;
@@ -544,14 +545,17 @@ export function resolveGeminiModelId(inputModel?: string): string {
   if (!inputModel) return 'gemini-3.8-flash';
   const clean = inputModel.trim().toLowerCase();
 
+  if (clean === 'gemini-4-argon' || clean === 'gemini-4.0-argon' || clean.includes('argon')) {
+    return 'gemini-4-argon';
+  }
+  if (clean === 'gemini-3.5-flash-lite' || clean.includes('3.5-flash-lite') || clean.includes('3.5-lite')) {
+    return 'gemini-3.5-flash-lite';
+  }
   if (clean === 'gemini-3.1-pro' || clean === 'gemini-3.1-pro-preview' || clean.includes('3.1-pro')) {
     return 'gemini-3.1-pro-preview';
   }
   if (clean === 'gemini-3.8-flash' || clean.includes('3.8-flash')) {
     return 'gemini-3.8-flash';
-  }
-  if (clean === 'gemini-3.7-flash' || clean.includes('3.7-flash')) {
-    return 'gemini-3.7-flash';
   }
   if (clean === 'gemini-3.6-flash' || clean.includes('3.6-flash')) {
     return 'gemini-3.6-flash';
@@ -559,8 +563,12 @@ export function resolveGeminiModelId(inputModel?: string): string {
   if (clean === 'gemini-2.5-flash' || clean.includes('2.5-flash')) {
     return 'gemini-2.5-flash';
   }
+  // Aliases for migrated models
+  if (clean === 'gemini-3.7-flash' || clean === 'gemini-3.5-flash') {
+    return 'gemini-4-argon';
+  }
   if (clean === 'gemini-3.1-flash-lite' || clean.includes('flash-lite')) {
-    return 'gemini-3.1-flash-lite';
+    return 'gemini-3.5-flash-lite';
   }
 
   return inputModel;
@@ -597,9 +605,9 @@ export function getModelFallbackChain(primaryModel: string): string[] {
   // Known active models to fallback to in case of transient 503 or 404
   const standardFallbacks = [
     'gemini-3.8-flash',
+    'gemini-4-argon',
+    'gemini-3.5-flash-lite',
     'gemini-2.5-flash',
-    'gemini-3.1-flash-lite',
-    'gemini-3.7-flash',
     'gemini-3.1-pro-preview',
   ];
 
@@ -733,6 +741,16 @@ export function getSupportedReasoningEffort(modelId: string, requestedEffort?: s
 }
 
 /**
+ * Sanitizes diagnostic finding evidence before serialization into LLM prompt payloads.
+ * Literal values and user parameters are stripped using defense-in-depth tokenization filters
+ * to prevent leaking application literals, query constants, or PII to external LLM providers.
+ */
+export function sanitizeEvidenceForLLM(evidence: string): string {
+  if (!evidence || typeof evidence !== 'string') return '';
+  return sanitizeQueryForPrivacy(evidence);
+}
+
+/**
  * Single source of truth for prompt building, shared across all AI providers.
  */
 export function buildAuditPrompt(report: AnalysisReport): {
@@ -751,6 +769,7 @@ CORE RESPONSIBILITIES:
 STRICT OPERATIONAL DIRECTIVES:
 - Base all evaluations on ClickHouse columnar storage and vectorized execution mechanics.
 - Do NOT fabricate table names or metrics not present in the payload.
+- OPERATIONAL DATA PRIVACY DIRECTIVE: Telemetry payload contains strictly operational aggregate metrics, schema definitions, and normalized query patterns. Literal values and parameters are stripped via database-level normalization (where supported) and defense-in-depth sanitization filters before transmission.
 - Provide production-ready, safe remediation SQL statements (e.g., ALTER TABLE ADD/MODIFY COLUMN CODEC, ADD INDEX ... TYPE minmax/set/bloom_filter, OPTIMIZE TABLE ... FINAL DEDUPLICATE, SET max_threads/max_execution_time).
 `.trim();
 
@@ -800,7 +819,7 @@ ${JSON.stringify(
     status: f.status,
     metric_value: f.metric_value,
     threshold: f.threshold,
-    evidence: f.evidence,
+    evidence: sanitizeEvidenceForLLM(f.evidence),
     impact: f.impact,
   })),
   null,

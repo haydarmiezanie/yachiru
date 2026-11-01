@@ -143,6 +143,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
   const [sshPrivateKeyPassphrase, setSshPrivateKeyPassphrase] = useState(() => {
     return sessionStorage.getItem('yachiru_ssh_private_key_passphrase') || '';
   });
+  const [sshHostKeyFingerprint, setSshHostKeyFingerprint] = useState('');
   const [showSshPassword, setShowSshPassword] = useState(false);
   const [showSshPassphrase, setShowSshPassphrase] = useState(false);
   const [sshHostCorrectedNotice, setSshHostCorrectedNotice] = useState<string | null>(null);
@@ -165,6 +166,13 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     success: boolean;
     message: string;
     hint?: string;
+    pinMatches?: boolean;
+    serverHostKey?: {
+      type: string;
+      fingerprintSha256: string;
+      fingerprintMd5: string;
+      rawBase64: string;
+    };
   } | null>(null);
 
   // User-provided AI state (Gemini, OpenAI & Claude)
@@ -292,8 +300,10 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       setSshPort(target.sshPort || 22);
       setSshUsername(target.sshUsername || '');
       setSshAuthMethod(target.sshAuthMethod || 'password');
+      setSshHostKeyFingerprint(target.sshHostKeyFingerprint || '');
     } else {
       setUseSshTunnel(false);
+      setSshHostKeyFingerprint('');
     }
 
     if (target.enableHistoryTracking) {
@@ -354,6 +364,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         sshPort,
         sshUsername,
         sshAuthMethod,
+        sshHostKeyFingerprint: sshHostKeyFingerprint.trim() || undefined,
         enableHistoryTracking,
         historyDatabase: historyDatabase.trim() || undefined,
         historyTableName: historyTableName.trim() || undefined,
@@ -549,6 +560,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
               sshAuthMethod === 'privateKey' && sshPrivateKeyPassphrase
                 ? sshPrivateKeyPassphrase
                 : undefined,
+            sshHostKeyFingerprint: sshHostKeyFingerprint.trim() || undefined,
           }
         : { useSshTunnel: false };
 
@@ -572,12 +584,16 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
         setTestResult({
           success: true,
           message: data.message || `Connected to ClickHouse v${data.version || 'OK'} successfully (${targetProtocol.toUpperCase()}${useSshTunnel ? ' via SSH Tunnel' : ''})`,
+          serverHostKey: data.serverHostKey,
+          pinMatches: data.pinMatches,
         });
       } else {
         setTestResult({
           success: false,
           message: data.error || `Test connection failed (Status ${response.status})`,
           hint: data.hint,
+          serverHostKey: data.serverHostKey,
+          pinMatches: data.pinMatches,
         });
       }
     } catch (err: unknown) {
@@ -689,6 +705,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
               sshAuthMethod === 'privateKey' && sshPrivateKeyPassphrase
                 ? sshPrivateKeyPassphrase
                 : undefined,
+            sshHostKeyFingerprint: sshHostKeyFingerprint.trim() || undefined,
           }
         : { useSshTunnel: false };
 
@@ -1308,17 +1325,74 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
                     </>
                   )}
 
-                  {/* Mandatory Disclosure: SSH Host Key Verification Notice */}
-                  <div className="sm:col-span-12 p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 space-y-1.5">
-                    <div className="flex items-center gap-2 text-zinc-200 font-semibold text-xs">
-                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                      <span>Bastion SSH Host Key Verification Notice</span>
+                  {/* SSH Host Key Fingerprint (Pinned Key / MITM Protection) */}
+                  <div className="sm:col-span-12">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                        <Shield className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Bastion SSH Host Key Fingerprint (Recommended for MITM Protection)</span>
+                      </label>
+                      <span className="text-[11px] text-zinc-500 font-mono">OpenSSH SHA256 / MD5 / public key</span>
                     </div>
-                    <p className="leading-relaxed">
-                      This version of Yachiru does not verify the bastion&apos;s SSH host key (no known-hosts pinning or Trust On First Use / TOFU verification is implemented). Traffic over the tunnel is encrypted using standard SSH cryptographic ciphers, but you should ensure the bastion hostname and network routing are trusted.
+                    <div className="relative">
+                      <input
+                        id="input-ssh-host-key-fingerprint"
+                        type="text"
+                        value={sshHostKeyFingerprint}
+                        onChange={(e) => setSshHostKeyFingerprint(e.target.value)}
+                        placeholder="e.g. SHA256:RXm/ruZ0eTzRXKwi1AQEDynB0VgHQ2ac9KPSFdf/YnA or ssh-ed25519..."
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500 transition font-mono"
+                      />
+                      {sshHostKeyFingerprint && (
+                        <button
+                          type="button"
+                          onClick={() => setSshHostKeyFingerprint('')}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 text-xs px-1.5 py-0.5 rounded cursor-pointer"
+                          title="Clear Fingerprint"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-zinc-500 mt-1 leading-relaxed">
+                      Enter the bastion&apos;s SHA256 base64 fingerprint, MD5 hex, or public key. When set, Yachiru cryptographically verifies the server during SSH handshake and immediately aborts if the key does not match (MITM protection).
+                    </p>
+                  </div>
+
+                  {/* SSH Host Key Verification Security Status Notice */}
+                  <div className="sm:col-span-12 p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-400 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-zinc-200 font-semibold text-xs">
+                        <Shield className={`w-4 h-4 shrink-0 ${sshHostKeyFingerprint.trim() ? 'text-emerald-400' : 'text-amber-400'}`} />
+                        <span>Bastion Host Key Verification Status</span>
+                      </div>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${
+                        sshHostKeyFingerprint.trim()
+                          ? testResult?.pinMatches
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                            : 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                      }`}>
+                        {sshHostKeyFingerprint.trim()
+                          ? testResult?.pinMatches
+                            ? 'PINNED & VERIFIED'
+                            : 'PINNED'
+                          : 'UNVERIFIED (no pin)'}
+                      </span>
+                    </div>
+                    <p className="leading-relaxed text-zinc-400">
+                      {sshHostKeyFingerprint.trim() ? (
+                        testResult?.pinMatches ? (
+                          <>Pinned host key verified: The remote bastion presented a matching host key during handshake.</>
+                        ) : (
+                          <>Host key is pinned. Click <strong>Test Connection</strong> below to verify during SSH handshake.</>
+                        )
+                      ) : (
+                        <>Unverified connection (no pin). Click <strong>Test Connection</strong> below to inspect the bastion&apos;s cryptographic host key and pin it with 1 click.</>
+                      )}
                     </p>
                     <div className="text-[11px] text-zinc-500 pt-1 border-t border-zinc-800/80 flex flex-wrap gap-x-4 gap-y-1">
-                      <span>🔒 <strong>Ephemeral Credentials:</strong> SSH keys and passwords are held in session memory only and are never written to persistent disk.</span>
+                      <span>🔒 <strong>Ephemeral Credentials:</strong> SSH keys and passwords are held in session memory only and are never written to disk.</span>
                       <span>⚡ <strong>Dynamic Forwarding:</strong> Forwarded connections are bound to an OS-assigned ephemeral loopback port and torn down when the request completes.</span>
                     </div>
                   </div>
@@ -1796,9 +1870,37 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
               ) : (
                 <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
               )}
-              <div className="space-y-1">
+              <div className="space-y-1.5 flex-1 min-w-0">
                 <div className="font-semibold">{testResult.message}</div>
                 {testResult.hint && <div className="text-zinc-300 leading-relaxed text-[11px]">{testResult.hint}</div>}
+
+                {testResult.serverHostKey && (
+                  <div className="mt-2 pt-2 border-t border-zinc-800/80 text-[11px] space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                      <span className="text-zinc-400 font-medium">
+                        Bastion Host Key ({testResult.serverHostKey.type}):
+                      </span>
+                      {testResult.pinMatches ? (
+                        <span className="text-emerald-400 font-medium flex items-center gap-1">
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span>Pinned &amp; Verified</span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setSshHostKeyFingerprint(testResult.serverHostKey!.fingerprintSha256)}
+                          className="px-2.5 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 font-semibold text-xs transition cursor-pointer flex items-center gap-1"
+                        >
+                          <Shield className="w-3 h-3 text-cyan-400" />
+                          <span>Pin Host Key</span>
+                        </button>
+                      )}
+                    </div>
+                    <div className="font-mono text-zinc-300 bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-800 break-all select-all text-[11px]">
+                      {testResult.serverHostKey.fingerprintSha256}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
