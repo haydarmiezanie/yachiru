@@ -133,7 +133,18 @@ export const TrendView: React.FC<TrendViewProps> = ({
     return 'bg-rose-500/10 border-rose-500/20 text-rose-300';
   };
 
-  const getDeltaBadge = (delta: number) => {
+  const getDeltaBadge = (delta: number, coverageChanged?: boolean, coverageNote?: string) => {
+    if (coverageChanged) {
+      return (
+        <span
+          title={coverageNote || 'Category coverage changed between scans — scores are not directly comparable'}
+          className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400"
+        >
+          <AlertTriangle className="w-3 h-3 text-amber-400" />
+          <span>Coverage changed</span>
+        </span>
+      );
+    }
     if (delta > 0) {
       return (
         <span className="inline-flex items-center gap-0.5 text-xs font-semibold px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
@@ -300,6 +311,10 @@ export const TrendView: React.FC<TrendViewProps> = ({
                 const delta = nextItem ? item.overall_score - nextItem.overall_score : 0;
                 const isSelected = selectedScanIndex === idx;
 
+                const itemCats = Object.keys(item.category_scores || {}).sort().join(',');
+                const nextCats = Object.keys(nextItem?.category_scores || {}).sort().join(',');
+                const coverageChanged = nextItem ? itemCats !== nextCats : false;
+
                 return (
                   <button
                     key={item.scan_id || idx}
@@ -337,7 +352,7 @@ export const TrendView: React.FC<TrendViewProps> = ({
 
                     <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between text-[11px]">
                       {nextItem ? (
-                        getDeltaBadge(delta)
+                        getDeltaBadge(delta, coverageChanged, 'Evaluated category sets differ between these scans')
                       ) : (
                         <span className="text-[10px] text-zinc-500">Baseline run</span>
                       )}
@@ -359,9 +374,19 @@ export const TrendView: React.FC<TrendViewProps> = ({
                   </h3>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  {getDeltaBadge(comparison.scoreDelta)}
+                  {getDeltaBadge(comparison.scoreDelta, comparison.coverageChanged, comparison.coverageNote)}
                 </div>
               </div>
+
+              {comparison.coverageChanged && (
+                <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-500/30 text-xs text-amber-300 flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold text-amber-200">Coverage Warning: </span>
+                    {comparison.coverageNote || 'Category coverage changed since previous scan; overall scores are not directly comparable.'}
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Resolved Findings */}

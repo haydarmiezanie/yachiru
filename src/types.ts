@@ -131,6 +131,8 @@ export interface TableMetadata {
 
 export interface AINarrative {
   model: string;
+  model_requested?: string;
+  model_used?: string;
   executive_summary: string;
   cluster_health_verdict?: string;
   top_priorities: Array<{
@@ -148,6 +150,37 @@ export interface AINarrative {
   rawError?: string;
 }
 
+export type ClusterVerdict = 'Optimized' | 'Needs Tuning' | 'Critical Optimization Required' | 'Incomplete';
+
+export type CategoryCoverageState = 'evaluated' | 'not_applicable' | 'unavailable';
+
+export type CategoryUnavailableReason =
+  | 'permission_denied'
+  | 'timeout'
+  | 'error'
+  | 'not_configured'
+  | 'no_replicated_tables';
+
+export interface CategoryCoverageItem {
+  id: CheckFinding['category'];
+  name: string;
+  state: CategoryCoverageState;
+  reason?: CategoryUnavailableReason;
+  detail?: string;
+  requiredGrant?: string;
+}
+
+export interface AnalysisCoverage {
+  categories: CategoryCoverageItem[];
+  evaluatedCount: number;
+  totalCount: number;
+  applicableCount: number;
+  unavailableCount: number;
+  notApplicableCount: number;
+  isComplete: boolean;
+  hasUnavailable?: boolean;
+}
+
 export interface AnalysisReport {
   scan_id: string;
   timestamp: string;
@@ -155,7 +188,11 @@ export interface AnalysisReport {
   clickhouse_version: string;
   cluster_mode: string;
   overall_score: number; // 0 - 100
-  overall_verdict: 'Optimized' | 'Needs Tuning' | 'Critical Optimization Required';
+  overall_verdict: ClusterVerdict;
+  coverage?: AnalysisCoverage;
+  tables_truncated?: boolean;
+  tables_total?: number;
+  columns_truncated?: boolean;
   is_demo: boolean;
   summary: {
     total_tables: number;
@@ -273,6 +310,8 @@ export interface ScanComparison {
   previousScanAt?: string;
   currentScanAt?: string;
   scoreDelta?: number;
+  coverageChanged?: boolean;
+  coverageNote?: string;
   newFindings: FindingSummaryItem[];
   resolvedFindings: FindingSummaryItem[];
   persistentFindings: FindingSummaryItem[];

@@ -27,6 +27,23 @@ function getStorage(): Storage | null {
 }
 
 /**
+ * Returns authorization headers for API requests using sessionStorage or override key.
+ */
+export function getVerificationAuthHeaders(
+  extraHeaders: Record<string, string> = {},
+  apiKeyOverride?: string
+): Record<string, string> {
+  const headers: Record<string, string> = { ...extraHeaders };
+  const key =
+    apiKeyOverride ||
+    (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('yachiru_server_api_key') : null);
+  if (key && key.trim()) {
+    headers['Authorization'] = `Bearer ${key.trim()}`;
+  }
+  return headers;
+}
+
+/**
  * Returns mock demo verification records for realistic simulation exploration.
  */
 export function generateDemoVerifications(): VerificationSession[] {
@@ -339,7 +356,9 @@ export async function getVerificationSessions(
     if (host) query.set('host', host.trim().toLowerCase());
     if (database) query.set('database', database.trim().toLowerCase());
 
-    const res = await fetch(`/api/verifications?${query.toString()}`);
+    const res = await fetch(`/api/verifications?${query.toString()}`, {
+      headers: getVerificationAuthHeaders(),
+    });
     if (res.ok) {
       const data: VerificationListResponse = await res.json();
       if (data && Array.isArray(data.sessions)) {
@@ -493,7 +512,7 @@ export async function createVerificationSession(params: {
   try {
     await fetch('/api/verifications', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getVerificationAuthHeaders({ 'Content-Type': 'application/json' }, config?.yachiruApiKey),
       body: JSON.stringify(newSession),
     });
   } catch (err) {
@@ -528,7 +547,7 @@ export async function updateVerificationSession(
   try {
     await fetch(`/api/verifications/${encodeURIComponent(updated.id)}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getVerificationAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(updated),
     });
   } catch (err) {
@@ -593,7 +612,7 @@ export async function verifySessionOnServer(
 ): Promise<VerificationSession> {
   const res = await fetch(`/api/verifications/${encodeURIComponent(session.id)}/verify`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getVerificationAuthHeaders({ 'Content-Type': 'application/json' }, config?.yachiruApiKey),
     body: JSON.stringify({ connectionConfig: config }),
   });
 
@@ -615,5 +634,27 @@ export async function verifySessionOnServer(
   saveLocalVerifications(local);
 
   return verified;
+}
+
+/**
+ * Deletes a verification session both from local mirror and server storage.
+ */
+export async function deleteVerificationSession(
+  sessionId: string,
+  apiKeyOverride?: string
+): Promise<boolean> {
+  const local = loadLocalVerifications();
+  saveLocalVerifications(local.filter((s) => s.id !== sessionId));
+
+  try {
+    const res = await fetch(`/api/verifications/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      headers: getVerificationAuthHeaders({}, apiKeyOverride),
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('Server delete failed, removed locally:', err);
+    return false;
+  }
 }
 

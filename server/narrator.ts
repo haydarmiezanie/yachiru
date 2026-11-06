@@ -1,7 +1,7 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import { AINarrative, AnalysisReport, AiProvider } from '../src/types.js';
+import { AINarrative, AnalysisReport, AiProvider, AVAILABLE_AI_MODELS } from '../src/types.js';
 import { sanitizeQueryForPrivacy } from './analyzer.js';
 
 // Default TTL for system API key depletion status (10 minutes)
@@ -541,143 +541,84 @@ export function getAiErrorInfo(
   }
 }
 
+export interface ModelValidationResult {
+  valid: boolean;
+  resolvedModel?: string;
+  provider?: AiProvider;
+  error?: string;
+}
+
+/**
+ * Shared AI model validator ensuring exact matches against AVAILABLE_AI_MODELS without silent remapping.
+ */
+export function validateAiModel(
+  model: string | undefined,
+  provider?: AiProvider
+): ModelValidationResult {
+  const inferredProvider: AiProvider = provider || (
+    model?.startsWith('gpt-') ? 'openai' :
+    model?.startsWith('claude-') ? 'claude' : 'gemini'
+  );
+
+  if (!model || typeof model !== 'string' || model.trim() === '') {
+    const defaultModel =
+      inferredProvider === 'openai' ? 'gpt-5.4-mini' :
+      inferredProvider === 'claude' ? 'claude-haiku-4-5-20251001' : 'gemini-3.8-flash';
+    return { valid: true, resolvedModel: defaultModel, provider: inferredProvider };
+  }
+
+  const clean = model.trim().toLowerCase();
+  const match = AVAILABLE_AI_MODELS.find(
+    (m) => m.provider === inferredProvider && m.id.toLowerCase() === clean
+  );
+
+  if (!match) {
+    return {
+      valid: false,
+      error: `Unknown or unsupported model '${model}' for provider '${inferredProvider}'.`,
+    };
+  }
+
+  return { valid: true, resolvedModel: match.id, provider: inferredProvider };
+}
+
 export function resolveGeminiModelId(inputModel?: string): string {
-  if (!inputModel) return 'gemini-3.8-flash';
-  const clean = inputModel.trim().toLowerCase();
-
-  if (clean === 'gemini-4-argon' || clean === 'gemini-4.0-argon' || clean.includes('argon')) {
-    return 'gemini-4-argon';
+  const res = validateAiModel(inputModel, 'gemini');
+  if (!res.valid || !res.resolvedModel) {
+    throw new Error(res.error || 'Invalid or unsupported model');
   }
-  if (clean === 'gemini-3.5-flash-lite' || clean.includes('3.5-flash-lite') || clean.includes('3.5-lite')) {
-    return 'gemini-3.5-flash-lite';
-  }
-  if (clean === 'gemini-3.1-pro' || clean === 'gemini-3.1-pro-preview' || clean.includes('3.1-pro')) {
-    return 'gemini-3.1-pro-preview';
-  }
-  if (clean === 'gemini-3.8-flash' || clean.includes('3.8-flash')) {
-    return 'gemini-3.8-flash';
-  }
-  if (clean === 'gemini-3.6-flash' || clean.includes('3.6-flash')) {
-    return 'gemini-3.6-flash';
-  }
-  if (clean === 'gemini-2.5-flash' || clean.includes('2.5-flash')) {
-    return 'gemini-2.5-flash';
-  }
-  // Aliases for migrated models
-  if (clean === 'gemini-3.7-flash' || clean === 'gemini-3.5-flash') {
-    return 'gemini-4-argon';
-  }
-  if (clean === 'gemini-3.1-flash-lite' || clean.includes('flash-lite')) {
-    return 'gemini-3.5-flash-lite';
-  }
-
-  return inputModel;
+  return res.resolvedModel;
 }
 
 export function resolveOpenAiModelId(inputModel?: string): string {
-  if (!inputModel) return 'gpt-5.4-mini';
-  const clean = inputModel.trim().toLowerCase();
-
-  const VALID_OPENAI_MODELS = [
-    'gpt-6-astra',
-    'gpt-5.6-sol',
-    'gpt-5.6-terra',
-    'gpt-5.6-luna',
-    'gpt-5.4-mini',
-  ];
-
-  if (VALID_OPENAI_MODELS.includes(clean)) {
-    return clean;
+  const res = validateAiModel(inputModel, 'openai');
+  if (!res.valid || !res.resolvedModel) {
+    throw new Error(res.error || 'Invalid or unsupported model');
   }
-
-  // Prefix/partial matching
-  if (clean.includes('astra')) return 'gpt-6-astra';
-  if (clean.includes('sol')) return 'gpt-5.6-sol';
-  if (clean.includes('terra')) return 'gpt-5.6-terra';
-  if (clean.includes('luna')) return 'gpt-5.6-luna';
-  if (clean.includes('5.4-mini') || clean.includes('mini')) return 'gpt-5.4-mini';
-
-  return 'gpt-5.4-mini';
+  return res.resolvedModel;
 }
 
 export function getModelFallbackChain(primaryModel: string): string[] {
-  const chain: string[] = [primaryModel];
-  // Known active models to fallback to in case of transient 503 or 404
-  const standardFallbacks = [
-    'gemini-3.8-flash',
-    'gemini-4-argon',
-    'gemini-3.5-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-3.1-pro-preview',
-  ];
-
-  for (const model of standardFallbacks) {
-    if (!chain.includes(model)) {
-      chain.push(model);
-    }
-  }
-  return chain;
+  // Fail fast with clear error without switching models to honor user model selection
+  return [primaryModel];
 }
 
 export function getOpenAiModelFallbackChain(primaryModel: string): string[] {
-  const chain: string[] = [primaryModel];
-  const standardFallbacks = [
-    'gpt-5.4-mini',
-    'gpt-5.6-luna',
-    'gpt-5.6-terra',
-    'gpt-5.6-sol',
-    'gpt-6-astra',
-  ];
-
-  for (const model of standardFallbacks) {
-    if (!chain.includes(model)) {
-      chain.push(model);
-    }
-  }
-  return chain;
+  // Fail fast with clear error without switching models to honor user model selection
+  return [primaryModel];
 }
 
 export function resolveClaudeModelId(inputModel?: string): string {
-  if (!inputModel) return 'claude-haiku-4-5-20251001';
-  const clean = inputModel.trim().toLowerCase();
-
-  const VALID_CLAUDE_MODELS = [
-    'claude-haiku-4-5-20251001',
-    'claude-sonnet-5',
-    'claude-opus-5',
-    'claude-fable-5-1',
-    'claude-sonnet-4-6',
-  ];
-
-  if (VALID_CLAUDE_MODELS.includes(clean)) {
-    return clean;
+  const res = validateAiModel(inputModel, 'claude');
+  if (!res.valid || !res.resolvedModel) {
+    throw new Error(res.error || 'Invalid or unsupported model');
   }
-
-  if (clean.includes('haiku')) return 'claude-haiku-4-5-20251001';
-  if (clean.includes('sonnet-5')) return 'claude-sonnet-5';
-  if (clean.includes('opus-5') || clean.includes('opus')) return 'claude-opus-5';
-  if (clean.includes('fable')) return 'claude-fable-5-1';
-  if (clean.includes('sonnet-4-6') || clean.includes('sonnet')) return 'claude-sonnet-4-6';
-
-  return 'claude-haiku-4-5-20251001';
+  return res.resolvedModel;
 }
 
 export function getClaudeModelFallbackChain(primaryModel: string): string[] {
-  const chain: string[] = [primaryModel];
-  const standardFallbacks = [
-    'claude-haiku-4-5-20251001',
-    'claude-sonnet-5',
-    'claude-sonnet-4-6',
-    'claude-opus-5',
-    'claude-fable-5-1',
-  ];
-
-  for (const model of standardFallbacks) {
-    if (!chain.includes(model)) {
-      chain.push(model);
-    }
-  }
-  return chain;
+  // Fail fast with clear error without switching models to honor user model selection
+  return [primaryModel];
 }
 
 /**

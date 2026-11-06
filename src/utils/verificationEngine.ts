@@ -1,4 +1,5 @@
 import {
+  AnalysisCoverage,
   CategoryScore,
   CheckCategory,
   CheckFinding,
@@ -377,6 +378,7 @@ export function extractAfterMetricsForSession(
     findings: CheckFinding[];
     tables: TableMetadata[];
     categories?: CategoryScore[];
+    coverage?: AnalysisCoverage;
   },
   columnTelemetry?: TargetColumnTelemetry | null
 ): {
@@ -384,6 +386,7 @@ export function extractAfterMetricsForSession(
   afterTableMeta?: TableMetadata;
   findingResolved: boolean;
   categoryCheckDidNotRun: boolean;
+  resolutionNote?: string;
   tableMissing: boolean;
 } {
   const targetTable = session.targetTable;
@@ -406,11 +409,21 @@ export function extractAfterMetricsForSession(
   );
 
   // Check if the finding's diagnostic category actually ran in the verification scan
+  const targetCategory = session.findingCategory || (session as unknown as { category?: string }).category;
   let categoryCheckDidNotRun = false;
-  if (afterReport.categories && Array.isArray(afterReport.categories) && afterReport.categories.length > 0) {
-    const ran = afterReport.categories.some((c) => c.category === session.findingCategory);
+  let resolutionNote: string | undefined = undefined;
+
+  if (afterReport.coverage && Array.isArray(afterReport.coverage.categories)) {
+    const cov = afterReport.coverage.categories.find((c) => c.id === targetCategory);
+    if (cov && cov.state !== 'evaluated') {
+      categoryCheckDidNotRun = true;
+      resolutionNote = `Category check '${targetCategory}' was ${cov.state} in verification scan (${cov.reason || 'check unavailable'}).`;
+    }
+  } else if (afterReport.categories && Array.isArray(afterReport.categories) && afterReport.categories.length > 0) {
+    const ran = afterReport.categories.some((c) => c.category === targetCategory);
     if (!ran) {
       categoryCheckDidNotRun = true;
+      resolutionNote = `Category check '${targetCategory}' did not run in verification scan.`;
     }
   }
 
@@ -482,6 +495,7 @@ export function extractAfterMetricsForSession(
     afterTableMeta,
     findingResolved,
     categoryCheckDidNotRun,
+    resolutionNote,
     tableMissing,
   };
 }

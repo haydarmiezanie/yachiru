@@ -25,7 +25,12 @@ export const ScoreOverview: React.FC<ScoreOverviewProps> = ({ report }) => {
   let scoreBg = 'bg-emerald-950/20';
   let verdictBadge = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
 
-  if (overall_score < 60) {
+  if (overall_verdict === 'Incomplete') {
+    scoreColor = 'text-amber-400';
+    scoreBorder = 'border-amber-500/30';
+    scoreBg = 'bg-amber-950/20';
+    verdictBadge = 'bg-amber-500/10 text-amber-400 border-amber-500/30';
+  } else if (overall_score < 60) {
     scoreColor = 'text-rose-400';
     scoreBorder = 'border-rose-500/30';
     scoreBg = 'bg-rose-950/20';
@@ -36,6 +41,9 @@ export const ScoreOverview: React.FC<ScoreOverviewProps> = ({ report }) => {
     scoreBg = 'bg-amber-950/20';
     verdictBadge = 'bg-amber-500/10 text-amber-400 border-amber-500/30';
   }
+
+  const unavailableCategories = report.coverage?.categories.filter((c) => c.state === 'unavailable') || [];
+  const hasUnavailable = unavailableCategories.length > 0;
 
   return (
     <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-6 sm:p-8 shadow-xl backdrop-blur mb-8">
@@ -56,6 +64,17 @@ export const ScoreOverview: React.FC<ScoreOverviewProps> = ({ report }) => {
           <div className={`mt-2 px-3 py-1 rounded-full border text-xs font-bold uppercase tracking-wider ${verdictBadge}`}>
             {overall_verdict}
           </div>
+
+          {report.coverage ? (
+            <div className="mt-1 text-[11px] text-zinc-400 font-medium">
+              {overall_verdict === 'Incomplete' ? (
+                <span className="text-amber-400 font-semibold">Partial: </span>
+              ) : null}
+              <span>
+                {report.coverage.evaluatedCount} of {report.coverage.totalCount} categories evaluated
+              </span>
+            </div>
+          ) : null}
 
           <div className="mt-4 flex items-center gap-3 text-xs">
             <div className="flex items-center gap-1 text-rose-400 font-medium">
@@ -150,6 +169,64 @@ export const ScoreOverview: React.FC<ScoreOverviewProps> = ({ report }) => {
           </div>
         </div>
       </div>
+
+      {/* Coverage & Diagnostics Banner (Fix 1 & Fix 4) */}
+      {(hasUnavailable || report.tables_truncated || report.columns_truncated) && (
+        <div className="mt-6 pt-5 border-t border-zinc-800 space-y-3">
+          {hasUnavailable && (
+            <div className="p-4 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-2.5">
+              <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>
+                  Incomplete Coverage — Missing ClickHouse Permissions / Unavailable Checks ({unavailableCategories.length})
+                </span>
+              </div>
+              <p className="text-xs text-zinc-300 leading-relaxed">
+                Some diagnostic categories could not be evaluated due to missing database grants or execution constraints.
+                The overall score is partial over evaluated categories only and cannot be considered Optimized.
+              </p>
+              <div className="space-y-1.5 pt-1">
+                {unavailableCategories.map((c) => (
+                  <div
+                    key={c.id}
+                    className="text-xs bg-zinc-950/80 p-2.5 rounded-lg border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  >
+                    <div>
+                      <span className="font-semibold text-zinc-200">{c.name}</span>
+                      <span className="text-zinc-500 text-[11px] ml-2 font-mono">({c.reason || 'unavailable'})</span>
+                    </div>
+                    {c.requiredGrant && (
+                      <code className="text-[11px] text-amber-300 font-mono bg-zinc-900 px-2 py-1 rounded border border-zinc-700/60">
+                        {c.requiredGrant}
+                      </code>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {report.tables_truncated && (
+            <div className="p-3.5 rounded-xl bg-amber-950/20 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-300">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold">Table Inventory Truncated:</span> Analyzed the top 500 largest tables out of{' '}
+                <span className="font-mono font-bold text-white">{report.tables_total || '500+'}</span> total tables in{' '}
+                <span className="font-mono">{report.database_name}</span>. Uninspected tables may contain uncompacted parts or suboptimal schema choices.
+              </div>
+            </div>
+          )}
+
+          {report.columns_truncated && (
+            <div className="p-3.5 rounded-xl bg-amber-950/20 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-300">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold">Column Telemetry Capped:</span> Column schema and compression inspection was capped at the 10,000 column safety limit.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

@@ -28,6 +28,7 @@ import {
   geminiSystemKeyState,
   openaiSystemKeyState,
   claudeSystemKeyState,
+  validateAiModel,
 } from './server/narrator.js';
 import { isStrictHostKeyChecking, matchesExpectedHostKey } from './server/sshTunnel.js';
 import { ConnectionConfig, AiProvider, AnalysisReport, AVAILABLE_AI_MODELS } from './src/types.js';
@@ -457,6 +458,13 @@ async function startServer() {
       return res.status(400).json({ error: validation.error });
     }
 
+    if (config.enableAiNarrative || config.geminiModel) {
+      const modelValidation = validateAiModel(config.geminiModel, config.aiProvider);
+      if (!modelValidation.valid) {
+        return res.status(400).json({ error: modelValidation.error });
+      }
+    }
+
     let sharedTunnel: OpenTunnelResult | undefined = undefined;
     try {
       let tunnelOverride: { host: string; port: number } | undefined = undefined;
@@ -852,24 +860,13 @@ async function startServer() {
       });
     }
 
-    // Determine provider from explicit body or infer from model ID
-    const provider: AiProvider = reqProvider || (
-      model?.startsWith('gpt-') ? 'openai' :
-      model?.startsWith('claude-') ? 'claude' : 'gemini'
-    );
-
-    // Validate model against AVAILABLE_AI_MODELS for the chosen provider (400 if unknown)
-    if (model && typeof model === 'string' && model.trim() !== '') {
-      const cleanModel = model.trim().toLowerCase();
-      const isValid = AVAILABLE_AI_MODELS.some(
-        (m) => m.provider === provider && m.id.toLowerCase() === cleanModel
-      );
-      if (!isValid) {
-        return res.status(400).json({
-          error: `Unknown or unsupported model '${model}' for provider '${provider}'.`,
-        });
-      }
+    // Validate model using shared validator against AVAILABLE_AI_MODELS (400 if unknown)
+    const modelValidation = validateAiModel(model, reqProvider);
+    if (!modelValidation.valid) {
+      return res.status(400).json({ error: modelValidation.error });
     }
+    const provider: AiProvider = modelValidation.provider;
+    const activeModel = modelValidation.resolvedModel;
 
     // Server decides whether system keys may be used, never the client:
     // Only when YACHIRU_ALLOW_SYSTEM_LLM_KEY=true AND request passed requireApiKey with enforcement active
@@ -891,7 +888,7 @@ async function startServer() {
       const narrative = await generateNarrativeForProvider(
         report,
         provider,
-        model,
+        activeModel,
         apiKey,
         {
           enableAiNarrative: isAiRequested,

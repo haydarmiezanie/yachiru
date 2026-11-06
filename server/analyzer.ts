@@ -1,5 +1,16 @@
 import { createClient, type ClickHouseClient } from '@clickhouse/client';
-import { AnalysisReport, CategoryScore, CheckFinding, ConnectionConfig, TableMetadata } from '../src/types.js';
+import {
+  AnalysisReport,
+  CategoryScore,
+  CheckFinding,
+  ConnectionConfig,
+  TableMetadata,
+  ClusterVerdict,
+  AnalysisCoverage,
+  CategoryCoverageItem,
+  CategoryCoverageState,
+  CategoryUnavailableReason,
+} from '../src/types.js';
 import { openSshTunnel, OpenTunnelResult } from './sshTunnel.js';
 import { calculateFindingCostImpact, calculateReportCostSummary, DEFAULT_COST_MODEL } from '../src/utils/costModel.js';
 
@@ -310,8 +321,24 @@ export function matchesColumnTokens(name: string, targetTerms: string[]): boolea
   return false;
 }
 
+/**
+ * Builds the exact, non-wildcard query_log filter targeting only queries that actually touched the target database.
+ * Eliminates false positive substring matches on LIKE and ignores unread session databases.
+ */
+export function buildQueryLogFilter(database: string): { mainFilter: string; fallbackFilter: string } {
+  const dbEsc = escapeSqlString(database);
+  return {
+    mainFilter: `arrayExists(tbl -> startsWith(tbl, '${dbEsc}.'), tables) AND query_kind = 'Select' AND NOT arrayExists(tbl -> startsWith(tbl, 'system.'), tables)`,
+    fallbackFilter: `arrayExists(tbl -> startsWith(tbl, '${dbEsc}.'), tables) AND NOT arrayExists(tbl -> startsWith(tbl, 'system.'), tables)`,
+  };
+}
+
 // Compute Category Scores and Overall Score
-export function calculateScores(findings: CheckFinding[]): { categories: CategoryScore[]; overall_score: number; verdict: 'Optimized' | 'Needs Tuning' | 'Critical Optimization Required' } {
+export function calculateScores(
+  findings: CheckFinding[],
+  coverage?: AnalysisCoverage,
+  truncation?: { tables_truncated?: boolean; tables_total?: number; columns_truncated?: boolean }
+): { categories: CategoryScore[]; overall_score: number; verdict: ClusterVerdict; isPartial?: boolean } {
   const categoryDefs: Array<{ id: CheckFinding['category']; name: string; description: string }> = [
     { id: 'part_health', name: 'Part Health & Compaction', description: 'Active parts count, size distribution, and merge health' },
     { id: 'primary_key', name: 'Primary Key & Sorting', description: 'ORDER BY effectiveness, cardinality order, and sparse index utility' },
@@ -364,14 +391,44 @@ export function calculateScores(findings: CheckFinding[]): { categories: Categor
   const totalScoreSum = categories.reduce((sum, c) => sum + c.score, 0);
   const overall_score = categories.length > 0 ? Math.round(totalScoreSum / categories.length) : 100;
 
-  let verdict: 'Optimized' | 'Needs Tuning' | 'Critical Optimization Required' = 'Optimized';
-  if (overall_score < 60 || findings.filter((f) => f.status === 'critical').length >= 3) {
+  let verdict: ClusterVerdict = 'Optimized';
+
+  const isTruncated = Boolean(truncation?.tables_truncated || truncation?.columns_truncated);
+  const unavailableCount =
+    coverage?.unavailableCount ??
+    coverage?.categories.filter((c) => c.state === 'unavailable').length ??
+    0;
+  const hasUnavailable = Boolean(coverage && (unavailableCount > 0 || coverage.hasUnavailable));
+  const applicableCount =
+    coverage?.applicableCount ??
+    coverage?.categories.filter((c) => c.state !== 'not_applicable').length ??
+    categories.length;
+  const evaluatedCount =
+    coverage?.evaluatedCount ??
+    coverage?.categories.filter((c) => c.state === 'evaluated').length ??
+    categories.length;
+  const totalCount = coverage?.totalCount ?? coverage?.categories.length ?? categories.length;
+
+  const coverageRatio = applicableCount > 0 ? evaluatedCount / applicableCount : 1;
+  const isCoverageInsufficient = Boolean(coverage && coverageRatio < 0.60);
+  const isPartial = Boolean(
+    hasUnavailable ||
+    isCoverageInsufficient ||
+    isTruncated ||
+    (coverage ? evaluatedCount < applicableCount : false)
+  );
+
+  if (hasUnavailable || isCoverageInsufficient || isTruncated) {
+    verdict = 'Incomplete';
+  } else if (overall_score < 60 || findings.filter((f) => f.status === 'critical').length >= 3) {
     verdict = 'Critical Optimization Required';
   } else if (overall_score < 85 || findings.filter((f) => f.status === 'warning').length > 0) {
     verdict = 'Needs Tuning';
+  } else {
+    verdict = 'Optimized';
   }
 
-  return { categories, overall_score, verdict };
+  return { categories, overall_score, verdict, isPartial };
 }
 
 // Live ClickHouse analyzer using @clickhouse/client
@@ -475,7 +532,27 @@ export async function runLiveScan(
       chVersion = verData[0].version;
     }
 
-    // 2. Fetch all user tables in target database
+    // 2. Fetch all user tables in target database and check for truncation
+    const countTablesQuery = `
+      SELECT count() AS total_tables
+      FROM system.tables
+      WHERE database = '${escapeSqlString(database)}'
+        AND is_temporary = 0
+    `;
+    assertReadOnlySql(countTablesQuery);
+    let totalTablesCount = 0;
+    try {
+      const countRes = await client.query({
+        query: countTablesQuery,
+        format: 'JSONEachRow',
+        clickhouse_settings: { max_execution_time: 8 },
+      });
+      const countData = (await countRes.json()) as Array<{ total_tables: number | string }>;
+      totalTablesCount = Number(countData[0]?.total_tables || 0);
+    } catch {
+      totalTablesCount = 0;
+    }
+
     const tablesQuery = `
       SELECT
         database,
@@ -506,6 +583,9 @@ export async function runLiveScan(
       sorting_key: string;
       partition_key: string;
     }>;
+
+    const tables_total = Math.max(totalTablesCount, tablesData.length);
+    const tables_truncated = tables_total > tablesData.length;
 
     // 3-8. Parallel execution of independent read-only system table queries via Promise.allSettled
     let partsData: Array<{
@@ -641,8 +721,12 @@ export async function runLiveScan(
         return (await partsRes.json()) as typeof partsData;
       })(),
 
-      // system.columns
+      // system.columns (restricted to selected tables with safety cap)
       (async () => {
+        if (tablesData.length === 0) {
+          return [] as typeof colData;
+        }
+        const tableInList = tablesData.map((t) => `'${escapeSqlString(t.name)}'`).join(', ');
         const colQuery = `
           SELECT
             table,
@@ -653,8 +737,9 @@ export async function runLiveScan(
             compression_codec
           FROM system.columns
           WHERE database = '${escapeSqlString(database)}'
+            AND table IN (${tableInList})
           ORDER BY data_uncompressed_bytes DESC
-          LIMIT 200
+          LIMIT 10001
         `;
         assertReadOnlySql(colQuery);
         const colRes = await client.query({
@@ -702,9 +787,9 @@ export async function runLiveScan(
           FROM system.query_log
           WHERE type = 'QueryFinish'
             AND event_date >= today() - 1
-            AND query NOT LIKE '%system.%'
-            AND query NOT LIKE '%SHOW%'
-            AND query NOT LIKE '%DESCRIBE%'
+            AND arrayExists(tbl -> startsWith(tbl, '${escapeSqlString(database)}.'), tables)
+            AND query_kind = 'Select'
+            AND NOT arrayExists(tbl -> startsWith(tbl, 'system.'), tables)
           ORDER BY query_duration_ms DESC
           LIMIT 40
         `;
@@ -717,7 +802,7 @@ export async function runLiveScan(
           });
           return (await qRes.json()) as typeof queryStats;
         } catch {
-          // If normalizeQuery is not supported on this ClickHouse version, fallback to metrics without query text
+          // If normalizeQuery or query_kind is not supported on this ClickHouse version, fallback to metrics without query text
           const qlogQueryFallback = `
             SELECT
               tables,
@@ -730,9 +815,8 @@ export async function runLiveScan(
             FROM system.query_log
             WHERE type = 'QueryFinish'
               AND event_date >= today() - 1
-              AND query NOT LIKE '%system.%'
-              AND query NOT LIKE '%SHOW%'
-              AND query NOT LIKE '%DESCRIBE%'
+              AND arrayExists(tbl -> startsWith(tbl, '${escapeSqlString(database)}.'), tables)
+              AND NOT arrayExists(tbl -> startsWith(tbl, 'system.'), tables)
             ORDER BY query_duration_ms DESC
             LIMIT 40
           `;
@@ -913,11 +997,19 @@ export async function runLiveScan(
     ]);
 
     // Apply settled results with isolated per-query degradation
+    let columns_truncated = false;
     if (partsSettled.status === 'fulfilled') {
       partsData = partsSettled.value;
     }
     if (columnsSettled.status === 'fulfilled') {
-      colData = columnsSettled.value;
+      const rawCols = columnsSettled.value;
+      if (rawCols.length > 10000) {
+        columns_truncated = true;
+        colData = rawCols.slice(0, 10000);
+      } else {
+        columns_truncated = false;
+        colData = rawCols;
+      }
     }
     if (skippingIndicesSettled.status === 'fulfilled') {
       skipData = skippingIndicesSettled.value;
@@ -949,6 +1041,165 @@ export async function runLiveScan(
     if (replicationQueueSettled.status === 'fulfilled') {
       repQueueData = replicationQueueSettled.value;
     }
+
+    const hasReplicatedTables = tablesData.some((t) => t.engine.toLowerCase().includes('replicated'));
+    const hasDistributedTables = tablesData.some((t) => t.engine.toLowerCase().includes('distributed'));
+
+    function classifySettledError(err: unknown): { reason: CategoryUnavailableReason; detail: string } {
+      const msg = err instanceof Error ? err.message : String(err || '');
+      if (/ACCESS_DENIED|Not enough privileges|Code: 497|permission denied/i.test(msg)) {
+        return { reason: 'permission_denied', detail: 'Missing required SELECT privilege in ClickHouse.' };
+      }
+      if (/TIMEOUT|timed out|Code: 159|max_execution_time/i.test(msg)) {
+        return { reason: 'timeout', detail: 'Query exceeded maximum execution time.' };
+      }
+      return { reason: 'error', detail: msg };
+    }
+
+    const coverageCategories: CategoryCoverageItem[] = [
+      partsSettled.status === 'fulfilled'
+        ? { id: 'part_health', name: 'Part Health & Compaction', state: 'evaluated' }
+        : {
+            id: 'part_health',
+            name: 'Part Health & Compaction',
+            state: 'unavailable',
+            ...classifySettledError(partsSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.parts TO <username>;',
+          },
+      partsSettled.status === 'fulfilled'
+        ? { id: 'primary_key', name: 'Primary Key & Sorting', state: 'evaluated' }
+        : {
+            id: 'primary_key',
+            name: 'Primary Key & Sorting',
+            state: 'unavailable',
+            ...classifySettledError(partsSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.parts TO <username>;',
+          },
+      partsSettled.status === 'fulfilled'
+        ? { id: 'partitioning', name: 'Partitioning Strategy', state: 'evaluated' }
+        : {
+            id: 'partitioning',
+            name: 'Partitioning Strategy',
+            state: 'unavailable',
+            ...classifySettledError(partsSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.parts TO <username>;',
+          },
+      columnsSettled.status === 'fulfilled'
+        ? { id: 'compression', name: 'Compression & Codecs', state: 'evaluated' }
+        : {
+            id: 'compression',
+            name: 'Compression & Codecs',
+            state: 'unavailable',
+            ...classifySettledError(columnsSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.columns TO <username>;',
+          },
+      { id: 'table_engine', name: 'Table Engine Sanity', state: 'evaluated' },
+      skippingIndicesSettled.status === 'fulfilled'
+        ? { id: 'skip_indices', name: 'Data Skipping Indices', state: 'evaluated' }
+        : {
+            id: 'skip_indices',
+            name: 'Data Skipping Indices',
+            state: 'unavailable',
+            ...classifySettledError(skippingIndicesSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.data_skipping_indices TO <username>;',
+          },
+      queryLogSettled.status === 'fulfilled'
+        ? { id: 'query_performance', name: 'Query Performance & Pruning', state: 'evaluated' }
+        : {
+            id: 'query_performance',
+            name: 'Query Performance & Pruning',
+            state: 'unavailable',
+            ...classifySettledError(queryLogSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.query_log TO <username>;',
+          },
+      replicasSettled.status === 'rejected'
+        ? {
+            id: 'replication_distributed',
+            name: 'Replication & Distributed Backlog',
+            state: 'unavailable',
+            ...classifySettledError(replicasSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.replicas TO <username>;',
+          }
+        : !hasReplicatedTables && !hasDistributedTables && replicasData.length === 0 && distQueueData.length === 0
+        ? {
+            id: 'replication_distributed',
+            name: 'Replication & Distributed Backlog',
+            state: 'not_applicable',
+            reason: 'no_replicated_tables',
+            detail: 'No ReplicatedMergeTree or Distributed tables present in target database.',
+          }
+        : { id: 'replication_distributed', name: 'Replication & Distributed Backlog', state: 'evaluated' },
+      settingsSettled.status === 'fulfilled'
+        ? { id: 'server_settings', name: 'Server & MergeTree Settings', state: 'evaluated' }
+        : {
+            id: 'server_settings',
+            name: 'Server & MergeTree Settings',
+            state: 'unavailable',
+            ...classifySettledError(settingsSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.settings TO <username>;',
+          },
+      mutationsSettled.status === 'fulfilled'
+        ? { id: 'mutations', name: 'Table Mutations', state: 'evaluated' }
+        : {
+            id: 'mutations',
+            name: 'Table Mutations',
+            state: 'unavailable',
+            ...classifySettledError(mutationsSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.mutations TO <username>;',
+          },
+      disksSettled.status === 'fulfilled'
+        ? { id: 'disk_space', name: 'Disk Space & Storage', state: 'evaluated' }
+        : {
+            id: 'disk_space',
+            name: 'Disk Space & Storage',
+            state: 'unavailable',
+            ...classifySettledError(disksSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.disks TO <username>;',
+          },
+      errorsSettled.status === 'fulfilled'
+        ? { id: 'system_errors', name: 'System Errors & Stability', state: 'evaluated' }
+        : {
+            id: 'system_errors',
+            name: 'System Errors & Stability',
+            state: 'unavailable',
+            ...classifySettledError(errorsSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.errors TO <username>;',
+          },
+      replicationQueueSettled.status === 'rejected'
+        ? {
+            id: 'replication_queue',
+            name: 'Replication Queue & Retries',
+            state: 'unavailable',
+            ...classifySettledError(replicationQueueSettled.reason),
+            requiredGrant: 'GRANT SELECT ON system.replication_queue TO <username>;',
+          }
+        : !hasReplicatedTables && replicasData.length === 0 && (repQueueData === null || repQueueData.length === 0)
+        ? {
+            id: 'replication_queue',
+            name: 'Replication Queue & Retries',
+            state: 'not_applicable',
+            reason: 'no_replicated_tables',
+            detail: 'No ReplicatedMergeTree tables configured in cluster.',
+          }
+        : { id: 'replication_queue', name: 'Replication Queue & Retries', state: 'evaluated' },
+    ];
+
+    const evaluatedCount = coverageCategories.filter((c) => c.state === 'evaluated').length;
+    const unavailableCount = coverageCategories.filter((c) => c.state === 'unavailable').length;
+    const notApplicableCount = coverageCategories.filter((c) => c.state === 'not_applicable').length;
+    const totalCount = coverageCategories.length;
+    const applicableCount = totalCount - notApplicableCount;
+    const isComplete = unavailableCount === 0 && evaluatedCount === applicableCount;
+
+    const coverage: AnalysisCoverage = {
+      categories: coverageCategories,
+      evaluatedCount,
+      totalCount,
+      applicableCount,
+      unavailableCount,
+      notApplicableCount,
+      isComplete,
+    };
 
     // Populate post-query aggregates
     const partsMap = new Map<string, (typeof partsData)[0]>();
@@ -1353,45 +1604,47 @@ export async function runLiveScan(
       }
     }
 
-    // 6. Skip Indexes
-    for (const t of tablesData) {
-      const rows = Number(t.total_rows || 0);
-      const count = skipIndicesMap.get(t.name) || 0;
-      if (rows > 1000000 && count === 0) {
-        findings.push({
-          id: `missing_skip_idx_${t.name}`,
-          category: 'skip_indices',
-          category_name: 'Data Skipping Indices',
-          title: `Large table '${t.name}' has 0 secondary data skipping indices`,
-          table: t.name,
-          status: 'warning',
-          metric_value: '0 skip indices configured',
-          threshold: 'Threshold: Tables > 1M rows with high-cardinality filters benefit from skip indices',
-          evidence: `Table contains ${rows.toLocaleString()} rows but has no minmax, set, or bloom_filter indices defined in system.data_skipping_indices.`,
-          impact: 'Queries filtering on non-primary-key columns must scan all granules in the table.',
-          recommendation_sql_or_text: `-- Example: Add a bloom filter or minmax index on frequently filtered secondary column:\n-- ALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(t.name)} ADD INDEX idx_user_id \`user_id\` TYPE bloom_filter(0.01) GRANULARITY 4;`,
-          is_sql_recommendation: true,
-        });
-      } else if (count > 0) {
-        findings.push({
-          id: `skip_idx_present_${t.name}`,
-          category: 'skip_indices',
-          category_name: 'Data Skipping Indices',
-          title: `Data skipping indices active on '${t.name}'`,
-          table: t.name,
-          status: 'good',
-          metric_value: `${count} skip index(es)`,
-          threshold: 'Threshold: Indices configured',
-          evidence: `${count} secondary data skipping index(es) configured on '${t.name}'.`,
-          impact: 'Granules can be pruned before reading full column files.',
-          recommendation_sql_or_text: 'Secondary index coverage verified.',
-          is_sql_recommendation: false,
-        });
+    // 6. Skip Indexes (only evaluate if system.data_skipping_indices was granted)
+    if (skippingIndicesSettled.status === 'fulfilled') {
+      for (const t of tablesData) {
+        const rows = Number(t.total_rows || 0);
+        const count = skipIndicesMap.get(t.name) || 0;
+        if (rows > 1000000 && count === 0) {
+          findings.push({
+            id: `missing_skip_idx_${t.name}`,
+            category: 'skip_indices',
+            category_name: 'Data Skipping Indices',
+            title: `Large table '${t.name}' has 0 secondary data skipping indices`,
+            table: t.name,
+            status: 'warning',
+            metric_value: '0 skip indices configured',
+            threshold: 'Threshold: Tables > 1M rows with high-cardinality filters benefit from skip indices',
+            evidence: `Table contains ${rows.toLocaleString()} rows but has no minmax, set, or bloom_filter indices defined in system.data_skipping_indices.`,
+            impact: 'Queries filtering on non-primary-key columns must scan all granules in the table.',
+            recommendation_sql_or_text: `-- Example: Add a bloom filter or minmax index on frequently filtered secondary column:\n-- ALTER TABLE ${escapeSqlIdentifier(database)}.${escapeSqlIdentifier(t.name)} ADD INDEX idx_user_id \`user_id\` TYPE bloom_filter(0.01) GRANULARITY 4;`,
+            is_sql_recommendation: true,
+          });
+        } else if (count > 0) {
+          findings.push({
+            id: `skip_idx_present_${t.name}`,
+            category: 'skip_indices',
+            category_name: 'Data Skipping Indices',
+            title: `Data skipping indices active on '${t.name}'`,
+            table: t.name,
+            status: 'good',
+            metric_value: `${count} skip index(es)`,
+            threshold: 'Threshold: Indices configured',
+            evidence: `${count} secondary data skipping index(es) configured on '${t.name}'.`,
+            impact: 'Granules can be pruned before reading full column files.',
+            recommendation_sql_or_text: 'Secondary index coverage verified.',
+            is_sql_recommendation: false,
+          });
+        }
       }
     }
 
-    // 7. Query Performance (system.query_log)
-    if (queryLogAvailable && queryStats.length > 0) {
+    // 7. Query Performance (system.query_log) - only evaluated if permission granted
+    if (queryLogAvailable) {
       const highRatioQueries = queryStats.filter((q) => Number(q.ratio || 0) > 5000 && Number(q.read_rows || 0) > 200000);
       if (highRatioQueries.length > 0) {
         const worst = highRatioQueries[0];
@@ -1437,75 +1690,79 @@ export async function runLiveScan(
           is_sql_recommendation: true,
         });
       }
-    } else {
-      findings.push({
-        id: 'query_log_status',
-        category: 'query_performance',
-        category_name: 'Query Performance & Pruning',
-        title: queryLogAvailable ? 'Query log activity within standard bounds' : 'Query log not accessible or currently empty',
-        status: 'good',
-        metric_value: `${queryStats.length} queries sampled`,
-        threshold: 'Threshold: Active inspection',
-        evidence: queryLogAvailable ? 'No runaway full scans exceeding threshold recorded in recent query_log.' : 'User permissions did not permit reading system.query_log or log_queries is disabled.',
-        impact: 'Query execution pipeline is responsive.',
-        recommendation_sql_or_text: 'Ensure system.query_log is retained for at least 7 days for analytical monitoring.',
-        is_sql_recommendation: false,
-      });
-    }
 
-    // 8. Replication & Distributed Health
-    if (replicasData.length > 0) {
-      for (const r of replicasData) {
-        if (Number(r.is_readonly) === 1) {
-          findings.push({
-            id: `replica_readonly_${r.table}`,
-            category: 'replication_distributed',
-            category_name: 'Replication & Distributed Backlog',
-            title: `Replica is in READ-ONLY mode for table '${r.table}'`,
-            table: r.table,
-            status: 'critical',
-            metric_value: 'is_readonly = 1',
-            threshold: 'Threshold: is_readonly = 0',
-            evidence: `system.replicas reports table '${r.table}' is readonly. ZooKeeper/ClickHouse Keeper connection dropped or disk full.`,
-            impact: 'Mutations, inserts, and merges are halted on this replica.',
-            recommendation_sql_or_text: `-- Check Keeper cluster status and disk space:\nSELECT * FROM system.zookeeper WHERE path = '/clickhouse' LIMIT 5;\nSELECT * FROM system.disks;`,
-            is_sql_recommendation: true,
-          });
-        }
-        if (Number(r.queue_size) > 20) {
-          findings.push({
-            id: `replica_queue_${r.table}`,
-            category: 'replication_distributed',
-            category_name: 'Replication & Distributed Backlog',
-            title: `Replication queue backlog on '${r.table}'`,
-            table: r.table,
-            status: 'warning',
-            metric_value: `Queue size: ${r.queue_size}`,
-            threshold: 'Threshold: ≤ 20 queued tasks',
-            evidence: `Replication queue has ${r.queue_size} pending items with absolute delay of ${r.absolute_delay}s.`,
-            impact: 'Follower replica is serving stale data to distributed queries.',
-            recommendation_sql_or_text: `-- Inspect replication queue errors:\nSELECT type, num_tries, last_exception FROM system.replication_queue WHERE table = '${r.table}' ORDER BY create_time DESC LIMIT 10;`,
-            is_sql_recommendation: true,
-          });
-        }
+      if (highRatioQueries.length === 0 && slowQueries.length === 0) {
+        findings.push({
+          id: 'query_log_status',
+          category: 'query_performance',
+          category_name: 'Query Performance & Pruning',
+          title: 'Query log activity within standard bounds',
+          status: 'good',
+          metric_value: `${queryStats.length} queries sampled`,
+          threshold: 'Threshold: Active inspection',
+          evidence: 'No runaway full scans exceeding threshold recorded in recent query_log.',
+          impact: 'Query execution pipeline is responsive.',
+          recommendation_sql_or_text: 'Ensure system.query_log is retained for at least 7 days for analytical monitoring.',
+          is_sql_recommendation: false,
+        });
       }
-    } else {
-      findings.push({
-        id: 'replication_status',
-        category: 'replication_distributed',
-        category_name: 'Replication & Distributed Backlog',
-        title: 'Replication health verified (or standalone instance)',
-        status: 'good',
-        metric_value: 'No replication backlog',
-        threshold: 'Threshold: Clean queues',
-        evidence: 'No active replication stalls or read-only replica states detected in system.replicas.',
-        impact: 'High write availability.',
-        recommendation_sql_or_text: 'Replication state is normal.',
-        is_sql_recommendation: false,
-      });
     }
 
-    if (distQueueData.length > 0) {
+    // 8. Replication & Distributed Health (only evaluated if system.replicas was accessible)
+    if (replicasSettled.status === 'fulfilled') {
+      if (replicasData.length > 0) {
+        for (const r of replicasData) {
+          if (Number(r.is_readonly) === 1) {
+            findings.push({
+              id: `replica_readonly_${r.table}`,
+              category: 'replication_distributed',
+              category_name: 'Replication & Distributed Backlog',
+              title: `Replica is in READ-ONLY mode for table '${r.table}'`,
+              table: r.table,
+              status: 'critical',
+              metric_value: 'is_readonly = 1',
+              threshold: 'Threshold: is_readonly = 0',
+              evidence: `system.replicas reports table '${r.table}' is readonly. ZooKeeper/ClickHouse Keeper connection dropped or disk full.`,
+              impact: 'Mutations, inserts, and merges are halted on this replica.',
+              recommendation_sql_or_text: `-- Check Keeper cluster status and disk space:\nSELECT * FROM system.zookeeper WHERE path = '/clickhouse' LIMIT 5;\nSELECT * FROM system.disks;`,
+              is_sql_recommendation: true,
+            });
+          }
+          if (Number(r.queue_size) > 20) {
+            findings.push({
+              id: `replica_queue_${r.table}`,
+              category: 'replication_distributed',
+              category_name: 'Replication & Distributed Backlog',
+              title: `Replication queue backlog on '${r.table}'`,
+              table: r.table,
+              status: 'warning',
+              metric_value: `Queue size: ${r.queue_size}`,
+              threshold: 'Threshold: ≤ 20 queued tasks',
+              evidence: `Replication queue has ${r.queue_size} pending items with absolute delay of ${r.absolute_delay}s.`,
+              impact: 'Follower replica is serving stale data to distributed queries.',
+              recommendation_sql_or_text: `-- Inspect replication queue errors:\nSELECT type, num_tries, last_exception FROM system.replication_queue WHERE table = '${r.table}' ORDER BY create_time DESC LIMIT 10;`,
+              is_sql_recommendation: true,
+            });
+          }
+        }
+      } else {
+        findings.push({
+          id: 'replication_status',
+          category: 'replication_distributed',
+          category_name: 'Replication & Distributed Backlog',
+          title: 'Replication health verified (or standalone instance)',
+          status: 'good',
+          metric_value: 'No replication backlog',
+          threshold: 'Threshold: Clean queues',
+          evidence: 'No active replication stalls or read-only replica states detected in system.replicas.',
+          impact: 'High write availability.',
+          recommendation_sql_or_text: 'Replication state is normal.',
+          is_sql_recommendation: false,
+        });
+      }
+    }
+
+    if (distQueueSettled.status === 'fulfilled' && distQueueData.length > 0) {
       for (const dq of distQueueData) {
         if (dq.error_count > 0 || dq.is_blocked === 1) {
           findings.push({
@@ -1526,8 +1783,9 @@ export async function runLiveScan(
       }
     }
 
-    // 9. Server Settings Sanity
-    const maxMemSetting = settingsData.find((s) => s.name === 'max_memory_usage');
+    // 9. Server Settings Sanity (only evaluated if system.settings was accessible)
+    if (settingsSettled.status === 'fulfilled' && settingsData.length > 0) {
+      const maxMemSetting = settingsData.find((s) => s.name === 'max_memory_usage');
     if (maxMemSetting) {
       const maxMemBytes = Number(maxMemSetting.value);
       if (maxMemBytes > 0 && maxMemBytes < 4294967296) {
@@ -1561,6 +1819,7 @@ export async function runLiveScan(
         });
       }
     }
+  }
 
     // 10. Mutations Health (system.mutations)
     if (mutationsData !== null) {
@@ -1867,7 +2126,11 @@ export async function runLiveScan(
     }
 
     // Scoring
-    const { categories, overall_score, verdict } = calculateScores(findings);
+    const { categories, overall_score, verdict } = calculateScores(
+      findings,
+      coverage,
+      { tables_truncated, columns_truncated }
+    );
 
     // Summary calculations
     const totalRowsAll = tables.reduce((s, t) => s + t.total_rows, 0);
@@ -1883,6 +2146,10 @@ export async function runLiveScan(
       cluster_mode: replicasData.length > 0 ? 'Replicated Cluster' : 'Single Node',
       overall_score,
       overall_verdict: verdict,
+      coverage,
+      tables_truncated,
+      tables_total,
+      columns_truncated,
       is_demo: false,
       summary: {
         total_tables: tables.length,
@@ -2413,7 +2680,31 @@ export function runSimulationScan(): AnalysisReport {
     },
   ];
 
-  const { categories, overall_score, verdict } = calculateScores(findings);
+  const demoCoverage: AnalysisCoverage = {
+    categories: [
+      { id: 'part_health', name: 'Part Health & Compaction', state: 'evaluated' },
+      { id: 'primary_key', name: 'Primary Key & Sorting', state: 'evaluated' },
+      { id: 'partitioning', name: 'Partitioning Strategy', state: 'evaluated' },
+      { id: 'compression', name: 'Compression & Codecs', state: 'evaluated' },
+      { id: 'table_engine', name: 'Table Engine Sanity', state: 'evaluated' },
+      { id: 'skip_indices', name: 'Data Skipping Indices', state: 'evaluated' },
+      { id: 'query_performance', name: 'Query Performance & Pruning', state: 'evaluated' },
+      { id: 'replication_distributed', name: 'Replication & Distributed Backlog', state: 'evaluated' },
+      { id: 'server_settings', name: 'Server & MergeTree Settings', state: 'evaluated' },
+      { id: 'mutations', name: 'Table Mutations', state: 'evaluated' },
+      { id: 'disk_space', name: 'Disk Space & Storage', state: 'evaluated' },
+      { id: 'system_errors', name: 'System Errors & Stability', state: 'evaluated' },
+      { id: 'replication_queue', name: 'Replication Queue & Retries', state: 'evaluated' },
+    ],
+    evaluatedCount: 13,
+    totalCount: 13,
+    applicableCount: 13,
+    unavailableCount: 0,
+    notApplicableCount: 0,
+    isComplete: true,
+  };
+
+  const { categories, overall_score, verdict } = calculateScores(findings, demoCoverage);
 
   return {
     scan_id: `demo_scan_${Date.now()}`,
@@ -2423,6 +2714,10 @@ export function runSimulationScan(): AnalysisReport {
     cluster_mode: '2-Shard Replicated Cluster',
     overall_score,
     overall_verdict: verdict,
+    coverage: demoCoverage,
+    tables_truncated: false,
+    tables_total: tables.length,
+    columns_truncated: false,
     is_demo: true,
     summary: {
       total_tables: tables.length,

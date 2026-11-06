@@ -64,6 +64,15 @@ export function computeScanComparison(history: ScanHistoryRecord[]): ScanCompari
     }
   }
 
+  const prevCategories = Object.keys(previousScan.category_scores || {}).sort();
+  const latestCategories = Object.keys(latestScan.category_scores || {}).sort();
+  const coverageChanged =
+    prevCategories.length !== latestCategories.length ||
+    prevCategories.some((cat, i) => cat !== latestCategories[i]);
+  const coverageNote = coverageChanged
+    ? 'Coverage changed since previous scan (different categories evaluated); score difference is not directly comparable.'
+    : undefined;
+
   const scoreDelta = latestScan.overall_score - previousScan.overall_score;
 
   return {
@@ -71,6 +80,8 @@ export function computeScanComparison(history: ScanHistoryRecord[]): ScanCompari
     previousScanAt: previousScan.scanned_at,
     currentScanAt: latestScan.scanned_at,
     scoreDelta,
+    coverageChanged,
+    coverageNote,
     newFindings,
     resolvedFindings,
     persistentFindings,
@@ -472,7 +483,7 @@ export async function fetchScanHistory(
       FROM ${escapeSqlIdentifier(targetDb)}.${escapeSqlIdentifier(targetTable)}
       WHERE target_host = '${targetHostFilter}'
         AND target_database = '${targetDbFilter}'
-      ORDER BY scanned_at ASC
+      ORDER BY scanned_at DESC
       LIMIT ${safeLimit}
     `.trim();
 
@@ -533,6 +544,10 @@ export async function fetchScanHistory(
         clickhouse_version: String(r.clickhouse_version || ''),
       };
     });
+
+    // Reverse descending SQL result to chronological order (oldest to newest among latest N)
+    // for comparative diff and time-series UI charts
+    history.reverse();
 
     const comparison = computeScanComparison(history);
 
