@@ -7,23 +7,63 @@ import React, { useState, useEffect } from 'react';
 import { AnalysisReport, CheckCategory, ConnectionConfig, AiProvider } from './types.js';
 import { Header } from './components/Header.js';
 import { ConnectionForm } from './components/ConnectionForm.js';
-import { ScanProgress } from './components/ScanProgress.js';
-import { ScoreOverview } from './components/ScoreOverview.js';
-import { CategoryGrid } from './components/CategoryGrid.js';
-import { AinarrativeCard } from './components/AinarrativeCard.js';
-import { FindingsList } from './components/FindingsList.js';
-import { TableDrilldown } from './components/TableDrilldown.js';
-import { TrendView } from './components/TrendView.js';
-import { VerificationDashboard } from './components/VerificationDashboard.js';
-import { VerificationDetailModal } from './components/VerificationDetailModal.js';
-import { ThresholdsModal } from './components/ThresholdsModal.js';
-import { ExportModal } from './components/ExportModal.js';
-import { FeedbackModal } from './components/FeedbackModal.js';
-import { ClickHouseUserSetupModal } from './components/ClickHouseUserSetupModal.js';
-import { CostSavingsSummary } from './components/CostSavingsSummary.js';
-import { PricingSettingsModal } from './components/PricingSettingsModal.js';
+const ScanProgress = React.lazy(() =>
+  import('./components/ScanProgress.js').then((m) => ({ default: m.ScanProgress }))
+);
+const ScoreOverview = React.lazy(() =>
+  import('./components/ScoreOverview.js').then((m) => ({ default: m.ScoreOverview }))
+);
+const CategoryGrid = React.lazy(() =>
+  import('./components/CategoryGrid.js').then((m) => ({ default: m.CategoryGrid }))
+);
+const AinarrativeCard = React.lazy(() =>
+  import('./components/AinarrativeCard.js').then((m) => ({ default: m.AinarrativeCard }))
+);
+const FindingsList = React.lazy(() =>
+  import('./components/FindingsList.js').then((m) => ({ default: m.FindingsList }))
+);
+const CostSavingsSummary = React.lazy(() =>
+  import('./components/CostSavingsSummary.js').then((m) => ({ default: m.CostSavingsSummary }))
+);
+
+const TableDrilldown = React.lazy(() =>
+  import('./components/TableDrilldown.js').then((m) => ({ default: m.TableDrilldown }))
+);
+const TrendView = React.lazy(() =>
+  import('./components/TrendView.js').then((m) => ({ default: m.TrendView }))
+);
+const VerificationDashboard = React.lazy(() =>
+  import('./components/VerificationDashboard.js').then((m) => ({ default: m.VerificationDashboard }))
+);
+const VerificationDetailModal = React.lazy(() =>
+  import('./components/VerificationDetailModal.js').then((m) => ({ default: m.VerificationDetailModal }))
+);
+const ThresholdsModal = React.lazy(() =>
+  import('./components/ThresholdsModal.js').then((m) => ({ default: m.ThresholdsModal }))
+);
+const ExportModal = React.lazy(() =>
+  import('./components/ExportModal.js').then((m) => ({ default: m.ExportModal }))
+);
+const FeedbackModal = React.lazy(() =>
+  import('./components/FeedbackModal.js').then((m) => ({ default: m.FeedbackModal }))
+);
+const ClickHouseUserSetupModal = React.lazy(() =>
+  import('./components/ClickHouseUserSetupModal.js').then((m) => ({ default: m.ClickHouseUserSetupModal }))
+);
+const PricingSettingsModal = React.lazy(() =>
+  import('./components/PricingSettingsModal.js').then((m) => ({ default: m.PricingSettingsModal }))
+);
+
+function ComponentLoadingFallback() {
+  return (
+    <div className="p-8 flex items-center justify-center text-zinc-500 text-xs gap-2">
+      <div className="w-4 h-4 border-2 border-zinc-600 border-t-rose-500 rounded-full animate-spin" />
+      <span>Loading component...</span>
+    </div>
+  );
+}
 import { loadCostModel, calculateFindingCostImpact, calculateReportCostSummary } from './utils/costModel.js';
-import { createVerificationSession } from './utils/verificationClient.js';
+import { createVerificationSession, verifySessionWithScan } from './utils/verificationClient.js';
 import { CheckFinding, VerificationSession } from './types.js';
 import { AlertCircle, FileSearch, LayoutGrid, Table, History, FileCheck2 } from 'lucide-react';
 
@@ -310,11 +350,13 @@ export default function App() {
 
         {/* State 1: Scanning In Progress */}
         {isLoading && (
-          <ScanProgress
-            isDemo={isDemo}
-            enableAiNarrative={currentScanConfig?.enableAiNarrative}
-            geminiModel={currentScanConfig?.geminiModel}
-          />
+          <React.Suspense fallback={<ComponentLoadingFallback />}>
+            <ScanProgress
+              isDemo={isDemo}
+              enableAiNarrative={currentScanConfig?.enableAiNarrative}
+              geminiModel={currentScanConfig?.geminiModel}
+            />
+          </React.Suspense>
         )}
 
         {/* State 2: Connect Form (No report active and not loading) */}
@@ -328,7 +370,8 @@ export default function App() {
 
         {/* State 3: Active Optimization Report Dashboard */}
         {!isLoading && report && (
-          <div className="space-y-6">
+          <React.Suspense fallback={<ComponentLoadingFallback />}>
+            <div className="space-y-6">
             {/* Top Score & Cluster Overview */}
             <ScoreOverview report={report} />
 
@@ -438,101 +481,127 @@ export default function App() {
 
             {/* Tab 2: Per-Table Diagnostics */}
             {activeViewTab === 'tables' && (
-              <TableDrilldown tables={report.tables} findings={report.findings} />
+              <React.Suspense fallback={<ComponentLoadingFallback />}>
+                <TableDrilldown tables={report.tables} findings={report.findings} />
+              </React.Suspense>
             )}
 
             {/* Tab 3: Before / After Verification Engine */}
             {activeViewTab === 'verifications' && (
-              <VerificationDashboard
-                report={report}
-                config={currentScanConfig}
-                onNavigateToFindings={() => setActiveViewTab('findings')}
-                onRunReScan={handleRunVerificationReScan}
-              />
+              <React.Suspense fallback={<ComponentLoadingFallback />}>
+                <VerificationDashboard
+                  report={report}
+                  config={currentScanConfig}
+                  onNavigateToFindings={() => setActiveViewTab('findings')}
+                  onRunReScan={handleRunVerificationReScan}
+                />
+              </React.Suspense>
             )}
 
             {/* Tab 4: Scan History & Trends */}
             {activeViewTab === 'history' && (
-              <TrendView
-                report={report}
-                config={currentScanConfig}
-                onOpenSetupModal={() => setIsUserSetupOpen(true)}
-                apiKeyRequired={apiKeyRequired}
-              />
+              <React.Suspense fallback={<ComponentLoadingFallback />}>
+                <TrendView
+                  report={report}
+                  config={currentScanConfig}
+                  onOpenSetupModal={() => setIsUserSetupOpen(true)}
+                  apiKeyRequired={apiKeyRequired}
+                />
+              </React.Suspense>
             )}
           </div>
+          </React.Suspense>
         )}
       </main>
 
       {/* Verification Detail Modal if active session */}
       {activeVerificationSession && (
-        <VerificationDetailModal
-          session={activeVerificationSession}
-          isOpen={Boolean(activeVerificationSession)}
-          onClose={() => setActiveVerificationSession(null)}
-          onSessionUpdated={(updated) => setActiveVerificationSession(updated)}
-          currentReport={report}
-          config={currentScanConfig}
-          onRunScanAndVerify={async (s) => {
-            const fresh = await handleRunVerificationReScan();
-            if (fresh) {
-              const { verifySessionWithScan } = await import('./utils/verificationClient.js');
-              const verified = await verifySessionWithScan(s, fresh);
-              setActiveVerificationSession(verified);
-            }
-          }}
-          isVerifyingScan={isVerifyingScan}
-        />
+        <React.Suspense fallback={null}>
+          <VerificationDetailModal
+            session={activeVerificationSession}
+            isOpen={Boolean(activeVerificationSession)}
+            onClose={() => setActiveVerificationSession(null)}
+            onSessionUpdated={(updated) => setActiveVerificationSession(updated)}
+            currentReport={report}
+            config={currentScanConfig}
+            onRunScanAndVerify={async (s) => {
+              const fresh = await handleRunVerificationReScan();
+              if (fresh) {
+                const verified = await verifySessionWithScan(s, fresh);
+                setActiveVerificationSession(verified);
+              }
+            }}
+            isVerifyingScan={isVerifyingScan}
+          />
+        </React.Suspense>
       )}
 
       {/* Thresholds & Mechanics Modal */}
-      <ThresholdsModal
-        isOpen={isThresholdsOpen}
-        onClose={() => setIsThresholdsOpen(false)}
-      />
+      {isThresholdsOpen && (
+        <React.Suspense fallback={null}>
+          <ThresholdsModal
+            isOpen={isThresholdsOpen}
+            onClose={() => setIsThresholdsOpen(false)}
+          />
+        </React.Suspense>
+      )}
 
       {/* Cloud Cost Model & Pricing Settings Modal */}
-      <PricingSettingsModal
-        isOpen={isPricingOpen}
-        onClose={() => setIsPricingOpen(false)}
-        onCostModelUpdated={(updatedModel) => {
-          if (report) {
-            const findingsWithCost = report.findings.map((f) => ({
-              ...f,
-              cost_impact: calculateFindingCostImpact(f, report.tables, updatedModel),
-            }));
-            const costSummary = calculateReportCostSummary(findingsWithCost, report.tables, updatedModel);
-            setReport({
-              ...report,
-              findings: findingsWithCost,
-              cost_summary: costSummary,
-            });
-          }
-        }}
-      />
+      {isPricingOpen && (
+        <React.Suspense fallback={null}>
+          <PricingSettingsModal
+            isOpen={isPricingOpen}
+            onClose={() => setIsPricingOpen(false)}
+            onCostModelUpdated={(updatedModel) => {
+              if (report) {
+                const findingsWithCost = report.findings.map((f) => ({
+                  ...f,
+                  cost_impact: calculateFindingCostImpact(f, report.tables, updatedModel),
+                }));
+                const costSummary = calculateReportCostSummary(findingsWithCost, report.tables, updatedModel);
+                setReport({
+                  ...report,
+                  findings: findingsWithCost,
+                  cost_summary: costSummary,
+                });
+              }
+            }}
+          />
+        </React.Suspense>
+      )}
 
       {/* ClickHouse User Setup Modal (Accessible from header / report trends) */}
-      <ClickHouseUserSetupModal
-        isOpen={isUserSetupOpen}
-        onClose={() => setIsUserSetupOpen(false)}
-        defaultDatabase={report?.database_name || currentScanConfig?.database || 'default'}
-      />
+      {isUserSetupOpen && (
+        <React.Suspense fallback={null}>
+          <ClickHouseUserSetupModal
+            isOpen={isUserSetupOpen}
+            onClose={() => setIsUserSetupOpen(false)}
+            defaultDatabase={report?.database_name || currentScanConfig?.database || 'default'}
+          />
+        </React.Suspense>
+      )}
 
       {/* Export Modal */}
-      {report && (
-        <ExportModal
-          isOpen={isExportOpen}
-          onClose={() => setIsExportOpen(false)}
-          report={report}
-        />
+      {report && isExportOpen && (
+        <React.Suspense fallback={null}>
+          <ExportModal
+            isOpen={isExportOpen}
+            onClose={() => setIsExportOpen(false)}
+            report={report}
+          />
+        </React.Suspense>
       )}
 
       {/* Feedback / Bug Report / Feature Request Modal */}
-      <FeedbackModal
-        isOpen={isFeedbackOpen}
-        onClose={() => setIsFeedbackOpen(false)}
-        report={report}
-      />
+      {isFeedbackOpen && (
+        <React.Suspense fallback={null}>
+          <FeedbackModal
+            isOpen={isFeedbackOpen}
+            onClose={() => setIsFeedbackOpen(false)}
+            report={report}
+          />
+        </React.Suspense>
+      )}
 
       {/* Footer */}
       <footer className="border-t border-zinc-900 mt-16 py-6 text-center text-xs text-zinc-500">

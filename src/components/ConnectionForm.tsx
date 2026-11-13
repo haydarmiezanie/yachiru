@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ConnectionConfig, AiProvider, AVAILABLE_AI_MODELS, SavedConnectionProfile } from '../types.js';
-import { ClickHouseUserSetupModal } from './ClickHouseUserSetupModal.js';
+const ClickHouseUserSetupModal = React.lazy(() =>
+  import('./ClickHouseUserSetupModal.js').then((m) => ({ default: m.ClickHouseUserSetupModal }))
+);
 import {
   listSavedProfiles,
   saveProfile,
@@ -1985,11 +1987,15 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
       </div>
 
       {/* ClickHouse Read-Only User Setup Modal */}
-      <ClickHouseUserSetupModal
-        isOpen={isSetupModalOpen}
-        onClose={() => setIsSetupModalOpen(false)}
-        defaultDatabase={database.trim() || 'default'}
-      />
+      {isSetupModalOpen && (
+        <React.Suspense fallback={null}>
+          <ClickHouseUserSetupModal
+            isOpen={isSetupModalOpen}
+            onClose={() => setIsSetupModalOpen(false)}
+            defaultDatabase={database.trim() || 'default'}
+          />
+        </React.Suspense>
+      )}
     </div>
   );
 };

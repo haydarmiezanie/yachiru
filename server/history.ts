@@ -8,7 +8,7 @@ import {
   FindingSummaryItem,
 } from '../src/types.js';
 import { openSshTunnel, OpenTunnelResult } from './sshTunnel.js';
-import { assertReadOnlySql, escapeSqlString, escapeSqlIdentifier } from './analyzer.js';
+import { assertReadOnlySql, escapeSqlString, escapeSqlIdentifier } from './sqlUtils.js';
 
 /**
  * Validates ClickHouse SQL identifier (database / table name) to prevent SQL injection.

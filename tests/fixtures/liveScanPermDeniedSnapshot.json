@@ -1,0 +1,676 @@
+{
+  "database_name": "analytics",
+  "clickhouse_version": "24.8.4.13",
+  "cluster_mode": "Single Node",
+  "overall_score": 82,
+  "overall_verdict": "Incomplete",
+  "coverage": {
+    "categories": [
+      {
+        "id": "part_health",
+        "name": "Part Health & Compaction",
+        "state": "evaluated"
+      },
+      {
+        "id": "primary_key",
+        "name": "Primary Key & Sorting",
+        "state": "evaluated"
+      },
+      {
+        "id": "partitioning",
+        "name": "Partitioning Strategy",
+        "state": "evaluated"
+      },
+      {
+        "id": "compression",
+        "name": "Compression & Codecs",
+        "state": "evaluated"
+      },
+      {
+        "id": "table_engine",
+        "name": "Table Engine Sanity",
+        "state": "evaluated"
+      },
+      {
+        "id": "skip_indices",
+        "name": "Data Skipping Indices",
+        "state": "evaluated"
+      },
+      {
+        "id": "query_performance",
+        "name": "Query Performance & Pruning",
+        "state": "unavailable",
+        "reason": "permission_denied",
+        "detail": "Missing required SELECT privilege in ClickHouse.",
+        "requiredGrant": "GRANT SELECT ON system.query_log TO <username>;"
+      },
+      {
+        "id": "replication_distributed",
+        "name": "Replication & Distributed Backlog",
+        "state": "unavailable",
+        "reason": "permission_denied",
+        "detail": "Missing required SELECT privilege in ClickHouse.",
+        "requiredGrant": "GRANT SELECT ON system.replicas TO <username>;"
+      },
+      {
+        "id": "server_settings",
+        "name": "Server & MergeTree Settings",
+        "state": "evaluated"
+      },
+      {
+        "id": "mutations",
+        "name": "Table Mutations",
+        "state": "unavailable",
+        "reason": "permission_denied",
+        "detail": "Missing required SELECT privilege in ClickHouse.",
+        "requiredGrant": "GRANT SELECT ON system.mutations TO <username>;"
+      },
+      {
+        "id": "disk_space",
+        "name": "Disk Space & Storage",
+        "state": "unavailable",
+        "reason": "permission_denied",
+        "detail": "Missing required SELECT privilege in ClickHouse.",
+        "requiredGrant": "GRANT SELECT ON system.disks TO <username>;"
+      },
+      {
+        "id": "system_errors",
+        "name": "System Errors & Stability",
+        "state": "unavailable",
+        "reason": "permission_denied",
+        "detail": "Missing required SELECT privilege in ClickHouse.",
+        "requiredGrant": "GRANT SELECT ON system.errors TO <username>;"
+      },
+      {
+        "id": "replication_queue",
+        "name": "Replication Queue & Retries",
+        "state": "unavailable",
+        "reason": "permission_denied",
+        "detail": "Missing required SELECT privilege in ClickHouse.",
+        "requiredGrant": "GRANT SELECT ON system.replication_queue TO <username>;"
+      }
+    ],
+    "evaluatedCount": 7,
+    "totalCount": 13,
+    "applicableCount": 13,
+    "unavailableCount": 6,
+    "notApplicableCount": 0,
+    "isComplete": false
+  },
+  "tables_truncated": false,
+  "tables_total": 3,
+  "columns_truncated": false,
+  "is_demo": false,
+  "summary": {
+    "total_tables": 3,
+    "total_rows": 30920000,
+    "total_size_compressed": "15.10 GB",
+    "total_size_uncompressed": "34.11 GB",
+    "avg_compression_ratio": "2.26x",
+    "total_parts": 228,
+    "total_queries_analyzed": 0,
+    "critical_count": 3,
+    "warning_count": 3,
+    "good_count": 8
+  },
+  "categories": [
+    {
+      "category": "part_health",
+      "name": "Part Health & Compaction",
+      "score": 70,
+      "status": "critical",
+      "critical_count": 1,
+      "warning_count": 0,
+      "good_count": 1,
+      "total_checks": 2,
+      "description": "Active parts count, size distribution, and merge health"
+    },
+    {
+      "category": "primary_key",
+      "name": "Primary Key & Sorting",
+      "score": 70,
+      "status": "critical",
+      "critical_count": 1,
+      "warning_count": 0,
+      "good_count": 2,
+      "total_checks": 3,
+      "description": "ORDER BY effectiveness, cardinality order, and sparse index utility"
+    },
+    {
+      "category": "partitioning",
+      "name": "Partitioning Strategy",
+      "score": 100,
+      "status": "good",
+      "critical_count": 0,
+      "warning_count": 0,
+      "good_count": 2,
+      "total_checks": 2,
+      "description": "Partition cardinality, volume per partition, and pruning efficiency"
+    },
+    {
+      "category": "compression",
+      "name": "Compression & Codecs",
+      "score": 88,
+      "status": "warning",
+      "critical_count": 0,
+      "warning_count": 1,
+      "good_count": 0,
+      "total_checks": 1,
+      "description": "Column-level compression ratios, ZSTD/DoubleDelta opportunities"
+    },
+    {
+      "category": "table_engine",
+      "name": "Table Engine Sanity",
+      "score": 70,
+      "status": "critical",
+      "critical_count": 1,
+      "warning_count": 0,
+      "good_count": 2,
+      "total_checks": 3,
+      "description": "MergeTree-family usage vs low-performance analytical engines"
+    },
+    {
+      "category": "skip_indices",
+      "name": "Data Skipping Indices",
+      "score": 88,
+      "status": "warning",
+      "critical_count": 0,
+      "warning_count": 1,
+      "good_count": 1,
+      "total_checks": 2,
+      "description": "MinMax, Set, and Bloom Filter secondary indexing coverage"
+    },
+    {
+      "category": "server_settings",
+      "name": "Server & MergeTree Settings",
+      "score": 88,
+      "status": "warning",
+      "critical_count": 0,
+      "warning_count": 1,
+      "good_count": 0,
+      "total_checks": 1,
+      "description": "Memory limits, background thread pools, and delay triggers"
+    }
+  ],
+  "findings": [
+    {
+      "id": "parts_count_events_raw",
+      "category": "part_health",
+      "category_name": "Part Health & Compaction",
+      "title": "Excessive active parts on table 'events_raw'",
+      "table": "events_raw",
+      "status": "critical",
+      "metric_value": "220 active parts",
+      "threshold": "Threshold: ≤ 150 parts per table",
+      "evidence": "Table 'events_raw' has 220 active unmerged parts (ClickHouse default starts delaying inserts at 150 and throws errors at 300).",
+      "impact": "High active part counts spike query memory, degrade vector read speed, and risk ClickHouse \"Too many parts in all data parts in table\" fatal insert rejection.",
+      "recommendation_sql_or_text": "-- Batch your inserts into chunks of 10,000-100,000 rows rather than streaming single-row inserts.\n-- To inspect pending merges:\nSELECT table, elapsed, progress, num_parts FROM system.merges WHERE table = 'events_raw';",
+      "is_sql_recommendation": true,
+      "cost_impact": null
+    },
+    {
+      "id": "parts_count_dim_users",
+      "category": "part_health",
+      "category_name": "Part Health & Compaction",
+      "title": "Part count within healthy parameters for 'dim_users'",
+      "table": "dim_users",
+      "status": "good",
+      "metric_value": "8 active parts",
+      "threshold": "Threshold: ≤ 80 parts per table",
+      "evidence": "8 active parts well below throttle threshold. Background merges are keeping pace with mutations.",
+      "impact": "Minimal disk seek overhead during primary key scans.",
+      "recommendation_sql_or_text": "Current batching frequency is healthy. Maintain batch inserts of >= 10k rows.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "pk_healthy_events_raw",
+      "category": "primary_key",
+      "category_name": "Primary Key & Sorting",
+      "title": "Primary key configured on 'events_raw'",
+      "table": "events_raw",
+      "status": "good",
+      "metric_value": "ORDER BY (event_time, id)",
+      "threshold": "Threshold: Valid sorting tuple present",
+      "evidence": "Table has 28,500,000 rows sorted by (event_time, id).",
+      "impact": "Enables sparse index block pruning during queries matching sorting key prefix.",
+      "recommendation_sql_or_text": "Key structure is effective.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "empty_orderby_session_cache",
+      "category": "primary_key",
+      "category_name": "Primary Key & Sorting",
+      "title": "Empty ORDER BY key on large table 'session_cache'",
+      "table": "session_cache",
+      "status": "critical",
+      "metric_value": "ORDER BY tuple()",
+      "threshold": "Threshold: Non-empty ORDER BY required for tables > 100k rows",
+      "evidence": "Table 'session_cache' contains 620,000 rows with an empty sorting key 'tuple()'.",
+      "impact": "No primary index is generated. Every SELECT statement with a WHERE filter on this table will execute an expensive full table scan across all blocks.",
+      "recommendation_sql_or_text": "-- Recreate the table with an appropriate ORDER BY (e.g. (tenant_id, event_time, id)):\n-- Note: Changing sorting key requires table migration:\nCREATE TABLE `analytics`.`session_cache_new` (...)\nENGINE = MergeTree()\nORDER BY (date_col, high_filter_id);",
+      "is_sql_recommendation": true,
+      "cost_impact": {
+        "category": "mixed",
+        "estimatedMonthlySavings": 0,
+        "annualProjectedSavings": 0,
+        "isEstimable": false,
+        "confidence": "low",
+        "confidenceReason": "Table uses unsorted ORDER BY tuple(). Compound sorting enables sparse index pruning and improves compression, but financial savings cannot be projected without an empirical sorting benchmark.",
+        "assumptions": [
+          "Table size: 1.7 GB.",
+          "Compound ORDER BY allows run-length and delta compression across adjacent sorted rows.",
+          "Enables sparse primary index pruning to avoid full-table scans.",
+          "Exact compression and I/O savings depend on row ordering; financial estimate not fabricated."
+        ],
+        "methodology": "Sorting optimization efficiency requires empirical benchmark.",
+        "calculationBasis": "Table 'session_cache' has unsorted storage. Recreating with compound ORDER BY improves compression and pruning; financial impact unavailable.",
+        "recommendedAction": "Recreate table 'session_cache' with compound ORDER BY matching query filter columns.",
+        "calculationSteps": [
+          {
+            "label": "Current Table Footprint",
+            "value": "1.7 GB"
+          },
+          {
+            "label": "Current ORDER BY",
+            "value": "tuple() (unsorted)"
+          },
+          {
+            "label": "Estimated Financial Impact",
+            "value": "Technical impact only (benchmark required)"
+          }
+        ],
+        "optimizationGroup": "table:session_cache:sorting",
+        "resourceReduction": {
+          "percentage": 25
+        },
+        "technicalReductionOnlyText": "Table uses unsorted ORDER BY tuple(). Compound sorting enables index pruning and improves compression; exact financial savings requires benchmark.",
+        "pricingSource": "Default assumption"
+      }
+    },
+    {
+      "id": "pk_healthy_dim_users",
+      "category": "primary_key",
+      "category_name": "Primary Key & Sorting",
+      "title": "Primary key configured on 'dim_users'",
+      "table": "dim_users",
+      "status": "good",
+      "metric_value": "ORDER BY (user_id)",
+      "threshold": "Threshold: Valid sorting tuple present",
+      "evidence": "Table has 1,800,000 rows sorted by (user_id).",
+      "impact": "Enables sparse index block pruning during queries matching sorting key prefix.",
+      "recommendation_sql_or_text": "Key structure is effective.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "partition_healthy_events_raw",
+      "category": "partitioning",
+      "category_name": "Partitioning Strategy",
+      "title": "Partitioning strategy healthy on 'events_raw'",
+      "table": "events_raw",
+      "status": "good",
+      "metric_value": "14 partitions",
+      "threshold": "Threshold: ≤ 300 partitions",
+      "evidence": "14 partitions for 28,500,000 rows.",
+      "impact": "Well-balanced partition granularity without metadata bloat.",
+      "recommendation_sql_or_text": "Partition configuration is optimal.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "partition_healthy_dim_users",
+      "category": "partitioning",
+      "category_name": "Partitioning Strategy",
+      "title": "Partitioning strategy healthy on 'dim_users'",
+      "table": "dim_users",
+      "status": "good",
+      "metric_value": "4 partitions",
+      "threshold": "Threshold: ≤ 300 partitions",
+      "evidence": "4 partitions for 1,800,000 rows.",
+      "impact": "Well-balanced partition granularity without metadata bloat.",
+      "recommendation_sql_or_text": "Partition configuration is optimal.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "low_compression_events_raw_payload_json",
+      "category": "compression",
+      "category_name": "Compression & Codecs",
+      "title": "Suboptimal compression on 'events_raw.payload_json' (1.18x)",
+      "table": "events_raw",
+      "status": "warning",
+      "metric_value": "1.18x compression ratio",
+      "threshold": "Threshold: ≥ 1.5x for String/Array columns",
+      "evidence": "Column 'payload_json' uses 7.82 GB uncompressed vs 6.61 GB compressed with codec 'CODEC(LZ4)'.",
+      "impact": "Suboptimal compression wastes NVMe/EBS disk space and forces queries to read more physical bytes from disk into memory buffers.",
+      "recommendation_sql_or_text": "-- If values have repeated cardinality, wrap with LowCardinality:\n-- Or apply ZSTD compression for text/JSON payloads:\n-- ALTER TABLE `analytics`.`events_raw` MODIFY COLUMN `payload_json` String CODEC(ZSTD(3));",
+      "is_sql_recommendation": true,
+      "metrics": {
+        "columnCompressedBytes": 7100000000,
+        "columnUncompressedBytes": 8400000000,
+        "compressionRatio": 1.1830985915492958,
+        "columnName": "payload_json",
+        "columnType": "String"
+      },
+      "cost_impact": {
+        "category": "storage",
+        "currentMonthlyCost": 0.79,
+        "estimatedMonthlyCostAfter": 0.24,
+        "estimatedMonthlySavings": 0.56,
+        "savingsPercentage": 70,
+        "annualProjectedSavings": 6.67,
+        "savingsRange": {
+          "minMonthlySavings": 0.16,
+          "maxMonthlySavings": 0.56,
+          "minBytesReduced": 1420000000,
+          "maxBytesReduced": 4970000000,
+          "minFormatted": "1.3 GB",
+          "maxFormatted": "4.6 GB"
+        },
+        "resourceReduction": {
+          "bytes": 4970000000,
+          "bytesFormatted": "4.6 GB",
+          "percentage": 70
+        },
+        "confidence": "medium",
+        "confidenceReason": "Candidate identified from column name convention only; cardinality was not inspected. If verified distinct count is below ~10,000, LowCardinality dictionary indexing typically yields 20%–70% compressed on-disk reduction.",
+        "assumptions": [
+          "Current column compressed footprint: 6.6 GB.",
+          "Assumed candidate based on column name convention; cardinality was not inspected.",
+          "Expected on-disk compressed reduction ranges between 20% and 70% depending on string length and existing LZ4/ZSTD compression.",
+          "Storage price: $0.12 / GB-month (Source: Default assumption).",
+          "Zero data growth assumed (steady-state current footprint)."
+        ],
+        "methodology": "Storage reduction = Column compressed size (6.6 GB) × dictionary compaction factor. Monthly savings = Reduction (GB) × Storage price.",
+        "calculationBasis": "Current column: 6.6 GB compressed → Estimated optimized: 2.0 GB (~70% reduction, range: 20%–70%).",
+        "recommendedAction": "-- Verify cardinality first:\nSELECT uniq(payload_json) FROM events_raw;\n-- If uniq count < 10000:\nALTER TABLE events_raw MODIFY COLUMN payload_json LowCardinality(String);",
+        "calculationSteps": [
+          {
+            "label": "Current Column Footprint (Compressed)",
+            "value": "6.6 GB"
+          },
+          {
+            "label": "Observed Cardinality",
+            "value": "Uninspected (name-only heuristic)"
+          },
+          {
+            "label": "Optimization",
+            "value": "LowCardinality(String) Dictionary Index"
+          },
+          {
+            "label": "Estimated Compaction Range",
+            "value": "20%–70% on-disk reduction"
+          },
+          {
+            "label": "Potential Storage Reduction",
+            "value": "4.6 GB"
+          },
+          {
+            "label": "Storage Rate",
+            "value": "$0.12 / GB-month",
+            "detail": "Source: Default assumption"
+          },
+          {
+            "label": "Estimated Monthly Savings",
+            "value": "$0.56 (Range: $0.16–$0.56)"
+          }
+        ],
+        "optimizationGroup": "table:events_raw:col:payload_json:schema",
+        "isEstimable": true,
+        "pricingSource": "Default assumption"
+      }
+    },
+    {
+      "id": "engine_healthy_events_raw",
+      "category": "table_engine",
+      "category_name": "Table Engine Sanity",
+      "title": "MergeTree-family engine utilized for 'events_raw'",
+      "table": "events_raw",
+      "status": "good",
+      "metric_value": "Engine: ReplicatedMergeTree",
+      "threshold": "Threshold: MergeTree-family",
+      "evidence": "Table 'events_raw' runs on 'ReplicatedMergeTree', enabling parallel reads, column compression, and sparse indexing.",
+      "impact": "Optimal engine architecture for analytical OLAP workloads.",
+      "recommendation_sql_or_text": "Engine choice is correct.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "engine_sanity_session_cache",
+      "category": "table_engine",
+      "category_name": "Table Engine Sanity",
+      "title": "Non-MergeTree engine used for analytical table 'session_cache'",
+      "table": "session_cache",
+      "status": "critical",
+      "metric_value": "Engine: Memory",
+      "threshold": "Threshold: Tables > 50k rows should use MergeTree-family",
+      "evidence": "Table 'session_cache' contains 620,000 rows using engine 'Memory'.",
+      "impact": "Non-MergeTree engines (such as Log, TinyLog, or Memory) do not support sparse primary indexes, data skipping indexes, parallel multithreaded scans, or column-level compression.",
+      "recommendation_sql_or_text": "-- Migrate table to MergeTree engine:\nCREATE TABLE `analytics`.`session_cache_mergetree` AS `analytics`.`session_cache`\nENGINE = MergeTree()\nORDER BY (primary_id);",
+      "is_sql_recommendation": true,
+      "cost_impact": null
+    },
+    {
+      "id": "engine_healthy_dim_users",
+      "category": "table_engine",
+      "category_name": "Table Engine Sanity",
+      "title": "MergeTree-family engine utilized for 'dim_users'",
+      "table": "dim_users",
+      "status": "good",
+      "metric_value": "Engine: MergeTree",
+      "threshold": "Threshold: MergeTree-family",
+      "evidence": "Table 'dim_users' runs on 'MergeTree', enabling parallel reads, column compression, and sparse indexing.",
+      "impact": "Optimal engine architecture for analytical OLAP workloads.",
+      "recommendation_sql_or_text": "Engine choice is correct.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "missing_skip_idx_events_raw",
+      "category": "skip_indices",
+      "category_name": "Data Skipping Indices",
+      "title": "Large table 'events_raw' has 0 secondary data skipping indices",
+      "table": "events_raw",
+      "status": "warning",
+      "metric_value": "0 skip indices configured",
+      "threshold": "Threshold: Tables > 1M rows with high-cardinality filters benefit from skip indices",
+      "evidence": "Table contains 28,500,000 rows but has no minmax, set, or bloom_filter indices defined in system.data_skipping_indices.",
+      "impact": "Queries filtering on non-primary-key columns must scan all granules in the table.",
+      "recommendation_sql_or_text": "-- Example: Add a bloom filter or minmax index on frequently filtered secondary column:\n-- ALTER TABLE `analytics`.`events_raw` ADD INDEX idx_user_id `user_id` TYPE bloom_filter(0.01) GRANULARITY 4;",
+      "is_sql_recommendation": true,
+      "cost_impact": null
+    },
+    {
+      "id": "skip_idx_present_dim_users",
+      "category": "skip_indices",
+      "category_name": "Data Skipping Indices",
+      "title": "Data skipping indices active on 'dim_users'",
+      "table": "dim_users",
+      "status": "good",
+      "metric_value": "1 skip index(es)",
+      "threshold": "Threshold: Indices configured",
+      "evidence": "1 secondary data skipping index(es) configured on 'dim_users'.",
+      "impact": "Granules can be pruned before reading full column files.",
+      "recommendation_sql_or_text": "Secondary index coverage verified.",
+      "is_sql_recommendation": false,
+      "cost_impact": null
+    },
+    {
+      "id": "low_max_memory_usage",
+      "category": "server_settings",
+      "category_name": "Server & MergeTree Settings",
+      "title": "Restrictive 'max_memory_usage' setting (2.00 GB)",
+      "status": "warning",
+      "metric_value": "max_memory_usage = 2.00 GB",
+      "threshold": "Threshold: ≥ 8GB recommended for analytical aggregation",
+      "evidence": "Current max_memory_usage per query is set to 2.00 GB. Analytical queries with large hash tables for GROUP BY may abort with MEMORY_LIMIT_EXCEEDED.",
+      "impact": "Complex JOINs, array aggregations, and window functions will be terminated prematurely.",
+      "recommendation_sql_or_text": "-- Update user profile settings or query session:\nSET max_memory_usage = 10000000000; -- 10 GB",
+      "is_sql_recommendation": true,
+      "cost_impact": null
+    }
+  ],
+  "tables": [
+    {
+      "database": "analytics",
+      "name": "events_raw",
+      "engine": "ReplicatedMergeTree",
+      "total_rows": 28500000,
+      "total_bytes_uncompressed": 31200000000,
+      "total_bytes_compressed": 14200000000,
+      "compression_ratio": 2.2,
+      "active_parts": 220,
+      "partition_count": 14,
+      "order_by_key": "event_time, id",
+      "partition_key": "toYYYYMM(event_time)",
+      "skip_indices_count": 0,
+      "findings_count": {
+        "critical": 1,
+        "warning": 2,
+        "good": 3
+      }
+    },
+    {
+      "database": "analytics",
+      "name": "session_cache",
+      "engine": "Memory",
+      "total_rows": 620000,
+      "total_bytes_uncompressed": 4500000000,
+      "total_bytes_compressed": 1800000000,
+      "compression_ratio": 2.5,
+      "active_parts": 0,
+      "partition_count": 1,
+      "order_by_key": "None",
+      "partition_key": "None",
+      "skip_indices_count": 0,
+      "findings_count": {
+        "critical": 2,
+        "warning": 0,
+        "good": 0
+      }
+    },
+    {
+      "database": "analytics",
+      "name": "dim_users",
+      "engine": "MergeTree",
+      "total_rows": 1800000,
+      "total_bytes_uncompressed": 920000000,
+      "total_bytes_compressed": 210000000,
+      "compression_ratio": 4.38,
+      "active_parts": 8,
+      "partition_count": 4,
+      "order_by_key": "user_id",
+      "partition_key": "toYYYYMM(created_at)",
+      "skip_indices_count": 1,
+      "findings_count": {
+        "critical": 0,
+        "warning": 0,
+        "good": 5
+      }
+    }
+  ],
+  "cost_summary": {
+    "totalMonthlySavings": 0.56,
+    "totalAnnualSavings": 6.72,
+    "storageMonthlySavings": 0.56,
+    "storageBytesReduced": 4970000000,
+    "storageBytesReducedFormatted": "4.6 GB",
+    "queryComputeMonthlySavings": 0,
+    "queryBytesScannedDailyReduced": 0,
+    "queryBytesScannedDailyReducedFormatted": "0.00 TB/day",
+    "totalOpportunitiesCount": 1,
+    "highImpactCount": 0,
+    "confidenceBreakdown": {
+      "high": 0,
+      "medium": 1,
+      "low": 0
+    },
+    "topOpportunities": [
+      {
+        "findingId": "low_compression_events_raw_payload_json",
+        "title": "Suboptimal compression on 'events_raw.payload_json' (1.18x)",
+        "table": "events_raw",
+        "category": "compression",
+        "categoryName": "Compression & Codecs",
+        "severity": "warning",
+        "costImpact": {
+          "category": "storage",
+          "currentMonthlyCost": 0.79,
+          "estimatedMonthlyCostAfter": 0.24,
+          "estimatedMonthlySavings": 0.56,
+          "savingsPercentage": 70,
+          "annualProjectedSavings": 6.67,
+          "savingsRange": {
+            "minMonthlySavings": 0.16,
+            "maxMonthlySavings": 0.56,
+            "minBytesReduced": 1420000000,
+            "maxBytesReduced": 4970000000,
+            "minFormatted": "1.3 GB",
+            "maxFormatted": "4.6 GB"
+          },
+          "resourceReduction": {
+            "bytes": 4970000000,
+            "bytesFormatted": "4.6 GB",
+            "percentage": 70
+          },
+          "confidence": "medium",
+          "confidenceReason": "Candidate identified from column name convention only; cardinality was not inspected. If verified distinct count is below ~10,000, LowCardinality dictionary indexing typically yields 20%–70% compressed on-disk reduction.",
+          "assumptions": [
+            "Current column compressed footprint: 6.6 GB.",
+            "Assumed candidate based on column name convention; cardinality was not inspected.",
+            "Expected on-disk compressed reduction ranges between 20% and 70% depending on string length and existing LZ4/ZSTD compression.",
+            "Storage price: $0.12 / GB-month (Source: Default assumption).",
+            "Zero data growth assumed (steady-state current footprint)."
+          ],
+          "methodology": "Storage reduction = Column compressed size (6.6 GB) × dictionary compaction factor. Monthly savings = Reduction (GB) × Storage price.",
+          "calculationBasis": "Current column: 6.6 GB compressed → Estimated optimized: 2.0 GB (~70% reduction, range: 20%–70%).",
+          "recommendedAction": "-- Verify cardinality first:\nSELECT uniq(payload_json) FROM events_raw;\n-- If uniq count < 10000:\nALTER TABLE events_raw MODIFY COLUMN payload_json LowCardinality(String);",
+          "calculationSteps": [
+            {
+              "label": "Current Column Footprint (Compressed)",
+              "value": "6.6 GB"
+            },
+            {
+              "label": "Observed Cardinality",
+              "value": "Uninspected (name-only heuristic)"
+            },
+            {
+              "label": "Optimization",
+              "value": "LowCardinality(String) Dictionary Index"
+            },
+            {
+              "label": "Estimated Compaction Range",
+              "value": "20%–70% on-disk reduction"
+            },
+            {
+              "label": "Potential Storage Reduction",
+              "value": "4.6 GB"
+            },
+            {
+              "label": "Storage Rate",
+              "value": "$0.12 / GB-month",
+              "detail": "Source: Default assumption"
+            },
+            {
+              "label": "Estimated Monthly Savings",
+              "value": "$0.56 (Range: $0.16–$0.56)"
+            }
+          ],
+          "optimizationGroup": "table:events_raw:col:payload_json:schema",
+          "isEstimable": true,
+          "pricingSource": "Default assumption"
+        }
+      }
+    ],
+    "costModelUsed": {
+      "storagePricePerGBMonth": 0.12,
+      "computePricePerCPUHour": 0.048,
+      "computePricePerGBHour": 0.006,
+      "queryCostPerTBScanned": 0,
+      "currency": "USD",
+      "isCustomPricing": false
+    }
+  }
+}

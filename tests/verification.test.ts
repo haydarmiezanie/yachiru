@@ -43,6 +43,7 @@ import {
   resetSessionsCacheForTesting,
   getDataDir,
   getDataFile,
+  flushPendingWrites,
 } from '../server/verificationStore.js';
 
 import { DEFAULT_COST_MODEL } from '../src/utils/costModel.js';
@@ -777,7 +778,9 @@ test('FIX 3 Mass Assignment: PATCH rejects setting computed fields or verified s
 // 7. Brief v10 FIX 5 Acceptance Test: Default data file remains byte-identical
 // ---------------------------------------------------------------------------
 
-test('FIX 5 Data Persistence Isolation: Default ./data/verifications.json remained byte-identical', () => {
+test('FIX 5 Data Persistence Isolation: Default ./data/verifications.json remained byte-identical', async () => {
+  await flushPendingWrites();
+
   // Check that getDataDir() used the isolated temp directory
   assert.equal(getDataDir(), tempTestDir);
   assert.ok(getDataFile().startsWith(tempTestDir));

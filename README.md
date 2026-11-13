@@ -163,7 +163,7 @@ Yachiru tracks health score trends, category progressions, and finding regressio
 
 ### Storage & Persistence Model
 - **Scan History Snapshots**: Stored directly in your ClickHouse cluster (`default.yachiru_scan_history`). Yachiru does not require an external SQL database or cloud service to track performance trends.
-- **Before/After Verification Sessions**: Stored in a lightweight JSON store on the server filesystem (`data/verifications.json`), configured via `YACHIRU_DATA_DIR` (mapped to `/app/data` volume in Docker Compose).
+- **Before/After Verification Sessions**: Stored in a lightweight JSON store on the server filesystem (`data/verifications.json`), configured via `YACHIRU_DATA_DIR` (mapped to `/app/data` volume in Docker Compose). Mutations are accepted in memory and flushed asynchronously via a coalesced atomic temp-file + rename queue within milliseconds; on `SIGTERM`/`SIGINT`, the server drains `flushPendingWrites()` (up to 5s, with `stop_grace_period: 10s` in Docker Compose) before exiting, and persistence health (`verificationStore`) is reported on `GET /api/health`.
 
 ### Dual-Credential Security Architecture
 To maintain strict least-privilege security, Yachiru uses two completely separate ClickHouse accounts:

@@ -8,6 +8,7 @@ services:
       dockerfile: Dockerfile
     container_name: yachiru-analyzer
     restart: unless-stopped
+    stop_grace_period: 10s
     ports:
       - "3000:3000"
     environment:

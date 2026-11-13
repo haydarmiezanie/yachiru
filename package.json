@@ -11,7 +11,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
-    "generate-api-key": "node scripts/generate-api-key.cjs"
+    "generate-api-key": "node scripts/generate-api-key.cjs",
+    "check:bundle": "node scripts/check-bundle-budget.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.126.0",

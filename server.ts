@@ -15,6 +15,10 @@ import {
   applyVerificationResult,
   deleteVerification,
   getDataDir,
+  getVerificationStoreHealth,
+  flushPendingWrites,
+  VerificationNotFoundError,
+  VerificationDuplicateError,
 } from './server/verificationStore.js';
 import {
   compareVerificationSession,
@@ -94,9 +98,13 @@ export function classifyConnectionError(errorMsg: string): { hint: string } {
   };
 }
 
-let YACHIRU_API_KEY = process.env.YACHIRU_API_KEY?.trim() || null;
-const YACHIRU_REQUIRE_API_KEY =
-  process.env.YACHIRU_REQUIRE_API_KEY === 'true' || process.env.REQUIRE_API_KEY === 'true';
+function getConfiguredApiKey(): string | null {
+  return process.env.YACHIRU_API_KEY?.trim() || null;
+}
+
+function isRequireApiKeyFlagActive(): boolean {
+  return process.env.YACHIRU_REQUIRE_API_KEY === 'true' || process.env.REQUIRE_API_KEY === 'true';
+}
 
 /**
  * Constant-time API key comparison using SHA-256 digests and crypto.timingSafeEqual.
@@ -110,20 +118,22 @@ export function compareApiKeys(provided?: string | null, expected?: string | nul
 }
 
 export function isEnforcedApiKeyValid(req: express.Request): boolean {
-  if (!YACHIRU_API_KEY) return false;
+  const configuredKey = getConfiguredApiKey();
+  if (!configuredKey) return false;
   const header = req.headers['authorization'];
   const bearerToken = header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined;
   const altHeader = (req.headers['x-yachiru-api-key'] as string | undefined)?.trim();
   const provided = bearerToken || altHeader;
-  return compareApiKeys(provided, YACHIRU_API_KEY);
+  return compareApiKeys(provided, configuredKey);
 }
 
 export function checkApiKeyStartupConfig(): void {
   const isProd = process.env.NODE_ENV === 'production';
   const allowOpenApi = process.env.YACHIRU_ALLOW_OPEN_API === 'true';
+  const configuredKey = getConfiguredApiKey();
 
-  if (!YACHIRU_API_KEY) {
-    if (YACHIRU_REQUIRE_API_KEY) {
+  if (!configuredKey) {
+    if (isRequireApiKeyFlagActive()) {
       console.error(
         '[Yachiru Security FATAL] YACHIRU_REQUIRE_API_KEY=true is active, but YACHIRU_API_KEY was not set. Refusing to start.'
       );
@@ -145,7 +155,7 @@ export function checkApiKeyStartupConfig(): void {
 }
 
 function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
-  if (!YACHIRU_API_KEY) return next(); // feature disabled, behave as open
+  if (!getConfiguredApiKey()) return next(); // feature disabled, behave as open
   if (!isEnforcedApiKeyValid(req)) {
     return res.status(401).json({
       error: 'Missing or invalid API key. Provide it via "Authorization: Bearer <key>" or "X-Yachiru-Api-Key: <key>".',
@@ -230,29 +240,35 @@ function validateConnectionConfig(config: ConnectionConfig): { error?: string } 
   return {};
 }
 
-const analyzeLimiter = rateLimit({
-  windowMs: 60_000,
-  limit: Number(process.env.YACHIRU_RATE_LIMIT_PER_MINUTE) || 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => ipKeyGenerator(req.ip ?? '127.0.0.1'),
-  message: { error: 'Too many analysis requests. Please wait before retrying.' },
-});
+export function rateLimitErrorPayload() {
+  return { error: 'Too many requests. Please wait before retrying.' };
+}
 
-const narrateLimiter = rateLimit({
-  windowMs: 60_000,
-  limit: Number(process.env.YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE) || 15,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => ipKeyGenerator(req.ip ?? '127.0.0.1'),
-  message: {
-    error: 'Too many narrative requests. Please wait before retrying to conserve LLM quota.',
-  },
-});
+export interface CreateAppOptions {
+  analyzeLimitPerMinute?: number;
+  narrateLimitPerMinute?: number;
+}
 
-async function startServer() {
+export function createApp(options?: CreateAppOptions): express.Express {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+
+  const analyzeLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: options?.analyzeLimitPerMinute ?? (Number(process.env.YACHIRU_RATE_LIMIT_PER_MINUTE) || 30),
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(req.ip ?? '127.0.0.1'),
+    message: rateLimitErrorPayload(),
+  });
+
+  const narrateLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: options?.narrateLimitPerMinute ?? (Number(process.env.YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE) || 15),
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(req.ip ?? '127.0.0.1'),
+    message: rateLimitErrorPayload(),
+  });
 
   // Configurable reverse proxy trust (hop count or boolean, default off)
   const trustProxyEnv = process.env.YACHIRU_TRUST_PROXY?.trim();
@@ -278,14 +294,24 @@ async function startServer() {
     res.redirect(302, '/favicon.svg');
   });
 
-  // Health endpoint: status and apiKeyRequired are always public;
-  // Provider keys and internal system status are protected behind API key authentication.
+  // Health endpoint: status, apiKeyRequired, and verificationStore summary are always public;
+  // Provider keys, full error strings, and internal system status are protected behind API key authentication.
   app.get('/api/health', (req, res) => {
-    const isAuthed = !YACHIRU_API_KEY || isEnforcedApiKeyValid(req);
+    const configuredKey = getConfiguredApiKey();
+    const isAuthed = !configuredKey || isEnforcedApiKeyValid(req);
+    const storeHealth = getVerificationStoreHealth();
+
     res.json({
       status: 'ok',
       service: 'Yachiru ClickHouse Analyzer',
-      apiKeyRequired: Boolean(YACHIRU_API_KEY),
+      apiKeyRequired: Boolean(configuredKey),
+      verificationStore: isAuthed
+        ? storeHealth
+        : {
+            ok: storeHealth.ok,
+            pending: storeHealth.pending,
+            lastError: storeHealth.lastError ? 'Persistence write error' : null,
+          },
       ...(isAuthed
         ? {
             hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
@@ -671,6 +697,9 @@ async function startServer() {
       const created = createVerification(req.body);
       res.status(201).json(created);
     } catch (err: unknown) {
+      if (err instanceof VerificationDuplicateError) {
+        return res.status(409).json({ error: err.message });
+      }
       const msg = err instanceof Error ? err.message : 'Failed to create verification session';
       res.status(400).json({ error: msg });
     }
@@ -701,6 +730,9 @@ async function startServer() {
       const updated = patchVerification(req.params.id, req.body);
       res.json(updated);
     } catch (err: unknown) {
+      if (err instanceof VerificationNotFoundError) {
+        return res.status(404).json({ error: err.message });
+      }
       const msg = err instanceof Error ? err.message : 'Failed to update verification session';
       res.status(400).json({ error: msg });
     }
@@ -827,7 +859,10 @@ async function startServer() {
   app.delete('/api/verifications/:id', analyzeLimiter, requireApiKey, (req, res) => {
     try {
       const deleted = deleteVerification(req.params.id);
-      res.json({ success: deleted });
+      if (!deleted) {
+        return res.status(404).json({ error: `Verification session '${req.params.id}' not found` });
+      }
+      res.json({ success: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to delete verification session';
       res.status(500).json({ error: msg });
@@ -908,6 +943,28 @@ async function startServer() {
     }
   });
 
+  // Consistent JSON error handler for body parser size limits (413) & malformed JSON (400)
+  app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err && (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413)) {
+      return res.status(413).json({
+        error: 'Request payload too large.',
+      });
+    }
+    if (err instanceof SyntaxError && (err as any).type === 'entity.parse.failed') {
+      return res.status(400).json({
+        error: 'Invalid JSON request body.',
+      });
+    }
+    next(err);
+  });
+
+  return app;
+}
+
+async function startServer() {
+  const app = createApp();
+  const PORT = Number(process.env.PORT) || 3000;
+
   // Vite middleware for development vs static build for production
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -923,10 +980,11 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
+    const configuredKey = getConfiguredApiKey();
     console.log(`[Yachiru] Server running at http://0.0.0.0:${PORT}`);
     console.log(`[Yachiru] Verification store directory: ${getDataDir()}`);
-    if (YACHIRU_API_KEY) {
+    if (configuredKey) {
       console.log(
         '[Yachiru Security] API authentication is ENABLED. Protected routes require "Authorization: Bearer <key>".'
       );
@@ -936,6 +994,42 @@ async function startServer() {
       );
     }
   });
+
+  let isShuttingDown = false;
+  const handleShutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`[Yachiru] Received ${signal}. Closing HTTP server and flushing verification store...`);
+
+    const closeHttpPromise = new Promise<void>((resolve) => {
+      httpServer.close(() => resolve());
+      if (typeof (httpServer as any).closeIdleConnections === 'function') {
+        (httpServer as any).closeIdleConnections();
+      }
+      setTimeout(resolve, 2000).unref();
+    });
+
+    await closeHttpPromise;
+
+    let exitCode = 0;
+    try {
+      await Promise.race([
+        flushPendingWrites(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Verification store flush timed out after 5000ms')), 5000)
+        ),
+      ]);
+      console.log('[Yachiru] Verification store flushed cleanly. Exiting.');
+    } catch (err) {
+      console.error('[Yachiru] Error flushing verification store during shutdown:', err);
+      exitCode = 1;
+    }
+
+    process.exit(exitCode);
+  };
+
+  process.on('SIGTERM', () => void handleShutdown('SIGTERM'));
+  process.on('SIGINT', () => void handleShutdown('SIGINT'));
 }
 
 const isTestRunner = process.env.NODE_ENV === 'test' || process.argv.some((arg) => arg.includes('test'));

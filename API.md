@@ -39,15 +39,27 @@ Requests to expensive diagnostic endpoints (`/api/analyze`, `/api/test-connectio
     "error": "Too many requests. Please wait before retrying."
   }
   ```
+- **Oversized / Malformed Payloads**: `/api/narrate` enforces a `1mb` JSON limit (other endpoints enforce `10mb`). Exceeding the limit returns HTTP `413 Payload Too Large`:
+  ```json
+  {
+    "error": "Request payload too large."
+  }
+  ```
+  Malformed JSON returns HTTP `400 Bad Request`:
+  ```json
+  {
+    "error": "Invalid JSON request body."
+  }
+  ```
 
 ---
 
 ## 3. Endpoints Specification
 
 ### 3.1. `GET /api/health`
-Checks server readiness, AI credentials status, and whether API key authentication is currently enforced.
+Checks server readiness, verification store persistence health, AI credentials status, and whether API key authentication is currently enforced.
 
-- **Authentication**: None (Always Open)
+- **Authentication**: Partial (Always Open for `status`, `service`, `apiKeyRequired`, and redacted `verificationStore`; full provider flags, `systemKeyState`, and detailed `verificationStore.lastError` require `YACHIRU_API_KEY` when enabled).
 - **Rate Limited**: No
 
 #### Request Example
@@ -61,8 +73,15 @@ curl -s http://localhost:3000/api/health
   "status": "ok",
   "service": "Yachiru ClickHouse Analyzer",
   "apiKeyRequired": false,
+  "verificationStore": {
+    "ok": true,
+    "pending": 0,
+    "lastError": null,
+    "lastWriteAt": "2026-09-15T15:30:00.000Z"
+  },
   "hasGeminiApiKey": true,
   "hasOpenAiApiKey": false,
+  "hasClaudeApiKey": false,
   "defaultModel": "gemini-3.8-flash",
   "geminiSystemKeyState": {
     "depleted": false,
@@ -77,6 +96,20 @@ curl -s http://localhost:3000/api/health
     "expiresAt": null,
     "remainingSeconds": 0,
     "reason": null
+  },
+  "claudeSystemKeyState": {
+    "depleted": false,
+    "depletedAt": null,
+    "expiresAt": null,
+    "remainingSeconds": 0,
+    "reason": null
+  },
+  "systemKeyState": {
+    "depleted": false,
+    "depletedAt": null,
+    "expiresAt": null,
+    "remainingSeconds": 0,
+    "reason": null
   }
 }
 ```
@@ -86,14 +119,15 @@ curl -s http://localhost:3000/api/health
 ### 3.2. `GET /api/system-key-status`
 Returns circuit-breaker state for server-level AI API keys (quota depletion cooldown tracking).
 
-- **Authentication**: None (Always Open)
+- **Authentication**: Required when `YACHIRU_API_KEY` is set.
 - **Query Parameters**:
-  - `provider` (optional): `'gemini'` (default) or `'openai'`
+  - `provider` (optional): `'gemini'` (default), `'openai'`, or `'claude'`
 - **Rate Limited**: No
 
 #### Request Example
 ```bash
-curl -s "http://localhost:3000/api/system-key-status?provider=gemini"
+curl -s -H "Authorization: Bearer YOUR_YACHIRU_API_KEY" \
+  "http://localhost:3000/api/system-key-status?provider=claude"
 ```
 
 #### Successful Response (`200 OK`)
@@ -104,6 +138,37 @@ curl -s "http://localhost:3000/api/system-key-status?provider=gemini"
   "expiresAt": null,
   "remainingSeconds": 0,
   "reason": null
+}
+```
+
+---
+
+### 3.2b. `POST /api/system-key-reset`
+Clears the circuit-breaker depletion state for a server-level AI provider key so requests can retry immediately.
+
+- **Authentication**: Required when `YACHIRU_API_KEY` is set.
+- **Query Parameters**:
+  - `provider` (optional): `'gemini'` (default), `'openai'`, or `'claude'`
+- **Rate Limited**: No
+
+#### Request Example
+```bash
+curl -s -X POST -H "Authorization: Bearer YOUR_YACHIRU_API_KEY" \
+  "http://localhost:3000/api/system-key-reset?provider=gemini"
+```
+
+#### Successful Response (`200 OK`)
+```json
+{
+  "success": true,
+  "provider": "gemini",
+  "status": {
+    "depleted": false,
+    "depletedAt": null,
+    "expiresAt": null,
+    "remainingSeconds": 0,
+    "reason": null
+  }
 }
 ```
 
@@ -156,9 +221,10 @@ curl -s -X POST http://localhost:3000/api/test-connection \
 ```json
 {
   "success": true,
-  "message": "Connected to ClickHouse 24.8.4.13.",
+  "message": "Successfully connected to ClickHouse v24.8.4.13 at clickhouse.internal.company.net:8123",
   "version": "24.8.4.13",
-  "uptime": "14 days, 6 hours"
+  "serverHostKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...",
+  "pinMatches": true
 }
 ```
 
@@ -169,7 +235,7 @@ curl -s -X POST http://localhost:3000/api/test-connection \
 }
 ```
 
-#### Connection Failure Response (`500 Internal Server Error`)
+#### Connection Failure Response (`400 Bad Request`)
 ```json
 {
   "success": false,
@@ -193,10 +259,13 @@ In addition to connection fields (`host`, `port`, `protocol`, `username`, `passw
 | `queryDurationThresholdMs` | `number` | No | Minimum query duration to flag in slow logs (default: 3000). |
 | `queryMemoryThresholdBytes` | `number` | No | Minimum memory usage to flag in memory audit (default: 1073741824). |
 | `enableAiNarrative` | `boolean` | No | If `false` (recommended for CI/cron), runs purely deterministic rules with zero LLM API cost. |
-| `aiProvider` | `'gemini' \| 'openai'` | No | Optional AI provider override. |
-| `geminiModel` | `string` | No | Target model (e.g., `'gemini-3.8-flash'`). |
+| `aiProvider` | `'gemini' \| 'openai' \| 'claude'` | No | Optional AI provider override. |
+| `geminiModel` | `string` | No | Target model (must match allowlist in `AVAILABLE_AI_MODELS`). |
 | `geminiApiKey` | `string` | No | Caller-provided Gemini API key (optional). |
 | `openaiApiKey` | `string` | No | Caller-provided OpenAI API key (optional). |
+| `claudeApiKey` | `string` | No | Caller-provided Anthropic Claude API key (optional). |
+| `claudeThinking` | `boolean` | No | Enable Claude extended thinking mode if supported by the chosen model. |
+| `enableHistoryTracking` | `boolean` | No | Record scan results to target cluster's history table (`system_yachiru.scan_history`). |
 
 #### Request Example (Deterministic Audit for Automation)
 ```bash
@@ -229,6 +298,19 @@ Abbreviated `AnalysisReport` payload:
   "overall_score": 88,
   "overall_verdict": "Optimized",
   "is_demo": false,
+  "coverage": {
+    "evaluatedCount": 11,
+    "applicableCount": 11,
+    "totalCount": 13,
+    "unavailableCount": 0,
+    "notApplicableCount": 2,
+    "isComplete": true,
+    "categories": [
+      { "id": "part_health", "name": "Part Health & Compaction", "state": "evaluated" },
+      { "id": "primary_key", "name": "Primary Key & Sorting", "state": "evaluated" },
+      { "id": "replication_distributed", "name": "Replication & Distributed Backlog", "state": "not_applicable", "reason": "no_replicated_tables" }
+    ]
+  },
   "summary": {
     "total_tables": 14,
     "total_rows": 12850400,
@@ -291,28 +373,26 @@ Abbreviated `AnalysisReport` payload:
 }
 ```
 
-#### Validation Error Response (`400 Bad Request`)
-```json
-{
-  "error": "host is required and must be a non-empty string."
-}
-```
+*Note on Verdicts*: When query permission errors occur or evaluated category coverage is below 60%, `overall_verdict` evaluates to `"Incomplete"` and score is marked as partial, preventing unverified or inaccessible checks from yielding a false `"Optimized"` score.
 
 ---
 
 ### 3.5. `POST /api/narrate`
-Synthesizes executive diagnoses and prioritized action items from an existing `AnalysisReport` using Gemini or OpenAI.
+Synthesizes executive diagnoses and prioritized action items from an existing `AnalysisReport` using Gemini, OpenAI, or Claude.
 
 - **Authentication**: Required when `YACHIRU_API_KEY` is set.
 - **Rate Limited**: Yes (default 15 requests/minute, configurable via `YACHIRU_NARRATE_RATE_LIMIT_PER_MINUTE`).
+- **Access Control**: Server system keys are only used if `YACHIRU_ALLOW_SYSTEM_LLM_KEY=true` and request passed authenticated API key check. Otherwise callers must supply `geminiApiKey`, `openaiApiKey`, or `claudeApiKey`.
 
 #### Request Body
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `report` | `AnalysisReport` | Yes | Existing analysis report to evaluate. |
-| `provider` | `'gemini' \| 'openai'` | No | Target AI provider. |
-| `model` | `string` | No | Model name (e.g. `'gemini-3.8-flash'`). |
-| `apiKey` | `string` | No | Optional client API key for the chosen provider. |
+| `report` | `AnalysisReport` | Yes | Existing analysis report (must contain non-empty `scan_id` and at most 250 `findings`). |
+| `provider` | `'gemini' \| 'openai' \| 'claude'` | No | Target AI provider. |
+| `model` | `string` | No | Valid model name (must match provider allowlist in `AVAILABLE_AI_MODELS`). |
+| `geminiApiKey` | `string` | No | Optional client Gemini API key. |
+| `openaiApiKey` | `string` | No | Optional client OpenAI API key. |
+| `claudeApiKey` | `string` | No | Optional client Claude API key. |
 
 #### Request Example
 ```bash
@@ -320,7 +400,7 @@ curl -s -X POST http://localhost:3000/api/narrate \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_YACHIRU_API_KEY" \
   -d '{
-    "report": { ... },
+    "report": { "scan_id": "scan_1726414200000", "findings": [] },
     "provider": "gemini",
     "model": "gemini-3.8-flash"
   }'
@@ -346,6 +426,187 @@ curl -s -X POST http://localhost:3000/api/narrate \
   "ai_diagnoses": []
 }
 ```
+
+---
+
+### 3.6. `POST /api/history`
+Retrieves stored historical audit scans from the target ClickHouse cluster's history tracking table (`system_yachiru.scan_history`), chronological trend data, and comparative delta against the previous scan.
+
+- **Authentication**: Required when `YACHIRU_API_KEY` is set.
+- **Rate Limited**: Yes (30 req/min).
+- **Query Parameters**:
+  - `limit` (optional): Maximum records to retrieve (default: `100`).
+
+#### Request Body (`ConnectionConfig`)
+Includes standard connection credentials and optional `historyDatabase` / `historyTableName`.
+
+#### Successful Response (`200 OK`)
+```json
+{
+  "success": true,
+  "history": [
+    {
+      "id": "scan_1726414200000",
+      "timestamp": "2026-09-15T15:30:00.000Z",
+      "target_host": "clickhouse.internal.company.net",
+      "target_database": "analytics",
+      "overall_score": 88,
+      "overall_verdict": "Optimized",
+      "evaluated_categories": ["part_health", "primary_keys", "table_engines"],
+      "findings_count": { "critical": 0, "warning": 2, "good": 18 },
+      "metrics": {
+        "total_tables": 14,
+        "total_parts": 84,
+        "total_size_compressed_bytes": 1524713390
+      }
+    }
+  ],
+  "comparison": {
+    "hasComparison": true,
+    "scoreDelta": 3,
+    "coverageChanged": false,
+    "coverageNote": null,
+    "resolvedFindings": 1,
+    "newFindings": 0
+  }
+}
+```
+
+*Note on Coverage*: If the evaluated categories differ between scans (e.g. Due to permission changes or skipped checks), `coverageChanged` is set to `true` and `coverageNote` explains the discrepancy to avoid interpreting category loss as performance improvement.
+
+---
+
+### 3.7. Remediation Verification API (`/api/verifications`)
+Yachiru includes a full before-and-after verification engine that tracks remediation sessions, runs post-fix verification scans on the server, and measures real metric deltas (e.g. Compression ratio gains, disk space freed, and slow query duration drops).
+
+#### Persistence & Shutdown Guarantees
+- Mutations (`POST`, `PATCH`, `POST .../verify`, `DELETE`) are accepted immediately in memory and persisted asynchronously to `verifications.json` (in `YACHIRU_DATA_DIR`, default `./data`) via a coalesced atomic temp-file + rename write queue.
+- On `SIGTERM` or `SIGINT`, the server closes HTTP connections and awaits `flushPendingWrites()` (up to 5 seconds) before exiting cleanly (`docker-compose.yml` configures `stop_grace_period: 10s`).
+- Disk write status (`ok`, `pending`, `lastError`, `lastWriteAt`) is surfaced on `GET /api/health` under `verificationStore`.
+
+#### Endpoints Overview
+| Method | Route | Description | Auth Required | Status Codes |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/verifications` | List verification sessions (filters: `host`, `database`, `workspaceId`). | Yes | `200`, `401`, `500` |
+| `POST` | `/api/verifications` | Create new verification session with baseline metrics. | Yes | `201`, `400`, `401`, `409`, `429` |
+| `GET` | `/api/verifications/:id` | Get details and verification metrics for a single session. | Yes | `200`, `401`, `404`, `500` |
+| `PATCH` | `/api/verifications/:id` | Update session checklist, user status transition, or notes. | Yes | `200`, `400`, `401`, `404`, `429` |
+| `POST` | `/api/verifications/:id/verify` | Re-scan cluster on the server and evaluate remediation results. | Yes | `200`, `400`, `401`, `404`, `409`, `429` |
+| `DELETE` | `/api/verifications/:id` | Delete a verification session. | Yes | `200`, `401`, `404`, `429` |
+
+#### 1. `GET /api/verifications` (List Sessions)
+Returns `{ sessions, summary }`. Supports optional query filters `host`, `database`, and `workspaceId`.
+
+#### 2. `POST /api/verifications` (Create Session)
+Creates a baseline verification tracking session for a finding (`201 Created`). Client-supplied verification outcomes (`afterScanId`, `verifiedAt`, `afterMetrics`, `financialImpact`, `measuredImpactSummary`) are strictly stripped/ignored to prevent forging. Duplicate session IDs return `409 Conflict`.
+
+Required fields: `id` (`^[a-zA-Z0-9_\-:.]{1,100}$`), `targetHost`, `targetDatabase`, `findingId`, `findingTitle`, `findingCategory`, `findingSeverity`, `baselineScanId`, `baselineMetrics` (object).
+
+Request JSON example:
+```json
+{
+  "id": "verif_events_raw_compression_01",
+  "findingId": "low_compression_raw_payloads",
+  "findingTitle": "Suboptimal compression on events_raw.payload_json",
+  "findingCategory": "compression",
+  "findingSeverity": "warning",
+  "targetHost": "clickhouse.internal.company.net",
+  "targetDatabase": "analytics",
+  "targetTable": "events_raw",
+  "targetColumn": "payload_json",
+  "recommendationSqlOrText": "ALTER TABLE events_raw MODIFY COLUMN payload_json String CODEC(ZSTD(3));",
+  "isSqlRecommendation": true,
+  "riskLevel": "medium",
+  "baselineScanId": "scan_1726414200000",
+  "baselineCapturedAt": "2026-09-15T15:30:00.000Z",
+  "baselineMetrics": {
+    "compression_ratio": 1.18,
+    "column_compressed_bytes": 7100000000
+  }
+}
+```
+
+```bash
+curl -s -X POST http://localhost:3000/api/verifications \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_YACHIRU_API_KEY" \
+  -d '{
+    "id": "verif_events_raw_compression_01",
+    "findingId": "low_compression_raw_payloads",
+    "findingTitle": "Suboptimal compression on events_raw.payload_json",
+    "findingCategory": "compression",
+    "findingSeverity": "warning",
+    "targetHost": "clickhouse.internal.company.net",
+    "targetDatabase": "analytics",
+    "targetTable": "events_raw",
+    "targetColumn": "payload_json",
+    "recommendationSqlOrText": "ALTER TABLE events_raw MODIFY COLUMN payload_json String CODEC(ZSTD(3));",
+    "isSqlRecommendation": true,
+    "riskLevel": "medium",
+    "baselineScanId": "scan_1726414200000",
+    "baselineCapturedAt": "2026-09-15T15:30:00.000Z",
+    "baselineMetrics": {
+      "compression_ratio": 1.18,
+      "column_compressed_bytes": 7100000000
+    }
+  }'
+```
+
+#### 3. `GET /api/verifications/:id` (Get Session)
+Returns the full `VerificationSession` (`200 OK`) or `404 Not Found` if the session ID does not exist.
+
+#### 4. `PATCH /api/verifications/:id` (Update Notes / Checklist / User Status)
+Updates user-editable fields (`notes`, `checklist`, and user-driven status transitions `'remediation_in_progress' | 'awaiting_verification' | 'cancelled'`). Attempting to set computed fields (`financialImpact`, `afterMetrics`, `status: 'verified'`) returns `400 Bad Request`; unknown IDs return `404 Not Found`.
+
+Request JSON example:
+```json
+{
+  "status": "remediation_in_progress",
+  "notes": "Scheduled ALTER TABLE CODEC change during off-peak window."
+}
+```
+
+#### 5. `POST /api/verifications/:id/verify` (Execute Verification)
+Executes a server-side audit scan against the cluster and verifies whether the targeted issue was resolved, measuring actual metric impact. Client-supplied `afterReport` payloads are rejected (`400 Bad Request`), target host/database mismatches return `409 Conflict`, and unknown IDs return `404 Not Found`.
+
+Request JSON example:
+```json
+{
+  "connectionConfig": {
+    "host": "clickhouse.internal.company.net",
+    "port": 8123,
+    "protocol": "http",
+    "username": "yachiru_readonly",
+    "password": "CHANGE_ME_SECURE_PASSWORD",
+    "database": "analytics"
+  }
+}
+```
+
+```bash
+curl -s -X POST http://localhost:3000/api/verifications/verif_events_raw_compression_01/verify \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_YACHIRU_API_KEY" \
+  -d '{
+    "connectionConfig": {
+      "host": "clickhouse.internal.company.net",
+      "port": 8123,
+      "protocol": "http",
+      "username": "yachiru_readonly",
+      "password": "CHANGE_ME_SECURE_PASSWORD",
+      "database": "analytics"
+    }
+  }'
+```
+
+Response returns the updated session containing:
+- `status`: `'verified' | 'partially_improved' | 'not_improved' | 'regressed' | 'inconclusive'`
+- `metricComparisons`: Baseline vs After values and percentage delta
+- `measuredImpactSummary`: Summary of improvements (e.g., parts merged, storage freed)
+- `financialImpact`: Estimated monthly and annual cloud storage savings.
+
+#### 6. `DELETE /api/verifications/:id` (Delete Session)
+Deletes a verification session by ID. Returns `200 OK` (`{ "success": true }`) or `404 Not Found` if the session does not exist.
 
 ---
 

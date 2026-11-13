@@ -23,29 +23,68 @@ export function getDataFile(): string {
   return path.join(getDataDir(), 'verifications.json');
 }
 
+export class VerificationNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Verification session '${id}' not found.`);
+    this.name = 'VerificationNotFoundError';
+  }
+}
+
+export class VerificationDuplicateError extends Error {
+  constructor(id: string) {
+    super(`Verification session '${id}' already exists.`);
+    this.name = 'VerificationDuplicateError';
+  }
+}
+
+export interface VerificationStoreHealth {
+  ok: boolean;
+  pending: number;
+  lastError: string | null;
+  lastWriteAt: string | null;
+}
+
 // In-memory cache backed by filesystem persistence
 let sessionsCache: Map<string, VerificationSession> | null = null;
+let activeFlush: Promise<void> | null = null;
+let pendingChanges = 0;
+let dirty = false;
+let lastWriteError: string | null = null;
+let lastWriteAt: string | null = null;
 
 export function resetSessionsCacheForTesting(): void {
   sessionsCache = null;
+  activeFlush = null;
+  pendingChanges = 0;
+  dirty = false;
+  lastWriteError = null;
+  lastWriteAt = null;
+}
+
+export function getVerificationStoreHealth(): VerificationStoreHealth {
+  return {
+    ok: lastWriteError === null,
+    pending: pendingChanges,
+    lastError: lastWriteError,
+    lastWriteAt,
+  };
 }
 
 function ensureDataDir(): void {
   const dir = getDataDir();
-  try {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  } catch (err) {
-    console.warn('[VerificationStore] Could not create data directory:', err);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 }
 
 function loadSessionsFromDisk(): Map<string, VerificationSession> {
   const map = new Map<string, VerificationSession>();
-  ensureDataDir();
+  try {
+    ensureDataDir();
+  } catch (err) {
+    console.warn('[VerificationStore] Could not create data directory:', err);
+  }
   const file = getDataFile();
-
   if (fs.existsSync(file)) {
     try {
       const raw = fs.readFileSync(file, 'utf-8');
@@ -64,18 +103,80 @@ function loadSessionsFromDisk(): Map<string, VerificationSession> {
   return map;
 }
 
-function flushSessionsToDisk(): void {
+/**
+ * Atomically writes current session cache to disk using a unique temporary file and rename.
+ */
+export async function flushSessionsToDisk(): Promise<void> {
   if (!sessionsCache) return;
-  ensureDataDir();
   const file = getDataFile();
+  const capturedChanges = pendingChanges;
+  const list = Array.from(sessionsCache.values());
+  const payload = JSON.stringify(list);
+  const tempFile = `${file}.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
 
   try {
-    const list = Array.from(sessionsCache.values());
-    const tempFile = `${file}.tmp.${Date.now()}`;
-    fs.writeFileSync(tempFile, JSON.stringify(list, null, 2), 'utf-8');
-    fs.renameSync(tempFile, file);
+    ensureDataDir();
+    await fs.promises.writeFile(tempFile, payload, 'utf-8');
+    await fs.promises.rename(tempFile, file);
+    pendingChanges = Math.max(0, pendingChanges - capturedChanges);
+    lastWriteError = null;
+    lastWriteAt = new Date().toISOString();
   } catch (err) {
+    lastWriteError = err instanceof Error ? err.message : String(err);
     console.error('[VerificationStore] Failed to write verifications.json:', err);
+    try {
+      if (fs.existsSync(tempFile)) {
+        await fs.promises.unlink(tempFile);
+      }
+    } catch {
+      // Ignore cleanup error
+    }
+    throw err;
+  }
+}
+
+async function runFlushLoop(): Promise<void> {
+  try {
+    while (dirty) {
+      dirty = false;
+      try {
+        await flushSessionsToDisk();
+      } catch {
+        // Error recorded in lastWriteError and logged; break background retry loop until next mutation or explicit flush
+        break;
+      }
+    }
+  } finally {
+    activeFlush = null;
+    if (dirty && lastWriteError === null) {
+      activeFlush = runFlushLoop();
+    }
+  }
+}
+
+/**
+ * Coalesced asynchronous write queue: schedules a non-blocking background write.
+ * Consecutive rapid mutations collapse into sequential non-racing writes.
+ */
+export function queueFlushToDisk(): Promise<void> {
+  pendingChanges++;
+  dirty = true;
+  if (!activeFlush) {
+    activeFlush = runFlushLoop();
+  }
+  return activeFlush;
+}
+
+/**
+ * Flushes all pending writes to disk and awaits completion (for testing and shutdown).
+ */
+export async function flushPendingWrites(): Promise<void> {
+  while (activeFlush) {
+    await activeFlush;
+  }
+  if (pendingChanges > 0 || dirty) {
+    dirty = false;
+    await flushSessionsToDisk();
   }
 }
 
@@ -167,7 +268,7 @@ export function createVerification(raw: unknown): VerificationSession {
 
   // Ensure baseline immutability: if id already exists, do not overwrite baseline
   if (cache.has(s.id)) {
-    throw new Error(`Verification session '${s.id}' already exists.`);
+    throw new VerificationDuplicateError(s.id);
   }
 
   const host = s.targetHost.trim().toLowerCase();
@@ -224,7 +325,7 @@ export function createVerification(raw: unknown): VerificationSession {
   };
 
   cache.set(cleanSession.id, cleanSession);
-  flushSessionsToDisk();
+  queueFlushToDisk();
   return cleanSession;
 }
 
@@ -237,7 +338,7 @@ export function patchVerification(
   const existing = cache.get(id);
 
   if (!existing) {
-    throw new Error(`Verification session '${id}' not found.`);
+    throw new VerificationNotFoundError(id);
   }
 
   if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
@@ -304,7 +405,7 @@ export function patchVerification(
   }
 
   cache.set(id, updated);
-  flushSessionsToDisk();
+  queueFlushToDisk();
   return updated;
 }
 
@@ -331,7 +432,7 @@ export function deleteVerification(id: string): boolean {
   const cache = getCache();
   const existed = cache.delete(id);
   if (existed) {
-    flushSessionsToDisk();
+    queueFlushToDisk();
   }
   return existed;
 }
