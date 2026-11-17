@@ -1078,6 +1078,32 @@ Diagnostic evaluation registered ${critCount} critical anomalies and ${warnCount
   };
 }
 
+export function isGemini4Model(modelId: string): boolean {
+  return modelId.trim().toLowerCase().startsWith('gemini-4-');
+}
+
+/**
+ * Builds model-compatible @google/genai GenerateContentConfig.
+ * Gemini 4 models (gemini-4-carbon, gemini-4-argon) do not accept deprecated sampling
+ * parameters (temperature, topP, topK, candidateCount) or thinkingBudget.
+ */
+export function buildGeminiGenerateConfig(
+  modelId: string,
+  systemInstruction: string
+): Record<string, any> {
+  const baseConfig: Record<string, any> = {
+    systemInstruction,
+    responseMimeType: 'application/json',
+    responseSchema: GEMINI_AUDIT_RESPONSE_SCHEMA,
+  };
+
+  if (!isGemini4Model(modelId)) {
+    baseConfig.temperature = 0.2;
+  }
+
+  return baseConfig;
+}
+
 export interface NarrativeOptions {
   enableAiNarrative?: boolean;
   allowSystemKeyFallback?: boolean;
@@ -1153,12 +1179,7 @@ export async function generateNarrative(
         const response = await ai.models.generateContent({
           model: currentModel,
           contents: userPrompt,
-          config: {
-            systemInstruction,
-            temperature: 0.2,
-            responseMimeType: 'application/json',
-            responseSchema: GEMINI_AUDIT_RESPONSE_SCHEMA,
-          },
+          config: buildGeminiGenerateConfig(currentModel, systemInstruction),
         });
 
         const text = response.text;

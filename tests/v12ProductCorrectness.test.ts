@@ -6,6 +6,7 @@ import {
   resolveGeminiModelId,
   resolveOpenAiModelId,
   resolveClaudeModelId,
+  buildGeminiGenerateConfig,
 } from '../server/narrator.js';
 import { computeScanComparison } from '../server/history.js';
 import { extractAfterMetricsForSession } from '../src/utils/verificationEngine.js';
@@ -15,6 +16,8 @@ import {
   AnalysisReport,
   ScanHistoryRecord,
   VerificationSession,
+  AVAILABLE_AI_MODELS,
+  getModelDisplayName,
 } from '../src/types.js';
 
 test('v12 FIX 1: Missing grants produce Incomplete verdict, never Optimized', () => {
@@ -166,7 +169,7 @@ test('v12 FIX 1: Verification engine checks report coverage directly', () => {
 });
 
 test('v12 FIX 2: AI model resolution fails fast without silent swapping on unknown models', () => {
-  // Repro model list from Brief:
+  // Repro model list + removed legacy Gemini models:
   const reproModels: Array<{ model: string; provider: import('../src/types.js').AiProvider }> = [
     { model: 'gpt-4o-mini', provider: 'openai' },
     { model: 'console-x', provider: 'openai' },
@@ -174,6 +177,10 @@ test('v12 FIX 2: AI model resolution fails fast without silent swapping on unkno
     { model: 'claude-sonnet-4-5', provider: 'claude' },
     { model: 'nonsense', provider: 'claude' },
     { model: 'gemini-3.7-flash', provider: 'gemini' },
+    { model: 'gemini-3.6-flash', provider: 'gemini' },
+    { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
+    { model: 'gemini-3.1-flash-lite', provider: 'gemini' },
+    { model: 'gemini-3.5-flash', provider: 'gemini' },
     { model: 'argon', provider: 'gemini' },
   ];
 
@@ -183,9 +190,43 @@ test('v12 FIX 2: AI model resolution fails fast without silent swapping on unkno
     assert.match(res.error || '', /unsupported model/i);
   }
 
-  // Valid models must pass
-  assert.equal(validateAiModel('gemini-3.8-flash', 'gemini').valid, true);
-  assert.equal(validateAiModel('gemini-4-argon', 'gemini').valid, true);
+  // Exact 5 active Gemini models must pass and match catalog order
+  const expectedGeminiIds = [
+    'gemini-4-carbon',
+    'gemini-4-argon',
+    'gemini-3.8-flash',
+    'gemini-3.1-pro',
+    'gemini-3.5-flash-lite',
+  ];
+  assert.deepEqual(
+    AVAILABLE_AI_MODELS.filter((m) => m.provider === 'gemini').map((m) => m.id),
+    expectedGeminiIds
+  );
+
+  for (const geminiId of expectedGeminiIds) {
+    const res = validateAiModel(geminiId, 'gemini');
+    assert.equal(res.valid, true, `Expected ${geminiId} to be valid`);
+    assert.equal(resolveGeminiModelId(geminiId), geminiId);
+  }
+  assert.equal(resolveGeminiModelId(undefined), 'gemini-3.8-flash');
+
+  assert.equal(getModelDisplayName('gemini-4-carbon'), 'Gemini 4 Carbon');
+  assert.equal(getModelDisplayName('gemini-4-argon'), 'Gemini 4 Argon');
+  assert.equal(getModelDisplayName('gemini-3.8-flash'), 'Gemini 3.8 Flash');
+  assert.equal(getModelDisplayName('gemini-3.1-pro'), 'Gemini 3.1 Pro');
+  assert.equal(getModelDisplayName('gemini-3.5-flash-lite'), 'Gemini 3.5 Flash-Lite');
+
+  // Gemini 4 models must omit deprecated sampling params (temperature), while Gemini 3.x retains temperature
+  const carbonConfig = buildGeminiGenerateConfig('gemini-4-carbon', 'System prompt');
+  assert.equal('temperature' in carbonConfig, false);
+  assert.equal(carbonConfig.responseMimeType, 'application/json');
+
+  const argonConfig = buildGeminiGenerateConfig('gemini-4-argon', 'System prompt');
+  assert.equal('temperature' in argonConfig, false);
+
+  const flashConfig = buildGeminiGenerateConfig('gemini-3.8-flash', 'System prompt');
+  assert.equal(flashConfig.temperature, 0.2);
+
   assert.equal(validateAiModel('gpt-5.4-mini', 'openai').valid, true);
   assert.equal(validateAiModel('gpt-5.6-luna', 'openai').valid, true);
   assert.equal(validateAiModel('claude-haiku-4-5-20251001', 'claude').valid, true);
@@ -193,6 +234,8 @@ test('v12 FIX 2: AI model resolution fails fast without silent swapping on unkno
 
   // Resolvers must throw rather than remapping
   assert.throws(() => resolveGeminiModelId('gemini-3.7-flash'), /unsupported model/i);
+  assert.throws(() => resolveGeminiModelId('gemini-3.6-flash'), /unsupported model/i);
+  assert.throws(() => resolveGeminiModelId('gemini-3.1-pro-preview'), /unsupported model/i);
   assert.throws(() => resolveOpenAiModelId('console-x'), /unsupported model/i);
   assert.throws(() => resolveClaudeModelId('nonsense'), /unsupported model/i);
 });

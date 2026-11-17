@@ -217,12 +217,11 @@ When enabled, Yachiru synthesizes deep root-cause analyses, executive summaries,
 
 | Provider | Model ID | Display Name | Positioning / Badge |
 |---|---|---|---|
-| **Google Gemini** | `gemini-3.8-flash` | Gemini 3.8 Flash | Balanced *(Default)* |
-| | `gemini-3.7-flash` | Gemini 3.7 Flash | Fast & Hybrid |
-| | `gemini-3.1-pro-preview` | Gemini 3.1 Pro | High Reasoning |
-| | `gemini-3.6-flash` | Gemini 3.6 Flash | High Throughput |
-| | `gemini-3.1-flash-lite` | Gemini 3.1 Flash-Lite | Ultra-Fast |
-| | `gemini-3.5-flash` | Gemini 3.5 Flash | Low Latency |
+| **Google Gemini** | `gemini-4-carbon` | Gemini 4 Carbon | Deep Reasoning (Next-Gen) |
+| | `gemini-4-argon` | Gemini 4 Argon | Complex Reasoning (Next-Gen) |
+| | `gemini-3.8-flash` | Gemini 3.8 Flash | Balanced *(Default)* |
+| | `gemini-3.1-pro` | Gemini 3.1 Pro | High Reasoning |
+| | `gemini-3.5-flash-lite` | Gemini 3.5 Flash-Lite | Ultra-Fast & Efficient |
 | **OpenAI** | `gpt-5.4-mini` | GPT-5.4 Mini | Fastest & Default *(Default)* |
 | | `gpt-6-astra` | GPT-6 Astra | Flagship (1.05M ctx) |
 | | `gpt-5.6-sol` | GPT-5.6 Sol | Flagship (Ultra Reasoning) |
