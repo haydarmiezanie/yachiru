@@ -49,7 +49,7 @@ export const AinarrativeCard: React.FC<AinarrativeCardProps> = ({
   const [aiProvider, setAiProvider] = useState<AiProvider>(initialProvider);
 
   const [geminiModel, setGeminiModel] = useState('gemini-3.8-flash');
-  const [openaiModel, setOpenaiModel] = useState('gpt-5.4-mini');
+  const [openaiModel, setOpenaiModel] = useState('gpt-6-luna');
   const [claudeModel, setClaudeModel] = useState('claude-haiku-4-5-20251001');
 
   const [geminiApiKey, setGeminiApiKey] = useState(() => {

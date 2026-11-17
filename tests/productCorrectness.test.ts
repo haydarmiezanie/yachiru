@@ -68,7 +68,8 @@ test('Product Correctness 2: AI model fallback chains fail fast without silently
   assert.deepEqual(getModelFallbackChain('custom-gemini-model'), ['custom-gemini-model']);
 
   // OpenAI model fallback chain returns only the user-selected model
-  assert.deepEqual(getOpenAiModelFallbackChain('gpt-5.6-luna'), ['gpt-5.6-luna']);
+  assert.deepEqual(getOpenAiModelFallbackChain('gpt-6-luna'), ['gpt-6-luna']);
+  assert.deepEqual(getOpenAiModelFallbackChain('gpt-6.1-sol'), ['gpt-6.1-sol']);
   assert.deepEqual(getOpenAiModelFallbackChain('gpt-6-astra'), ['gpt-6-astra']);
 
   // Claude model fallback chain returns only the user-selected model

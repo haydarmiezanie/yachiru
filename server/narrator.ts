@@ -562,7 +562,7 @@ export function validateAiModel(
 
   if (!model || typeof model !== 'string' || model.trim() === '') {
     const defaultModel =
-      inferredProvider === 'openai' ? 'gpt-5.4-mini' :
+      inferredProvider === 'openai' ? 'gpt-6-luna' :
       inferredProvider === 'claude' ? 'claude-haiku-4-5-20251001' : 'gemini-3.8-flash';
     return { valid: true, resolvedModel: defaultModel, provider: inferredProvider };
   }
@@ -642,38 +642,36 @@ export function getSupportedClaudeEffort(
 /**
  * Validates and clamps reasoning effort for OpenAI models according to specifications:
  * - gpt-6-astra: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+ * - gpt-6.1-sol: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+ * - gpt-6-luna: 'none' | 'low' | 'medium' | 'high' (no max/xhigh)
+ * - gpt-6.1-terra: 'none' | 'low' | 'medium' | 'high' (no max/xhigh)
  * - gpt-5.6-sol: 'none' | 'low' | 'medium' | 'high' | 'max'
- * - gpt-5.6-terra: 'none' | 'low' | 'medium' | 'high' (no max)
- * - gpt-5.6-luna: 'none' | 'low' | 'medium' | 'high' (no max)
- * - gpt-5.4-mini: 'low' | 'medium' | 'high' | 'xhigh'
- * Default universal choice is 'medium'.
+ * Default choice is 'high' for deeper ClickHouse diagnostics.
  */
 export function getSupportedReasoningEffort(modelId: string, requestedEffort?: string): string {
-  const defaultEffort = 'medium';
-  if (!requestedEffort) return defaultEffort;
-
-  const req = requestedEffort.toLowerCase();
+  const defaultEffort = 'high';
+  const req = (requestedEffort || defaultEffort).toLowerCase();
 
   switch (modelId) {
     case 'gpt-6-astra': {
       const allowed = ['low', 'medium', 'high', 'xhigh', 'max'];
+      if (req === 'none') return 'low';
+      return allowed.includes(req) ? req : defaultEffort;
+    }
+    case 'gpt-6.1-sol': {
+      const allowed = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
       return allowed.includes(req) ? req : defaultEffort;
     }
     case 'gpt-5.6-sol': {
       const allowed = ['none', 'low', 'medium', 'high', 'max'];
+      if (req === 'xhigh') return 'max';
       return allowed.includes(req) ? req : defaultEffort;
     }
-    case 'gpt-5.6-terra':
-    case 'gpt-5.6-luna': {
+    case 'gpt-6.1-terra':
+    case 'gpt-6-luna': {
       // Do not send 'max' or 'xhigh'
       const allowed = ['none', 'low', 'medium', 'high'];
       if (req === 'max' || req === 'xhigh') return 'high';
-      return allowed.includes(req) ? req : defaultEffort;
-    }
-    case 'gpt-5.4-mini': {
-      const allowed = ['low', 'medium', 'high', 'xhigh'];
-      if (req === 'max') return 'xhigh';
-      if (req === 'none') return 'low';
       return allowed.includes(req) ? req : defaultEffort;
     }
     default:
@@ -1351,7 +1349,7 @@ export async function generateNarrativeOpenAI(
           `[Yachiru] Requesting full OpenAI diagnosis via ${source} key with model: "${currentModel}" (attempt ${attempt}/${maxAttemptsForModel})`
         );
 
-        const reasoningEffort = getSupportedReasoningEffort(currentModel, 'medium');
+        const reasoningEffort = getSupportedReasoningEffort(currentModel, 'high');
 
         const response = await openaiClient.responses.create({
           model: currentModel,

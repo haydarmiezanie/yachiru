@@ -222,11 +222,11 @@ When enabled, Yachiru synthesizes deep root-cause analyses, executive summaries,
 | | `gemini-3.8-flash` | Gemini 3.8 Flash | Balanced *(Default)* |
 | | `gemini-3.1-pro` | Gemini 3.1 Pro | High Reasoning |
 | | `gemini-3.5-flash-lite` | Gemini 3.5 Flash-Lite | Ultra-Fast & Efficient |
-| **OpenAI** | `gpt-5.4-mini` | GPT-5.4 Mini | Fastest & Default *(Default)* |
-| | `gpt-6-astra` | GPT-6 Astra | Flagship (1.05M ctx) |
-| | `gpt-5.6-sol` | GPT-5.6 Sol | Flagship (Ultra Reasoning) |
-| | `gpt-5.6-terra` | GPT-5.6 Terra | Balanced (272K ctx) |
-| | `gpt-5.6-luna` | GPT-5.6 Luna | Fast & Efficient |
+| **OpenAI** | `gpt-6-astra` | GPT-6 Astra | Flagship (1.05M ctx) |
+| | `gpt-6.1-sol` | GPT-6.1 Sol | Flagship (Ultra Reasoning) |
+| | `gpt-6-luna` | GPT-6 Luna | Fast & Default *(Default)* |
+| | `gpt-6.1-terra` | GPT-6.1 Terra | Balanced (Next-Gen) |
+| | `gpt-5.6-sol` | GPT-5.6 Sol | Previous Gen Ultra Reasoning |
 | **Anthropic Claude** | `claude-haiku-4-5-20251001` | Claude Haiku 4.5 | Fastest & Default (200K ctx) *(Default)* |
 | | `claude-sonnet-5` | Claude Sonnet 5 | Balanced (1M ctx) |
 | | `claude-opus-5` | Claude Opus 5 | High-Capability (1M ctx) |

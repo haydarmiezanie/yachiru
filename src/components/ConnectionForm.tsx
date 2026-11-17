@@ -269,7 +269,7 @@ export const ConnectionForm: React.FC<ConnectionFormProps> = ({ onConnect, isLoa
     if (newProvider === 'gemini') {
       setSelectedModel('gemini-3.8-flash');
     } else if (newProvider === 'openai') {
-      setSelectedModel('gpt-5.4-mini');
+      setSelectedModel('gpt-6-luna');
     } else {
       setSelectedModel('claude-haiku-4-5-20251001');
     }

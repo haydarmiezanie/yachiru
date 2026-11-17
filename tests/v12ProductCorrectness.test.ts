@@ -7,6 +7,7 @@ import {
   resolveOpenAiModelId,
   resolveClaudeModelId,
   buildGeminiGenerateConfig,
+  getSupportedReasoningEffort,
 } from '../server/narrator.js';
 import { computeScanComparison } from '../server/history.js';
 import { extractAfterMetricsForSession } from '../src/utils/verificationEngine.js';
@@ -172,6 +173,9 @@ test('v12 FIX 2: AI model resolution fails fast without silent swapping on unkno
   // Repro model list + removed legacy Gemini models:
   const reproModels: Array<{ model: string; provider: import('../src/types.js').AiProvider }> = [
     { model: 'gpt-4o-mini', provider: 'openai' },
+    { model: 'gpt-5.4-mini', provider: 'openai' },
+    { model: 'gpt-5.6-luna', provider: 'openai' },
+    { model: 'gpt-5.6-terra', provider: 'openai' },
     { model: 'console-x', provider: 'openai' },
     { model: 'claude-opus-4-8', provider: 'claude' },
     { model: 'claude-sonnet-4-5', provider: 'claude' },
@@ -227,8 +231,41 @@ test('v12 FIX 2: AI model resolution fails fast without silent swapping on unkno
   const flashConfig = buildGeminiGenerateConfig('gemini-3.8-flash', 'System prompt');
   assert.equal(flashConfig.temperature, 0.2);
 
-  assert.equal(validateAiModel('gpt-5.4-mini', 'openai').valid, true);
-  assert.equal(validateAiModel('gpt-5.6-luna', 'openai').valid, true);
+  // Exact 5 active OpenAI models must pass and match catalog order
+  const expectedOpenAiIds = [
+    'gpt-6-astra',
+    'gpt-6.1-sol',
+    'gpt-6-luna',
+    'gpt-6.1-terra',
+    'gpt-5.6-sol',
+  ];
+  assert.deepEqual(
+    AVAILABLE_AI_MODELS.filter((m) => m.provider === 'openai').map((m) => m.id),
+    expectedOpenAiIds
+  );
+
+  for (const openAiId of expectedOpenAiIds) {
+    const res = validateAiModel(openAiId, 'openai');
+    assert.equal(res.valid, true, `Expected ${openAiId} to be valid`);
+    assert.equal(resolveOpenAiModelId(openAiId), openAiId);
+    assert.equal(getSupportedReasoningEffort(openAiId), 'high');
+  }
+  assert.equal(resolveOpenAiModelId(undefined), 'gpt-6-luna');
+
+  assert.equal(getModelDisplayName('gpt-6-astra'), 'GPT-6 Astra');
+  assert.equal(getModelDisplayName('gpt-6.1-sol'), 'GPT-6.1 Sol');
+  assert.equal(getModelDisplayName('gpt-6-luna'), 'GPT-6 Luna');
+  assert.equal(getModelDisplayName('gpt-6.1-terra'), 'GPT-6.1 Terra');
+  assert.equal(getModelDisplayName('gpt-5.6-sol'), 'GPT-5.6 Sol');
+
+  // Verify OpenAI reasoning effort clamping per model
+  assert.equal(getSupportedReasoningEffort('gpt-6-astra', 'max'), 'max');
+  assert.equal(getSupportedReasoningEffort('gpt-6-astra', 'none'), 'low');
+  assert.equal(getSupportedReasoningEffort('gpt-6.1-sol', 'xhigh'), 'xhigh');
+  assert.equal(getSupportedReasoningEffort('gpt-6-luna', 'max'), 'high');
+  assert.equal(getSupportedReasoningEffort('gpt-6.1-terra', 'xhigh'), 'high');
+  assert.equal(getSupportedReasoningEffort('gpt-5.6-sol', 'max'), 'max');
+
   assert.equal(validateAiModel('claude-haiku-4-5-20251001', 'claude').valid, true);
   assert.equal(validateAiModel('claude-sonnet-5', 'claude').valid, true);
 
@@ -237,6 +274,9 @@ test('v12 FIX 2: AI model resolution fails fast without silent swapping on unkno
   assert.throws(() => resolveGeminiModelId('gemini-3.6-flash'), /unsupported model/i);
   assert.throws(() => resolveGeminiModelId('gemini-3.1-pro-preview'), /unsupported model/i);
   assert.throws(() => resolveOpenAiModelId('console-x'), /unsupported model/i);
+  assert.throws(() => resolveOpenAiModelId('gpt-5.4-mini'), /unsupported model/i);
+  assert.throws(() => resolveOpenAiModelId('gpt-5.6-luna'), /unsupported model/i);
+  assert.throws(() => resolveOpenAiModelId('gpt-5.6-terra'), /unsupported model/i);
   assert.throws(() => resolveClaudeModelId('nonsense'), /unsupported model/i);
 });
 

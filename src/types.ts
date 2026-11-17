@@ -343,10 +343,10 @@ export const AVAILABLE_AI_MODELS: ModelOption[] = [
 
   // OpenAI models
   { id: 'gpt-6-astra', name: 'GPT-6 Astra', badge: 'Flagship (1.05M ctx)', provider: 'openai' },
-  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', badge: 'Flagship (Ultra Reasoning)', provider: 'openai' },
-  { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', badge: 'Balanced (272K ctx)', provider: 'openai' },
-  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', badge: 'Fast & Efficient', provider: 'openai' },
-  { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', badge: 'Fastest & Default', provider: 'openai' },
+  { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', badge: 'Flagship (Ultra Reasoning)', provider: 'openai' },
+  { id: 'gpt-6-luna', name: 'GPT-6 Luna', badge: 'Fast & Default', provider: 'openai' },
+  { id: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', badge: 'Balanced (Next-Gen)', provider: 'openai' },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', badge: 'Previous Gen Ultra Reasoning', provider: 'openai' },
 
   // Anthropic Claude models
   { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', badge: 'Fastest & Default (200K ctx)', provider: 'claude' },
@@ -379,6 +379,11 @@ export function getModelDisplayName(modelId?: string): string {
   if (clean === 'gemini-3.5-flash-lite') {
     return 'Gemini 3.5 Flash-Lite';
   }
+  if (clean === 'gpt-6-astra') return 'GPT-6 Astra';
+  if (clean === 'gpt-6.1-sol') return 'GPT-6.1 Sol';
+  if (clean === 'gpt-6-luna') return 'GPT-6 Luna';
+  if (clean === 'gpt-6.1-terra') return 'GPT-6.1 Terra';
+  if (clean === 'gpt-5.6-sol') return 'GPT-5.6 Sol';
 
   const matched = AVAILABLE_AI_MODELS.find(
     (m) => m.id.toLowerCase() === clean

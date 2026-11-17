@@ -260,7 +260,7 @@ In addition to connection fields (`host`, `port`, `protocol`, `username`, `passw
 | `queryMemoryThresholdBytes` | `number` | No | Minimum memory usage to flag in memory audit (default: 1073741824). |
 | `enableAiNarrative` | `boolean` | No | If `false` (recommended for CI/cron), runs purely deterministic rules with zero LLM API cost. |
 | `aiProvider` | `'gemini' \| 'openai' \| 'claude'` | No | Optional AI provider override. |
-| `geminiModel` | `string` | No | Target model (must match allowlist in `AVAILABLE_AI_MODELS`; Gemini IDs: `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash` [default], `gemini-3.1-pro`, `gemini-3.5-flash-lite`). |
+| `geminiModel` | `string` | No | Target model (must match allowlist in `AVAILABLE_AI_MODELS`; Gemini IDs: `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash` [default], `gemini-3.1-pro`, `gemini-3.5-flash-lite`; OpenAI IDs: `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` [default], `gpt-6.1-terra`, `gpt-5.6-sol`). |
 | `geminiApiKey` | `string` | No | Caller-provided Gemini API key (optional). |
 | `openaiApiKey` | `string` | No | Caller-provided OpenAI API key (optional). |
 | `claudeApiKey` | `string` | No | Caller-provided Anthropic Claude API key (optional). |
@@ -389,7 +389,7 @@ Synthesizes executive diagnoses and prioritized action items from an existing `A
 | :--- | :--- | :--- | :--- |
 | `report` | `AnalysisReport` | Yes | Existing analysis report (must contain non-empty `scan_id` and at most 250 `findings`). |
 | `provider` | `'gemini' \| 'openai' \| 'claude'` | No | Target AI provider. |
-| `model` | `string` | No | Valid model name (must match provider allowlist in `AVAILABLE_AI_MODELS`). Gemini allowlist: `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash` (default), `gemini-3.1-pro`, `gemini-3.5-flash-lite`. |
+| `model` | `string` | No | Valid model name (must match provider allowlist in `AVAILABLE_AI_MODELS`). Gemini allowlist: `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash` (default), `gemini-3.1-pro`, `gemini-3.5-flash-lite`. OpenAI allowlist: `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` (default), `gpt-6.1-terra`, `gpt-5.6-sol`. |
 | `geminiApiKey` | `string` | No | Optional client Gemini API key. |
 | `openaiApiKey` | `string` | No | Optional client OpenAI API key. |
 | `claudeApiKey` | `string` | No | Optional client Claude API key. |
